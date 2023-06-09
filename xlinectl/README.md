@@ -103,6 +103,32 @@ get [options] <key> [range_end]
 ./xlinectl get foo foo3
 ```
 
+### DELETE
+Deletes the key or a range of keys
+
+#### Usage
+
+```bash
+delete [options] <key> [range_end]
+```
+
+#### Options
+- prefix -- delete keys with matching prefix
+- prev_kv -- return deleted key-value pairs
+- from_key -- delete keys that are greater than or equal to the given key using byte compare
+
+#### Examples
+
+```bash
+# delete the key `foo`
+./xlinectl delete foo
+```
+
+```bash
+# delete all keys prefixed with `foo`
+./xlinectl delete foo --prefix
+```
+
 ### TXN
 ### WATCH
 ### LEASE

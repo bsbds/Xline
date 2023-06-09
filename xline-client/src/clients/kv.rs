@@ -460,7 +460,7 @@ impl From<RangeRequest> for xlineapi::RangeRequest {
 }
 
 /// Request for `DeleteRange`
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct DeleteRangeRequest {
     /// Inner request
     inner: xlineapi::DeleteRangeRequest,
