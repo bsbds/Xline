@@ -14,12 +14,19 @@ impl Printer {
         );
     }
 
+    /// Response key printer
+    pub(crate) fn key(key: &[u8]) {
+        println!("key: {}", String::from_utf8_lossy(key));
+    }
+
+    /// Response value printer
+    pub(crate) fn value(value: &[u8]) {
+        println!("value: {}", String::from_utf8_lossy(value));
+    }
+
     /// Response key-value printer
     pub(crate) fn kv(kv: &KeyValue) {
-        println!(
-            "key: {}, value: {}",
-            String::from_utf8_lossy(&kv.key),
-            String::from_utf8_lossy(&kv.value)
-        );
+        Self::key(&kv.key);
+        Self::value(&kv.value);
     }
 }

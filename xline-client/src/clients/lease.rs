@@ -201,7 +201,7 @@ impl LeaseKeeper {
 }
 
 /// Request for `LeaseGrant`
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct LeaseGrantRequest {
     /// Inner request
     inner: xlineapi::LeaseGrantRequest,
@@ -237,7 +237,7 @@ impl From<LeaseGrantRequest> for xlineapi::LeaseGrantRequest {
 }
 
 /// Request for `LeaseRevoke`
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct LeaseRevokeRequest {
     /// Inner request
     inner: xlineapi::LeaseRevokeRequest,
@@ -262,7 +262,7 @@ impl From<LeaseRevokeRequest> for xlineapi::LeaseRevokeRequest {
 }
 
 /// Request for `LeaseKeepAlive`
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct LeaseKeepAliveRequest {
     /// Inner request
     inner: xlineapi::LeaseKeepAliveRequest,
@@ -287,7 +287,7 @@ impl From<LeaseKeepAliveRequest> for xlineapi::LeaseKeepAliveRequest {
 }
 
 /// Request for `LeaseTimeToLive`
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct LeaseTimeToLiveRequest {
     /// Inner request
     inner: xlineapi::LeaseTimeToLiveRequest,
