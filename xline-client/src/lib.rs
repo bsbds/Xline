@@ -155,14 +155,39 @@ use std::{
 
 use curp::client::Client as CurpClient;
 use http::{header::AUTHORIZATION, HeaderValue, Request};
-use tonic::transport::Channel;
+use tonic::{transport::Channel, Streaming};
 use tower::Service;
 use utils::config::ClientTimeout;
 
+use xlineapi::{
+    AuthDisableResponse, AuthEnableResponse, AuthRoleAddResponse, AuthRoleDeleteResponse,
+    AuthRoleGetResponse, AuthRoleGrantPermissionResponse, AuthRoleListResponse,
+    AuthRoleRevokePermissionResponse, AuthStatusResponse, AuthUserAddResponse,
+    AuthUserChangePasswordResponse, AuthUserDeleteResponse, AuthUserGetResponse,
+    AuthUserGrantRoleResponse, AuthUserListResponse, AuthUserRevokeRoleResponse,
+    DeleteRangeResponse, LeaseGrantResponse, LeaseKeepAliveResponse, LeaseLeasesResponse,
+    LeaseRevokeResponse, LeaseTimeToLiveResponse, LockResponse, PutResponse, RangeResponse,
+    SnapshotResponse, TxnResponse, UnlockResponse, WatchResponse,
+};
+
 use crate::{
     clients::{
-        auth::AuthClient, cluster::ClusterClient, election::ElectionClient, kv::KvClient,
-        lease::LeaseClient, lock::LockClient, maintenance::MaintenanceClient, watch::WatchClient,
+        auth::{
+            AuthClient, AuthRoleAddRequest, AuthRoleDeleteRequest, AuthRoleGetRequest,
+            AuthRoleGrantPermissionRequest, AuthRoleRevokePermissionRequest, AuthUserAddRequest,
+            AuthUserChangePasswordRequest, AuthUserDeleteRequest, AuthUserGetRequest,
+            AuthUserGrantRoleRequest, AuthUserRevokeRoleRequest,
+        },
+        cluster::ClusterClient,
+        election::ElectionClient,
+        kv::{DeleteRangeRequest, KvClient, PutRequest, RangeRequest, Txn},
+        lease::{
+            LeaseClient, LeaseGrantRequest, LeaseKeepAliveRequest, LeaseKeeper, LeaseRevokeRequest,
+            LeaseTimeToLiveRequest,
+        },
+        lock::{LockClient, LockRequest, UnlockRequest},
+        maintenance::MaintenanceClient,
+        watch::{WatchClient, WatchRequest, Watcher},
     },
     error::{ClientError, Result},
 };
@@ -341,6 +366,347 @@ impl Client {
     #[must_use]
     pub fn election_client(&self) -> ElectionClient {
         self.election.clone()
+    }
+
+    /// Put the given key into the key-value store.
+    /// A put request increments the revision of the key-value store
+    /// and generates one event in the event history.
+    ///
+    /// # Errors
+    ///
+    /// If kv client failed to send request
+    #[inline]
+    pub async fn put(&mut self, request: PutRequest) -> Result<PutResponse> {
+        self.kv.put(request).await
+    }
+
+    /// Gets the key from the key-value store.
+    ///
+    /// # Errors
+    ///
+    /// If kv client failed to send request
+    #[inline]
+    pub async fn range(&mut self, request: RangeRequest) -> Result<RangeResponse> {
+        self.kv.range(request).await
+    }
+
+    /// Deletes the given key from the key-value store.
+    ///
+    /// # Errors
+    ///
+    /// If kv client failed to send request
+    #[inline]
+    pub async fn delete(&mut self, request: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        self.kv.delete(request).await
+    }
+
+    /// Processes multiple operations in a single transaction.
+    /// A txn request increments the revision of the key-value store
+    /// and generates events with the same revision for every completed operation.
+    /// It is not allowed to modify the same key several times within one txn.
+    ///
+    /// # Errors
+    ///
+    /// If kv client failed to send request
+    #[inline]
+    pub async fn txn(&mut self, request: Txn) -> Result<TxnResponse> {
+        self.kv.txn(request).await
+    }
+
+    /// Watches for events happening or that have happened. Both input and output
+    /// are streams; the input stream is for creating and canceling watcher and the output
+    /// stream sends events. The entire event history can be watched starting from the
+    /// last compaction revision.
+    ///
+    /// # Errors
+    ///
+    /// If watch client failed to send request
+    #[inline]
+    pub async fn watch(
+        &mut self,
+        reuqest: WatchRequest,
+    ) -> Result<(Watcher, Streaming<WatchResponse>)> {
+        self.watch.watch(reuqest).await
+    }
+
+    /// Creates a lease which expires if the server does not receive a keepAlive
+    /// within a given time to live period. All keys attached to the lease will be expired and
+    /// deleted if the lease expires. Each expired key generates a delete event in the event history.
+    ///
+    /// # Errors
+    ///
+    /// If lease client failed to send request
+    #[inline]
+    pub async fn lease_grant(&mut self, request: LeaseGrantRequest) -> Result<LeaseGrantResponse> {
+        self.lease.grant(request).await
+    }
+
+    /// Revokes a lease. All keys attached to the lease will expire and be deleted.
+    ///
+    /// # Errors
+    ///
+    /// If lease client failed to send request
+    #[inline]
+    pub async fn lease_revoke(
+        &mut self,
+        request: LeaseRevokeRequest,
+    ) -> Result<LeaseRevokeResponse> {
+        self.lease.revoke(request).await
+    }
+
+    /// Keeps the lease alive by streaming keep alive requests from the client
+    /// to the server and streaming keep alive responses from the server to the client.
+    ///
+    /// # Errors
+    ///
+    /// If lease client failed to send request
+    #[inline]
+    pub async fn lease_keep_alive(
+        &mut self,
+        request: LeaseKeepAliveRequest,
+    ) -> Result<(LeaseKeeper, Streaming<LeaseKeepAliveResponse>)> {
+        self.lease.keep_alive(request).await
+    }
+
+    /// Retrieves lease information.
+    ///
+    /// # Errors
+    ///
+    /// If lease client failed to send request
+    #[inline]
+    pub async fn lease_time_to_live(
+        &mut self,
+        request: LeaseTimeToLiveRequest,
+    ) -> Result<LeaseTimeToLiveResponse> {
+        self.lease.time_to_live(request).await
+    }
+
+    /// Lists all existing leases.
+    ///
+    /// # Errors
+    ///
+    /// If lease client failed to send request
+    #[inline]
+    pub async fn leases(&mut self) -> Result<LeaseLeasesResponse> {
+        self.lease.leases().await
+    }
+
+    /// Lock acquires a distributed shared lock on a given named lock.
+    /// On success, it will return a unique key that exists so long as the
+    /// lock is held by the caller. This key can be used in conjunction with
+    /// transactions to safely ensure updates to etcd only occur while holding
+    /// lock ownership. The lock is held until Unlock is called on the key or the
+    /// lease associate with the owner expires.
+    ///
+    /// # Errors
+    ///
+    /// If lock client failed to send request
+    #[inline]
+    pub async fn lock(&mut self, request: LockRequest) -> Result<LockResponse> {
+        self.lock.lock(request).await
+    }
+
+    /// Unlock takes a key returned by Lock and releases the hold on lock. The
+    /// next Lock caller waiting for the lock will then be woken up and given
+    /// ownership of the lock.
+    ///
+    /// # Errors
+    ///
+    /// If lock client failed to send request
+    #[inline]
+    pub async fn unlock(&mut self, request: UnlockRequest) -> Result<UnlockResponse> {
+        self.lock.unlock(request).await
+    }
+
+    /// Enables authentication.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn auth_enable(&mut self) -> Result<AuthEnableResponse> {
+        self.auth.auth_enable().await
+    }
+
+    /// Disables authentication.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn auth_disable(&mut self) -> Result<AuthDisableResponse> {
+        self.auth.auth_disable().await
+    }
+
+    /// Show authentication status.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn auth_status(&mut self) -> Result<AuthStatusResponse> {
+        self.auth.auth_status().await
+    }
+
+    /// Adds role.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn role_add(&mut self, request: AuthRoleAddRequest) -> Result<AuthRoleAddResponse> {
+        self.auth.role_add(request).await
+    }
+
+    /// Deletes role.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn role_delete(
+        &mut self,
+        request: AuthRoleDeleteRequest,
+    ) -> Result<AuthRoleDeleteResponse> {
+        self.auth.role_delete(request).await
+    }
+
+    /// Gets role.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn role_get(&mut self, request: AuthRoleGetRequest) -> Result<AuthRoleGetResponse> {
+        self.auth.role_get(request).await
+    }
+
+    /// Lists role.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn role_list(&mut self) -> Result<AuthRoleListResponse> {
+        self.auth.role_list().await
+    }
+
+    /// Grants role permission.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn role_grant_permission(
+        &mut self,
+        request: AuthRoleGrantPermissionRequest,
+    ) -> Result<AuthRoleGrantPermissionResponse> {
+        self.auth.role_grant_permission(request).await
+    }
+
+    /// Revokes role permission.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn role_revoke_permission(
+        &mut self,
+        request: AuthRoleRevokePermissionRequest,
+    ) -> Result<AuthRoleRevokePermissionResponse> {
+        self.auth.role_revoke_permission(request).await
+    }
+
+    /// Add an user.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn user_add(&mut self, request: AuthUserAddRequest) -> Result<AuthUserAddResponse> {
+        self.auth.user_add(request).await
+    }
+
+    /// Gets the user info by the user name.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn user_get(&mut self, request: AuthUserGetRequest) -> Result<AuthUserGetResponse> {
+        self.auth.user_get(request).await
+    }
+
+    /// Lists all users.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn user_list(&mut self) -> Result<AuthUserListResponse> {
+        self.auth.user_list().await
+    }
+
+    /// Deletes the given key from the key-value store.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn user_delete(
+        &mut self,
+        request: AuthUserDeleteRequest,
+    ) -> Result<AuthUserDeleteResponse> {
+        self.auth.user_delete(request).await
+    }
+
+    /// Change password for an user.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn user_change_password(
+        &mut self,
+        request: AuthUserChangePasswordRequest,
+    ) -> Result<AuthUserChangePasswordResponse> {
+        self.auth.user_change_password(request).await
+    }
+
+    /// Grant role for an user.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn user_grant_role(
+        &mut self,
+        request: AuthUserGrantRoleRequest,
+    ) -> Result<AuthUserGrantRoleResponse> {
+        self.auth.user_grant_role(request).await
+    }
+
+    /// Revoke role for an user.
+    ///
+    /// # Errors
+    ///
+    /// If auth client failed to send request
+    #[inline]
+    pub async fn user_revoke_role(
+        &mut self,
+        request: AuthUserRevokeRoleRequest,
+    ) -> Result<AuthUserRevokeRoleResponse> {
+        self.auth.user_revoke_role(request).await
+    }
+
+    /// Gets a snapshot of the entire backend from a member over a stream to a client.
+    ///
+    /// # Errors
+    ///
+    /// If maintenance client failed to send request
+    #[inline]
+    pub async fn snapshot(&mut self) -> Result<Streaming<SnapshotResponse>> {
+        self.maintenance.snapshot().await
     }
 }
 
