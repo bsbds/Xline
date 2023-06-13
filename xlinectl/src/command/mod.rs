@@ -12,3 +12,5 @@ pub(crate) mod lock;
 pub(crate) mod put;
 /// Snapshot command
 pub(crate) mod snapshot;
+/// User command
+pub(crate) mod user;

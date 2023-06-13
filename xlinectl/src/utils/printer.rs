@@ -19,6 +19,11 @@ impl Printer {
         println!("key: {}", String::from_utf8_lossy(key));
     }
 
+    /// Response key printer
+    pub(crate) fn range_end(range_end: &[u8]) {
+        println!("range_end: {}", String::from_utf8_lossy(range_end));
+    }
+
     /// Response value printer
     pub(crate) fn value(value: &[u8]) {
         println!("value: {}", String::from_utf8_lossy(value));

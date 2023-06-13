@@ -311,9 +311,106 @@ auth status
 ### ROLE REVOKE-PERMISSION
 ### USER
 ### USER ADD
+Add a new user
+
+#### Usage
+
+```bash
+add [options] <name> [password]
+```
+
+#### Options
+- no_password -- Create without password
+
+#### Examples
+```bash
+# Add a new user with a specified password
+./xlinectl --user=root:root user add foo bar
+
+# Add a new user without a password
+./xlinectl --user=root:root user add foo1 --no_password
+```
+
 ### USER GET
-### USER DELETE
+Get a new user
+
+#### Usage
+
+```bash
+get [options] <name>
+```
+
+#### Options
+- detail -- Show permissions of roles granted to the user
+
+#### Examples
+```bash
+# Get a user named `foo`
+./xlinectl --user=root:root user get foo
+
+# Get detailed information about a user named `foo`
+./xlinectl --user=root:root user get foo --detail
+```
+
 ### USER LIST
+List all users
+
+#### Usage
+
+```bash
+list
+```
+
+#### Examples
+```bash
+# List all users
+./xlinectl --user=root:root user list
+```
+
 ### USER PASSWD
+Change the password of a user
+
+#### Usage
+
+```bash
+passwd <name> <password>
+```
+
+#### Examples
+
+```bash
+# Change the password of user `foo` to `bar`
+./xlinectl --user=root:root user passwd foo bar
+```
+
 ### USER GRANT-ROLE
+Grant role to a user
+
+#### Usage
+
+```bash
+grant_role <name> <role>
+```
+
+#### Examples
+
+```bash
+# Grant `bar` role to the user `foo`
+./xlinectl --user=root:root revoke_role foo bar
+```
+
 ### USER REVOKE-ROLE
+Revoke role from a user
+
+#### Usage
+
+```bash
+revoke_role <name> <role>
+```
+
+#### Examples
+
+```bash
+# Revoke 'bar' role from the user 'foo'
+./xlinectl --user=root:root revoke_role foo bar
+```
