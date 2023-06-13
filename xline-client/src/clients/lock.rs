@@ -287,7 +287,7 @@ impl LockClient {
 }
 
 /// Request for `Lock`
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct LockRequest {
     /// inner request
     inner: xlineapi::LockRequest,
