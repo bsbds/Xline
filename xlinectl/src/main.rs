@@ -158,7 +158,7 @@ use ext_utils::config::ClientTimeout;
 use itertools::Itertools;
 use xline_client::{Client, ClientOptions};
 
-use crate::command::{delete, get, lease, lock, put, snapshot};
+use crate::command::{auth, delete, get, lease, lock, put, snapshot};
 
 /// Command definitions and parsers
 mod command;
@@ -213,6 +213,7 @@ fn cli() -> Command {
         .subcommand(lease::command())
         .subcommand(snapshot::command())
         .subcommand(lock::command())
+        .subcommand(auth::command())
 }
 
 /// Parse user name and password
@@ -271,6 +272,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = ClientOptions::new(user_opt, client_timeout_opt);
 
     let mut client = Client::connect(endpoints, options).await?;
-    handle_matches!(matches, client, { get, put, delete, lease, snapshot, lock });
+    handle_matches!(matches, client, { get, put, delete, lease, snapshot, lock, auth });
     Ok(())
 }

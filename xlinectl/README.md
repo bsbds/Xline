@@ -255,6 +255,53 @@ lock <lockname>
 ```
 ## Authentication commands
 ### AUTH
+Manage authentication
+
+### AUTH ENABLE
+Enable authentication
+
+#### Usage
+
+```bash
+auth enable
+```
+
+#### Examples
+```bash
+# Enable authentication
+./xlinectl auth enable
+```
+
+### AUTH DISABLE
+Disable authentication
+
+#### Usage
+
+```bash
+auth disable
+```
+
+#### Examples
+```bash
+# Disable authentication
+./xlinectl auth disable
+```
+
+### AUTH STATUS
+Status of authentication
+
+#### Usage
+
+```bash
+auth status
+```
+
+#### Examples
+```bash
+# Check the status of authentication
+./xlinectl auth status
+```
+
 ### ROLE
 ### ROLE ADD
 ### ROLE GET
