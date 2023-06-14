@@ -11,6 +11,7 @@ categories = ["Client"]
 keywords = ["Client", "CommandLine"]
 
 [dependencies]
+xline = { path = "../xline" }
 xline-client = { path = "../xline-client" }
 xlineapi = { path = "../xlineapi" }
 utils = { path = "../utils" }

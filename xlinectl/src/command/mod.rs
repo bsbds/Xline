@@ -10,6 +10,8 @@ pub(crate) mod lease;
 pub(crate) mod lock;
 /// Put command
 pub(crate) mod put;
+/// Role command
+pub(crate) mod role;
 /// Snapshot command
 pub(crate) mod snapshot;
 /// User command

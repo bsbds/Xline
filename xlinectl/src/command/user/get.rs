@@ -4,9 +4,9 @@ use xline_client::{
     error::Result,
     Client,
 };
-use xlineapi::{AuthRoleGetResponse, AuthUserGetResponse};
+use xlineapi::AuthUserGetResponse;
 
-use crate::utils::printer::Printer;
+use crate::command::role;
 
 /// Definition of `get` command
 pub(super) fn command() -> Command {
@@ -32,36 +32,24 @@ pub(super) async fn execute(client: &mut Client, matches: &ArgMatches) -> Result
     let resp = client.user_get(req).await?;
 
     if detail {
-        print_resp_user_get(name, &resp);
+        print_resp(name, &resp);
         for role in resp.roles {
             let resp_role_get = client.role_get(AuthRoleGetRequest::new(&role)).await?;
-            print_resp_role_get(&role, &resp_role_get);
+            role::get::print_resp(&role, &resp_role_get);
         }
     } else {
-        print_resp_user_get(name, &resp);
+        print_resp(name, &resp);
     }
 
     Ok(())
 }
 
 /// Printer of user get response
-fn print_resp_user_get(name: &str, resp: &AuthUserGetResponse) {
-    Printer::header(resp.header.as_ref());
+fn print_resp(name: &str, resp: &AuthUserGetResponse) {
     println!("User: {name}");
     println!("Roles: ");
     for role in &resp.roles {
         print!("{role}");
-    }
-}
-
-/// Printer of role get response
-fn print_resp_role_get(role: &str, resp: &AuthRoleGetResponse) {
-    Printer::header(resp.header.as_ref());
-    println!("Role: {role}");
-    for perm in &resp.perm {
-        println!("perm type: {}", perm.perm_type);
-        Printer::key(&perm.key);
-        Printer::range_end(&perm.range_end);
     }
 }
 

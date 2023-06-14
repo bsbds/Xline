@@ -303,12 +303,107 @@ auth status
 ```
 
 ### ROLE
+Role related commands
+
 ### ROLE ADD
+Create a new role
+
+#### Usage
+
+```bash
+add <name>
+```
+
+#### Examples
+
+```bash
+# add a new role named 'foo'
+./xlinectl --user=root:root role add foo
+```
+
 ### ROLE GET
+List role information
+
+#### Usage
+
+```bash
+get <name>
+```
+
+#### Examples
+
+```bash
+# Get role named 'foo'
+./xlinectl --user=root:root role get foo
+```
+
 ### ROLE DELETE
+Delete a role
+
+#### Usage
+
+```bash
+delete <name>
+```
+
+#### Examples
+```bash
+# delete the role named `foo`
+./xlinectl --user=root:root role delete foo
+```
+
 ### ROLE LIST
+List all roles
+
+#### Usage
+
+```bash
+list
+```
+
+#### Examples
+
+```bash
+# list all roles
+./xlinectl --user=root:root role list
+```
+
 ### ROLE GRANT-PERMISSION
+Grant permission to a role, including READ, WRITE or READWRITE
+
+#### Usage
+
+```bash
+grant_perm [options] <name> <perm_type> <key> [range_end]
+```
+
+#### Options
+- prefix -- Get keys with matching prefix
+- from_key -- Get keys that are greater than or equal to the given key using byte compare (conflicts with `range_end`)
+
+#### Examples
+
+```bash
+# Grant read permission to role 'foo' for key 'mykey' with read permission
+./xlinectl --user=root:root grant_perm foo READ mykey
+```
+
 ### ROLE REVOKE-PERMISSION
+Revoke permission from a role
+
+#### Usage
+
+```bash
+revoke_perm <name> <key> [range_end]
+```
+
+#### Examples
+
+```bash
+# Revoke permission from role 'foo' for the range from mykey to mykey2
+./xlinectl --user=root:root revoke_perm foo mykey mykey2
+```
+
 ### USER
 ### USER ADD
 Add a new user
