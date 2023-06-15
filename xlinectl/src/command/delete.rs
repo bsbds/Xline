@@ -58,7 +58,7 @@ pub(crate) async fn execute(client: &mut Client, matches: &ArgMatches) -> Result
 }
 
 /// Printer of delete response
-fn print_resp(resp: &DeleteRangeResponse) {
+pub(crate) fn print_resp(resp: &DeleteRangeResponse) {
     Printer::header(resp.header.as_ref());
     println!("kvs:");
     for kv in &resp.prev_kvs {

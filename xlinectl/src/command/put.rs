@@ -50,7 +50,7 @@ pub(crate) async fn execute(client: &mut Client, matches: &ArgMatches) -> Result
 }
 
 /// Printer of put response
-fn print_resp(resp: &PutResponse) {
+pub(crate) fn print_resp(resp: &PutResponse) {
     Printer::header(resp.header.as_ref());
     if let Some(pre_kv) = resp.prev_kv.as_ref() {
         Printer::kv(pre_kv);

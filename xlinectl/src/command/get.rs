@@ -112,7 +112,7 @@ pub(crate) async fn execute(client: &mut Client, matches: &ArgMatches) -> Result
 }
 
 /// Printer of range response
-fn print_resp(resp: &RangeResponse) {
+pub(crate) fn print_resp(resp: &RangeResponse) {
     Printer::header(resp.header.as_ref());
     println!("kvs:");
     for kv in &resp.kvs {

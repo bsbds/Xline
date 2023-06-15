@@ -26,3 +26,9 @@ impl From<ParseIntError> for CtlError {
         Self::InvalidArgs(value.to_string())
     }
 }
+
+impl From<clap::error::Error> for CtlError {
+    fn from(value: clap::error::Error) -> Self {
+        Self::InvalidArgs(value.to_string())
+    }
+}

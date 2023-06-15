@@ -14,5 +14,7 @@ pub(crate) mod put;
 pub(crate) mod role;
 /// Snapshot command
 pub(crate) mod snapshot;
+/// Txn command
+pub(crate) mod txn;
 /// User command
 pub(crate) mod user;
