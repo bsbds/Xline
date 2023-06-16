@@ -191,6 +191,42 @@ put key2 "some-val"
 ```
 
 ### WATCH
+Watches events stream on keys or prefixes
+
+#### Usage
+```bash
+watch [options] [key] [range_end]
+```
+
+#### Options
+- prefix -- Watch a prefix
+- rev -- Revision to start watching
+- pre_kv -- Get the previous key-value pair before the event happens
+- progress_notify -- Get periodic watch progress notification from server
+- interactive -- Interactive mode
+
+#### Examples
+
+non-interactive mode, which will continuously get output from response stream
+```bash
+# Watch key `foo`
+./xlinectl watch foo
+```
+```bash
+# Watch a range of keys from foo to foo3
+./xlinectl watch foo foo3
+```
+
+interactive mode, which can start or cancel a watch
+```bash
+./xlinectl watch --interactive
+
+watch foo foo3
+
+# assume the returned watch id is 100 in previous command
+cancel 100
+```
+
 ### LEASE
 ### LEASE GRANT
 Create a lease with a given TTL
