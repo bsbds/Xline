@@ -170,6 +170,7 @@ where
                 debug!("Receive LeaseKeepAliveRequest {:?}", keep_alive_req);
                 // TODO wait applied index
                 let ttl = if lease_storage.is_primary() {
+                    lease_storage.wait_synced(keep_alive_req.id).await;
                     lease_storage.keep_alive(keep_alive_req.id).map_err(|e| {
                         tonic::Status::invalid_argument(format!("Keep alive error: {e}",))})
                 } else {
@@ -332,6 +333,8 @@ where
             if self.lease_storage.is_primary() {
                 // TODO wait applied index
                 let time_to_live_req = request.into_inner();
+
+                self.lease_storage.wait_synced(time_to_live_req.id).await;
                 let Some(lease) = self.lease_storage.look_up(time_to_live_req.id) else {
                     return Err(tonic::Status::not_found("Lease not found"));
                 };

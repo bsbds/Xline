@@ -6,6 +6,7 @@ mod lease_collection;
 mod lease_queue;
 
 use std::{
+    collections::HashSet,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -15,7 +16,7 @@ use std::{
 
 use log::debug;
 use prost::Message;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify, RwLock};
 
 pub(crate) use self::{lease::Lease, lease_collection::LeaseCollection};
 use super::{db::WriteOp, index::Index, storage_api::StorageApi, ExecuteError};
@@ -53,6 +54,10 @@ where
     kv_update_tx: mpsc::Sender<(i64, Vec<Event>)>,
     /// Primary flag
     is_primary: AtomicBool,
+    /// cache unsynced lease id
+    unsynced_cache: Arc<RwLock<HashSet<i64>>>,
+    /// notify sync event
+    sync_event: Notify,
 }
 
 impl<DB> LeaseStore<DB>
@@ -75,15 +80,18 @@ where
             header_gen,
             kv_update_tx,
             is_primary: AtomicBool::new(is_leader),
+            unsynced_cache: Arc::new(RwLock::new(HashSet::new())),
+            sync_event: Notify::new(),
         }
     }
 
     /// execute a lease request
-    pub(crate) fn execute(
+    pub(crate) async fn execute(
         &self,
         request: &RequestWithToken,
     ) -> Result<CommandResponse, ExecuteError> {
         self.handle_lease_requests(&request.request)
+            .await
             .map(CommandResponse::new)
     }
 
@@ -156,6 +164,33 @@ where
     pub(crate) fn is_primary(&self) -> bool {
         self.is_primary.load(Ordering::Relaxed)
     }
+
+    /// Make lease synced, remove it from `unsynced_cache`
+    pub(crate) async fn mark_lease_synced(&self, wrapper: &RequestWrapper) {
+        #[allow(clippy::wildcard_enum_match_arm)] // only the following two type are allowed
+        let lease_id = match *wrapper {
+            RequestWrapper::LeaseGrantRequest(ref req) => req.id,
+            RequestWrapper::LeaseRevokeRequest(ref req) => req.id,
+            _ => {
+                return;
+            }
+        };
+
+        _ = self.unsynced_cache.write().await.remove(&lease_id);
+        self.sync_event.notify_waiters();
+    }
+
+    /// Wait for the lease id to be removed from the cache
+    pub(crate) async fn wait_synced(&self, lease_id: i64) {
+        loop {
+            let contains_id = self.unsynced_cache.read().await.contains(&lease_id);
+            if contains_id {
+                self.sync_event.notified().await;
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 impl<DB> LeaseStore<DB>
@@ -163,7 +198,7 @@ where
     DB: StorageApi,
 {
     /// Handle lease requests
-    fn handle_lease_requests(
+    async fn handle_lease_requests(
         &self,
         wrapper: &RequestWrapper,
     ) -> Result<ResponseWrapper, ExecuteError> {
@@ -172,11 +207,11 @@ where
         let res = match *wrapper {
             RequestWrapper::LeaseGrantRequest(ref req) => {
                 debug!("Receive LeaseGrantRequest {:?}", req);
-                self.handle_lease_grant_request(req).map(Into::into)
+                self.handle_lease_grant_request(req).await.map(Into::into)
             }
             RequestWrapper::LeaseRevokeRequest(ref req) => {
                 debug!("Receive LeaseRevokeRequest {:?}", req);
-                self.handle_lease_revoke_request(req).map(Into::into)
+                self.handle_lease_revoke_request(req).await.map(Into::into)
             }
             RequestWrapper::LeaseLeasesRequest(ref req) => {
                 debug!("Receive LeaseLeasesRequest {:?}", req);
@@ -188,7 +223,7 @@ where
     }
 
     /// Handle `LeaseGrantRequest`
-    fn handle_lease_grant_request(
+    async fn handle_lease_grant_request(
         &self,
         req: &LeaseGrantRequest,
     ) -> Result<LeaseGrantResponse, ExecuteError> {
@@ -202,6 +237,8 @@ where
             return Err(ExecuteError::lease_already_exists(req.id));
         }
 
+        _ = self.unsynced_cache.write().await.insert(req.id);
+
         Ok(LeaseGrantResponse {
             header: Some(self.header_gen.gen_header_without_revision()),
             id: req.id,
@@ -211,11 +248,13 @@ where
     }
 
     /// Handle `LeaseRevokeRequest`
-    fn handle_lease_revoke_request(
+    async fn handle_lease_revoke_request(
         &self,
         req: &LeaseRevokeRequest,
     ) -> Result<LeaseRevokeResponse, ExecuteError> {
         if self.lease_collection.contains_lease(req.id) {
+            _ = self.unsynced_cache.write().await.insert(req.id);
+
             Ok(LeaseRevokeResponse {
                 header: Some(self.header_gen.gen_header_without_revision()),
             })
@@ -401,7 +440,7 @@ mod test {
         req: &RequestWithToken,
         revision: i64,
     ) -> Result<ResponseWrapper, ExecuteError> {
-        let cmd_res = ls.execute(req)?;
+        let cmd_res = ls.execute(req).await?;
         let (_ignore, ops) = ls.after_sync(req, revision).await?;
         ls.db.flush_ops(ops)?;
         Ok(cmd_res.decode())

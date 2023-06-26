@@ -321,7 +321,7 @@ where
         let res = match wrapper.request.backend() {
             RequestBackend::Kv => self.kv_storage.execute(wrapper),
             RequestBackend::Auth => self.auth_storage.execute(wrapper),
-            RequestBackend::Lease => self.lease_storage.execute(wrapper),
+            RequestBackend::Lease => self.lease_storage.execute(wrapper).await,
         };
         match res {
             Ok(res) => Ok(res),
@@ -349,6 +349,7 @@ where
         ops.append(&mut wr_ops);
         self.persistent.flush_ops(ops)?;
         self.kv_storage.mark_index_available(res.revision());
+        self.lease_storage.mark_lease_synced(&wrapper.request).await;
         self.id_barrier.trigger(cmd.id());
         self.index_barrier.trigger(index);
         Ok(res)
