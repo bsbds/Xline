@@ -1,8 +1,8 @@
 //! The following tests are originally from `etcd-client`
 use common::get_cluster_client;
 use xline_client::{
-    clients::kv::{Compare, DeleteRangeRequest, PutRequest, RangeRequest, Txn, TxnOp},
     error::Result,
+    types::kv::{Compare, DeleteRangeRequest, PutRequest, RangeRequest, Txn, TxnOp},
 };
 use xlineapi::CompareResult;
 
