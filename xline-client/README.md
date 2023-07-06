@@ -54,40 +54,43 @@ Add `xline-client` to your `Cargo.toml`:
 xline-client = { git = "https://github.com/xline-kv/Xline.git", package = "xline-client" }
 ```
 To create a xline client:
-```rust
-use xline_client::{
-    Client,
-    error::Error,
-    types::kv::{PutRequest, RangeRequest},
-};
 
-#[tokio::main]
-async fn main() -> Result<(), Error> {
-    // the name and address of all curp members
-    let curp_members = [
-        ("server0", "10.0.0.1:2379"),
-        ("server1", "10.0.0.2:2379"),
-        ("server2", "10.0.0.3:2379"),
-    ]
-    .map(|(s, a)| (s.to_owned(), a.to_owned()));
+ ```rust, no_run
+ use xline_client::{
+     error::ClientError as Error,
+     types::kv::{PutRequest, RangeRequest},
+     Client, ClientOptions,
+ };
 
-    let client = Client::connect(curp_members.into(), ClientOptions::default()).await?;
+ #[tokio::main]
+ async fn main() -> Result<(), Error> {
+     // the name and address of all curp members
+     let curp_members = [
+         ("server0", "10.0.0.1:2379"),
+         ("server1", "10.0.0.2:2379"),
+         ("server2", "10.0.0.3:2379"),
+     ]
+     .map(|(s, a)| (s.to_owned(), a.to_owned()));
 
-    client.put(PutRequest::new("key", "value")).await?;
+     let mut client = Client::connect(curp_members.into(), ClientOptions::default())
+         .await?
+         .kv_client();
 
-    let resp = client.range(RangeRequest::new("key")).await?;
+     client.put(PutRequest::new("key", "value")).await?;
 
-    if let Some(kv) = resp.kvs.first() {
-        println!(
-            "got key: {}, value: {}",
-            String::from_utf8_lossy(&kv.key),
-            String::from_utf8_lossy(&kv.value)
-        );
-    }
+     let resp = client.range(RangeRequest::new("key")).await?;
 
-    Ok(())
-}
-```
+     if let Some(kv) = resp.kvs.first() {
+         println!(
+             "got key: {}, value: {}",
+             String::from_utf8_lossy(&kv.key),
+             String::from_utf8_lossy(&kv.value)
+         );
+     }
+
+     Ok(())
+ }
+ ```
 
 ## Xline Compatibility
 
