@@ -1,9 +1,9 @@
 use thiserror::Error;
 
-/// Xline client result
+/// The result type for `xline-client`
 pub type Result<T> = std::result::Result<T, ClientError>;
 
-/// Client Error
+/// The Error type for `xline-client`
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ClientError {

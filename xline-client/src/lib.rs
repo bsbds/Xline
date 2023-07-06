@@ -252,17 +252,17 @@ use utils::config::ClientTimeout;
 
 use crate::{
     clients::{
-        auth::AuthClient, cluster::ClusterClient, election::ElectionClient, kv::KvClient,
-        lease::LeaseClient, lock::LockClient, maintenance::MaintenanceClient, watch::WatchClient,
+        AuthClient, ClusterClient, ElectionClient, KvClient, LeaseClient, LockClient,
+        MaintenanceClient, WatchClient,
     },
     error::{ClientError, Result},
 };
 
-/// Clients
+/// Sub-clients for each type of API
 pub mod clients;
-/// Error.
+/// Error definitions for `xline-client`.
 pub mod error;
-/// Request types
+/// Request type definitions.
 pub mod types;
 
 /// Xline client
