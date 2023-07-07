@@ -3,7 +3,7 @@ use common::get_cluster_client;
 use test_macros::abort_on_panic;
 use xline_client::{
     error::Result,
-    types::kv::{Compare, DeleteRangeRequest, PutRequest, RangeRequest, Txn, TxnOp},
+    types::kv::{Compare, DeleteRangeRequest, PutRequest, RangeRequest, TxnRequest, TxnOp},
 };
 use xlineapi::CompareResult;
 
@@ -180,7 +180,7 @@ async fn test_txn() -> Result<()> {
     {
         let resp = client
             .txn(
-                Txn::new()
+                TxnRequest::new()
                     .when(&[Compare::value("txn01", CompareResult::Equal, "01")][..])
                     .and_then(
                         &[TxnOp::put(
@@ -211,7 +211,7 @@ async fn test_txn() -> Result<()> {
     {
         let resp = client
             .txn(
-                Txn::new()
+                TxnRequest::new()
                     .when(&[Compare::value("txn01", CompareResult::Equal, "01")][..])
                     .and_then(&[TxnOp::put(PutRequest::new("txn01", "02"))][..])
                     .or_else(&[TxnOp::range(RangeRequest::new("txn01"))][..]),

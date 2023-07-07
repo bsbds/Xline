@@ -1,7 +1,7 @@
 use xline::server::KeyRange;
 use xlineapi::{CompareResult, CompareTarget, SortOrder, SortTarget, TargetUnion};
 
-/// Request for `Put`
+/// Request type for `Put`
 #[derive(Debug)]
 pub struct PutRequest {
     /// inner request
@@ -9,7 +9,7 @@ pub struct PutRequest {
 }
 
 impl PutRequest {
-    /// New `PutRequest`
+    /// Creates a new `PutRequest`
     #[inline]
     pub fn new(key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -21,7 +21,8 @@ impl PutRequest {
         }
     }
 
-    /// Set `lease`
+    /// lease is the lease ID to associate with the key in the key-value store.
+    /// A lease value of 0 indicates no lease.
     #[inline]
     #[must_use]
     pub fn with_lease(mut self, lease: i64) -> Self {
@@ -29,7 +30,8 @@ impl PutRequest {
         self
     }
 
-    /// Set `prev_kv`
+    /// If `prev_kv` is set, Xline gets the previous key-value pair before changing it.
+    /// The previous key-value pair will be returned in the put response.
     #[inline]
     #[must_use]
     pub fn with_prev_kv(mut self, prev_kv: bool) -> Self {
@@ -37,7 +39,8 @@ impl PutRequest {
         self
     }
 
-    /// Set `ignore_value`
+    /// If `ignore_value` is set, Xline updates the key using its current value.
+    /// Returns an error if the key does not exist.
     #[inline]
     #[must_use]
     pub fn with_ignore_value(mut self, ignore_value: bool) -> Self {
@@ -45,7 +48,8 @@ impl PutRequest {
         self
     }
 
-    /// Set `ignore_lease`
+    /// If `ignore_lease` is set, Xline updates the key using its current lease.
+    /// Returns an error if the key does not exist.
     #[inline]
     #[must_use]
     pub fn with_ignore_lease(mut self, ignore_lease: bool) -> Self {
@@ -103,7 +107,7 @@ impl From<PutRequest> for xlineapi::PutRequest {
     }
 }
 
-/// Request for `Range`
+/// Request type for `Range`
 #[derive(Debug)]
 pub struct RangeRequest {
     /// Inner request
@@ -111,7 +115,7 @@ pub struct RangeRequest {
 }
 
 impl RangeRequest {
-    /// New `RangeRequest`
+    /// Creates a new `RangeRequest`
     #[inline]
     pub fn new(key: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -122,7 +126,7 @@ impl RangeRequest {
         }
     }
 
-    /// Set `key` and `range_end` when with prefix
+    /// If set, Xline will return all keys with the matching prefix
     #[inline]
     #[must_use]
     pub fn with_prefix(mut self) -> Self {
@@ -135,7 +139,7 @@ impl RangeRequest {
         self
     }
 
-    /// Set `key` and `range_end` when with from key
+    /// If set, Xline will return all keys that are equal or greater than the given key
     #[inline]
     #[must_use]
     pub fn with_from_key(mut self) -> Self {
@@ -146,7 +150,8 @@ impl RangeRequest {
         self
     }
 
-    /// Set `range_end`
+    /// `range_end` is the upper bound on the requested range \[key,` range_en`d).
+    /// If `range_end` is '\0', the range is all keys >= key.
     #[inline]
     #[must_use]
     pub fn with_range_end(mut self, range_end: impl Into<Vec<u8>>) -> Self {
@@ -154,7 +159,8 @@ impl RangeRequest {
         self
     }
 
-    /// Set `limit`
+    /// limit is a limit on the number of keys returned for the request. When limit is set to 0,
+    /// it is treated as no limit.
     #[inline]
     #[must_use]
     pub fn with_limit(mut self, limit: i64) -> Self {
@@ -162,7 +168,8 @@ impl RangeRequest {
         self
     }
 
-    /// Set `revision`
+    /// revision is the point-in-time of the key-value store to use for the range.
+    /// If revision is less or equal to zero, the range is over the newest key-value store.
     #[inline]
     #[must_use]
     pub fn with_revision(mut self, revision: i64) -> Self {
@@ -170,7 +177,7 @@ impl RangeRequest {
         self
     }
 
-    /// Set `sort_order`
+    /// Sets the sort order for returned keys
     #[inline]
     #[must_use]
     #[allow(clippy::as_conversions)] // this case is always safe
@@ -179,7 +186,7 @@ impl RangeRequest {
         self
     }
 
-    /// Set `sort_target`
+    /// Sets the sort target for returned keys
     #[inline]
     #[must_use]
     #[allow(clippy::as_conversions)] // this case is always safe
@@ -188,7 +195,12 @@ impl RangeRequest {
         self
     }
 
-    /// Set `serializable`
+    /// serializable sets the range request to use serializable member-local reads.
+    /// Range requests are linearizable by default; linearizable requests have higher
+    /// latency and lower throughput than serializable requests but reflect the current
+    /// consensus of the cluster. For better performance, in exchange for possible stale reads,
+    /// a serializable range request is served locally without needing to reach consensus
+    /// with other nodes in the cluster.
     #[inline]
     #[must_use]
     pub fn with_serializable(mut self, serializable: bool) -> Self {
@@ -196,7 +208,7 @@ impl RangeRequest {
         self
     }
 
-    /// Set `keys_only`
+    /// If set, Xline will return only the keys
     #[inline]
     #[must_use]
     pub fn with_keys_only(mut self, keys_only: bool) -> Self {
@@ -204,7 +216,7 @@ impl RangeRequest {
         self
     }
 
-    /// Set `count_only`
+    /// If set, Xline will return only the count of the keys
     #[inline]
     #[must_use]
     pub fn with_count_only(mut self, count_only: bool) -> Self {
@@ -212,7 +224,8 @@ impl RangeRequest {
         self
     }
 
-    /// Set `min_mod_revision`
+    /// `min_mod_revision` is the lower bound for returned key mod revisions; all keys with
+    /// lesser mod revisions will be filtered away.
     #[inline]
     #[must_use]
     pub fn with_min_mod_revision(mut self, min_mod_revision: i64) -> Self {
@@ -220,7 +233,8 @@ impl RangeRequest {
         self
     }
 
-    /// Set `max_mod_revision`
+    /// `max_mod_revision` is the upper bound for returned key mod revisions; all keys with
+    /// greater mod revisions will be filtered away.
     #[inline]
     #[must_use]
     pub fn with_max_mod_revision(mut self, max_mod_revision: i64) -> Self {
@@ -228,7 +242,8 @@ impl RangeRequest {
         self
     }
 
-    /// Set `min_create_revision`
+    /// `min_create_revision` is the lower bound for returned key create revisions; all keys with
+    /// lesser create revisions will be filtered away.
     #[inline]
     #[must_use]
     pub fn with_min_create_revision(mut self, min_create_revision: i64) -> Self {
@@ -236,7 +251,8 @@ impl RangeRequest {
         self
     }
 
-    /// Set `max_create_revision`
+    /// `max_create_revision` is the upper bound for returned key create revisions; all keys with
+    /// greater create revisions will be filtered away.
     #[inline]
     #[must_use]
     pub fn with_max_create_revision(mut self, max_create_revision: i64) -> Self {
@@ -343,7 +359,7 @@ impl From<RangeRequest> for xlineapi::RangeRequest {
     }
 }
 
-/// Request for `DeleteRange`
+/// Request type for `DeleteRange`
 #[derive(Debug)]
 pub struct DeleteRangeRequest {
     /// Inner request
@@ -351,7 +367,7 @@ pub struct DeleteRangeRequest {
 }
 
 impl DeleteRangeRequest {
-    /// New `DeleteRangeRequest`
+    /// Creates a new `DeleteRangeRequest`
     #[inline]
     pub fn new(key: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -362,7 +378,7 @@ impl DeleteRangeRequest {
         }
     }
 
-    /// Set `key` and `range_end` when with prefix
+    /// If set, Xline will delete all keys with the matching prefix
     #[inline]
     #[must_use]
     pub fn with_prefix(mut self) -> Self {
@@ -375,7 +391,7 @@ impl DeleteRangeRequest {
         self
     }
 
-    /// Set `key` and `range_end` when with from key
+    /// If set, Xline will delete all keys that are equal or greater than the given key
     #[inline]
     #[must_use]
     pub fn with_from_key(mut self) -> Self {
@@ -386,7 +402,11 @@ impl DeleteRangeRequest {
         self
     }
 
-    /// Set `range_end`
+    /// `range_end` is the key following the last key to delete for the range \[key,` range_en`d).
+    /// If `range_end` is not given, the range is defined to contain only the key argument.
+    /// If `range_end` is one bit larger than the given key, then the range is all the keys
+    /// with the prefix (the given key).
+    /// If `range_end` is '\0', the range is all keys greater than or equal to the key argument.
     #[inline]
     #[must_use]
     pub fn with_range_end(mut self, range_end: impl Into<Vec<u8>>) -> Self {
@@ -394,7 +414,8 @@ impl DeleteRangeRequest {
         self
     }
 
-    /// Set `prev_kv`
+    /// If `prev_kv` is set, Xline gets the previous key-value pairs before deleting it.
+    /// The previous key-value pairs will be returned in the delete response.
     #[inline]
     #[must_use]
     pub fn with_prev_kv(mut self, prev_kv: bool) -> Self {
@@ -528,7 +549,7 @@ pub struct TxnOp {
 }
 
 impl TxnOp {
-    /// `Put` operation.
+    /// Creates a `Put` operation.
     #[inline]
     #[must_use]
     pub fn put(reqeust: PutRequest) -> Self {
@@ -537,7 +558,7 @@ impl TxnOp {
         }
     }
 
-    /// `Get` operation.
+    /// Creates a `Range` operation.
     #[inline]
     #[must_use]
     pub fn range(request: RangeRequest) -> Self {
@@ -546,7 +567,7 @@ impl TxnOp {
         }
     }
 
-    /// `Delete` operation.
+    /// Creates a `DeleteRange` operation.
     #[inline]
     #[must_use]
     pub fn delete(request: DeleteRangeRequest) -> Self {
@@ -555,10 +576,10 @@ impl TxnOp {
         }
     }
 
-    /// `Txn` operation.
+    /// Creates a `Txn` operation.
     #[inline]
     #[must_use]
-    pub fn txn(txn: Txn) -> Self {
+    pub fn txn(txn: TxnRequest) -> Self {
         TxnOp {
             inner: xlineapi::Request::RequestTxn(txn.into()),
         }
@@ -574,7 +595,7 @@ impl From<TxnOp> for xlineapi::Request {
 
 /// Transaction of multiple operations.
 #[derive(Debug)]
-pub struct Txn {
+pub struct TxnRequest {
     /// the inner txn request
     pub(crate) req: xlineapi::TxnRequest,
     /// if `when` have be set
@@ -585,7 +606,7 @@ pub struct Txn {
     c_else: bool,
 }
 
-impl Txn {
+impl TxnRequest {
     /// Creates a new transaction.
     #[inline]
     #[must_use]
@@ -668,9 +689,9 @@ impl Txn {
     }
 }
 
-impl From<Txn> for xlineapi::TxnRequest {
+impl From<TxnRequest> for xlineapi::TxnRequest {
     #[inline]
-    fn from(txn: Txn) -> Self {
+    fn from(txn: TxnRequest) -> Self {
         txn.req
     }
 }
