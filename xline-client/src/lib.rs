@@ -264,6 +264,10 @@ pub mod clients;
 pub mod error;
 /// Request type definitions.
 pub mod types;
+/// Xline proto types API
+pub mod api_types {
+    pub use xlineapi::*;
+}
 
 /// Xline client
 #[derive(Clone, Debug)]

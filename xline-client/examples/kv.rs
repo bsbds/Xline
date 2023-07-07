@@ -1,9 +1,9 @@
 use xline_client::{
+    api::CompareResult,
     error::ClientError as Error,
     types::kv::{Compare, DeleteRangeRequest, PutRequest, RangeRequest, TxnOp, TxnRequest},
     Client, ClientOptions,
 };
-use xlineapi::CompareResult;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
