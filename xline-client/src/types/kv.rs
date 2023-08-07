@@ -474,7 +474,7 @@ impl Compare {
     /// `target` is the key-value field to inspect for the comparison.
     /// `target_union` is the union that wrap the target value
     #[inline]
-    fn new(
+    pub fn new(
         key: impl Into<Vec<u8>>,
         cmp: CompareResult,
         target: CompareTarget,
