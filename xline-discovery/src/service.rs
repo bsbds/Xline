@@ -1,7 +1,11 @@
+use std::time::Duration;
+
 use log::warn;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use tokio_stream::{Stream, StreamExt};
+use tokio::time::interval;
+use tokio_stream::StreamExt;
+use xline_client::types::lease::LeaseKeeper;
 
 use crate::{
     client::{ClientError, EventType, XlineClient},
@@ -9,8 +13,6 @@ use crate::{
 };
 
 const SERVICE_INFO_PATH: &str = "/service_info";
-
-const SUBSCRIBE_CHANNLE_BUF_SIZE: usize = 1024;
 
 pub struct ServiceRegistration {
     /// The xline client
@@ -110,6 +112,18 @@ impl Service {
         self.client.add_host(host_url, host).await
     }
 
+    /// Register a host
+    pub async fn register_host_with_keepalive(
+        &self,
+        host: Host,
+    ) -> Result<RegistrationKeeper, ClientError> {
+        let host_url = HostUrl::new(&self.info.name, &host.id);
+        self.client
+            .add_host_with_keep_alive(host_url, host)
+            .await
+            .map(|keeper| RegistrationKeeper(keeper))
+    }
+
     /// Deregister a host
     pub async fn deregister_host(&self, host_id: &str) -> Result<(), ClientError> {
         let host_url = HostUrl::new(&self.info.name, host_id);
@@ -205,5 +219,30 @@ impl ServiceUrl {
 impl Into<Vec<u8>> for ServiceUrl {
     fn into(self) -> Vec<u8> {
         self.url.into()
+    }
+}
+
+#[derive(Debug)]
+pub struct RegistrationKeeper(LeaseKeeper);
+
+impl RegistrationKeeper {
+    /// Keep alive once
+    pub fn keep_alive_once(&mut self) -> Result<(), ClientError> {
+        self.0.keep_alive().map_err(Into::into)
+    }
+
+    /// Keep alive forever
+    pub async fn spawn_keep_alive(mut self, keep_alive_interval: Duration) {
+        tokio::spawn(async move {
+            let mut interval = interval(keep_alive_interval);
+            interval.tick().await;
+
+            while {
+                interval.tick().await;
+                self.keep_alive_once().is_ok()
+            } {}
+
+            Ok::<(), ClientError>(())
+        });
     }
 }

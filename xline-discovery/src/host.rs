@@ -48,9 +48,9 @@ impl Host {
 /// The protocol use by host
 pub struct Protocol {
     /// The name of the protocol
-    name: String,
+    pub name: String,
     /// The port this protocol use
-    port: u16,
+    pub port: u16,
 }
 
 /// The Host URL used in xline store

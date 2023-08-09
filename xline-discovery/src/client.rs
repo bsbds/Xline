@@ -7,6 +7,7 @@ use xline_client::{
             Compare, CompareResult, CompareTarget, DeleteRangeRequest, PutRequest, RangeRequest,
             TargetUnion, TxnOp, TxnRequest,
         },
+        lease::{LeaseGrantRequest, LeaseKeepAliveRequest, LeaseKeeper},
         watch::WatchRequest,
     },
     Client, ClientOptions,
@@ -18,6 +19,8 @@ use crate::{
 };
 
 const WATCH_CHANNEL_SIZE: usize = 1024;
+
+const LEASE_TTL: i64 = 20;
 
 #[derive(Clone, Debug)]
 pub(crate) struct XlineClient {
@@ -87,6 +90,27 @@ impl XlineClient {
         let req = PutRequest::new(url, bincode::serialize(&host)?);
         let _resp = self.inner.kv_client().put(req).await?;
         Ok(())
+    }
+
+    /// Put the host into the store with keep alive
+    pub(crate) async fn add_host_with_keep_alive(
+        &self,
+        url: HostUrl,
+        host: Host,
+    ) -> Result<LeaseKeeper, ClientError> {
+        let mut lease_client = self.inner.lease_client();
+        let lease_id = lease_client
+            .grant(LeaseGrantRequest::new(LEASE_TTL))
+            .await?
+            .id;
+        let req = PutRequest::new(url, bincode::serialize(&host)?).with_lease(lease_id);
+        let _resp = self.inner.kv_client().put(req).await?;
+
+        let (keeper, _) = lease_client
+            .keep_alive(LeaseKeepAliveRequest::new(lease_id))
+            .await?;
+
+        Ok(keeper)
     }
 
     /// Delete hosts from the store
