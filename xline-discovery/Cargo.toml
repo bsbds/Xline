@@ -4,7 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+tokio = { version = "1", features = ["full"] }
 xline-client = { path = "../xline-client" }
 thiserror = "1.0.44"
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3.3"
+log = "0.4.19"
+rand = "0.8.5"
+tokio-stream = "0.1.14"
+flume = "0.10.14"
+
+
+[dev-dependencies]
+xline = { path = "../xline" }
+xline-test-utils = { path = "../xline-test-utils" }

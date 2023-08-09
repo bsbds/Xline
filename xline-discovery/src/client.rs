@@ -1,8 +1,12 @@
+use flume::Receiver;
 use thiserror::Error;
 use xline_client::{
     error::ClientError as XlineClientError,
     types::{
-        kv::{DeleteRangeRequest, PutRequest, RangeRequest, TxnRequest, Compare, CompareTarget},
+        kv::{
+            Compare, CompareResult, CompareTarget, DeleteRangeRequest, PutRequest, RangeRequest,
+            TargetUnion, TxnOp, TxnRequest,
+        },
         watch::WatchRequest,
     },
     Client, ClientOptions,
@@ -10,15 +14,19 @@ use xline_client::{
 
 use crate::{
     host::{Host, HostUrl},
-    service::{Service, ServiceUrl},
+    service::{Service, ServiceInfo, ServiceUrl},
 };
 
+const WATCH_CHANNEL_SIZE: usize = 1024;
+
+#[derive(Clone, Debug)]
 pub(crate) struct XlineClient {
     inner: Client,
 }
 
 impl XlineClient {
-    async fn connect<E, S>(all_members: S) -> Result<Self, ClientError>
+    /// Connect to xline cluster
+    pub(crate) async fn connect<E, S>(all_members: S) -> Result<Self, ClientError>
     where
         E: AsRef<str>,
         S: IntoIterator<Item = (E, E)>,
@@ -27,68 +35,123 @@ impl XlineClient {
         Ok(Self { inner: client })
     }
 
-    pub(crate) async fn get_service(&self, url: ServiceUrl) -> Result<Service, ClientError> {
+    /// Get a service from the store
+    pub(crate) async fn get_service(&self, url: ServiceUrl) -> Result<ServiceInfo, ClientError> {
         let req = RangeRequest::new(url);
         let resp = self.inner.kv_client().range(req).await?;
         resp.kvs
             .iter()
             .next()
-            .map(|kv| bincode::deserialize::<Service>(&kv.value).map_err(Into::into))
-            .ok_or_else(|| ClientError::ServiceNotExist)?
+            .map(|kv| bincode::deserialize::<ServiceInfo>(&kv.value).map_err(Into::into))
+            .ok_or_else(|| ClientError::ServiceNotFound)?
     }
 
-    pub(crate) async fn put_service(
-        &self,
-        url: ServiceUrl,
-        service: Service,
-    ) -> Result<(), ClientError> {
-        let req = TxnRequest::new().when(vec![Compare::new(url, CompareTarget::Version)])
-        let req = PutRequest::new(url, bincode::serialize(&service)?);
-        let _resp = self.inner.kv_client().put(req).await?;
+    /// Add a service into the store
+    pub(crate) async fn add_service(&self, service: Service) -> Result<(), ClientError> {
+        let key = service.url();
+        let req = TxnRequest::new()
+            .when(vec![Compare::new(
+                key.clone(),
+                CompareResult::Equal,
+                CompareTarget::Version,
+                TargetUnion::Version(0),
+            )])
+            .and_then(vec![TxnOp::put(PutRequest::new(
+                key,
+                bincode::serialize(&service.info())?,
+            ))]);
+        let resp = self.inner.kv_client().txn(req).await?;
+
+        if !resp.succeeded {
+            return Err(ClientError::ServiceExist);
+        }
+
         Ok(())
     }
 
     /// Get hosts from the store
-    pub(crate) async fn get_host(&self, url: HostUrl) -> Result<Vec<Host>, ClientError> {
-        let req = RangeRequest::new(url);
+    pub(crate) async fn get_host(&self, url: HostUrl) -> Result<(i64, Vec<Host>), ClientError> {
+        let req = RangeRequest::new(url).with_prefix();
         let resp = self.inner.kv_client().range(req).await?;
+        let revision = resp.header.unwrap().revision;
         resp.kvs
             .iter()
             .map(|kv| bincode::deserialize::<Host>(&kv.value))
             .collect::<Result<_, _>>()
             .map_err(Into::into)
+            .map(|hosts| (revision, hosts))
     }
 
     /// Put the host into the store
-    pub(crate) async fn put_host(&self, url: HostUrl, host: Host) -> Result<(), ClientError> {
+    pub(crate) async fn add_host(&self, url: HostUrl, host: Host) -> Result<(), ClientError> {
         let req = PutRequest::new(url, bincode::serialize(&host)?);
         let _resp = self.inner.kv_client().put(req).await?;
         Ok(())
     }
 
     /// Delete hosts from the store
-    pub(crate) async fn delete_host(&self, url: String) -> Result<(), ClientError> {
+    pub(crate) async fn delete_host(&self, url: HostUrl) -> Result<(), ClientError> {
         let req = DeleteRangeRequest::new(url);
         let _resp = self.inner.kv_client().delete(req).await?;
         Ok(())
     }
 
     /// Watch hosts with a given url
-    pub(crate) async fn watch_host(&self, url: String) -> Result<(), ClientError> {
-        let req = WatchRequest::new(url);
-        let (watcher, stream) = self.inner.watch_client().watch(req).await?;
-        Ok(())
+    pub(crate) async fn watch_host(
+        &self,
+        url: HostUrl,
+        start_revision: i64,
+    ) -> Result<Receiver<(EventType, Host)>, ClientError> {
+        let (tx, rx) = flume::bounded(WATCH_CHANNEL_SIZE);
+        println!("url: {url:?}");
+        let req = WatchRequest::new(url)
+            .with_prefix()
+            .with_start_revision(start_revision);
+        let (_watcher, mut stream) = self.inner.watch_client().watch(req).await?;
+
+        let _handle = tokio::spawn(async move {
+            while let Ok(resp) = stream.message().await {
+                let Some(resp) = resp else { continue };
+                println!("resp: {resp:?}");
+                for event in resp.events {
+                    let Some(kv) = event.kv else { continue };
+                    let host: Host = bincode::deserialize(&kv.value)?;
+                    let event_type = match event.r#type {
+                        0 => EventType::Put,
+                        1 => EventType::Delete,
+                        _ => unreachable!("event type should only be 0 or 1"),
+                    };
+                    let _ignore = tx.send((event_type, host));
+                }
+            }
+
+            Ok::<(), ClientError>(())
+        });
+
+        Ok(rx)
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum EventType {
+    /// Put
+    Put,
+    /// Delete
+    Delete,
+}
+
 #[derive(Error, Debug)]
-pub(crate) enum ClientError {
+pub enum ClientError {
     #[error("client propose error: {0}")]
     Propose(String),
     #[error("serialize error: {0}")]
     Serialize(String),
+    #[error("service already exist")]
+    ServiceExist,
     #[error("service not exist")]
-    ServiceNotExist,
+    ServiceNotFound,
+    #[error("no host is in this service")]
+    NotHostInService,
 }
 
 impl From<XlineClientError> for ClientError {

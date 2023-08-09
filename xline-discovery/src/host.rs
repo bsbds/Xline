@@ -3,13 +3,13 @@ use std::collections::HashMap;
 
 const SERVICE_HOST_PATH: &str = "/service";
 
-/// Host store all host's informations
-#[derive(Debug, Serialize, Deserialize)]
+/// Host store all host's information
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
-    /// Should be a fully qualified domain name
-    pub(crate) hostname: String,
     /// The unique id of this host
     pub(crate) id: String,
+    /// Should be a fully qualified domain name
+    pub(crate) hostname: String,
     /// The name of the service
     pub(crate) service_name: String,
     /// The protocols this host uses
@@ -18,8 +18,21 @@ pub struct Host {
 }
 
 impl Host {
-    /// get the url of sepcific protocol scheme
-    fn url_scheme(&self, scheme: String, path: String) -> Option<String> {
+    /// Creates a new `Host`
+    pub fn new<S, P>(id: S, hostname: S, service_name: S, protocols: P) -> Self
+    where
+        S: Into<String>,
+        P: IntoIterator<Item = (S, u16)>,
+    {
+        Self {
+            id: id.into(),
+            hostname: hostname.into(),
+            service_name: service_name.into(),
+            protocols: protocols.into_iter().map(|(s, p)| (s.into(), p)).collect(),
+        }
+    }
+    /// Get the url of specific protocol scheme
+    pub fn url_scheme(&self, scheme: String, path: String) -> Option<String> {
         self.protocols
             .get("scheme")
             .map(|port| format!("{scheme}://{}:{port}{path}", self.hostname))
@@ -41,9 +54,15 @@ pub struct HostUrl {
 }
 
 impl HostUrl {
-    pub fn new(service_name: String, host_id: String) -> Self {
+    pub fn new(service_name: &str, host_id: &str) -> Self {
         Self {
             url: format!("{SERVICE_HOST_PATH}/{service_name}/{host_id}"),
+        }
+    }
+
+    pub fn new_prefix(service_name: &str) -> Self {
+        Self {
+            url: format!("{SERVICE_HOST_PATH}/{service_name}"),
         }
     }
 }
