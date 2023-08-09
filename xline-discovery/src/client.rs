@@ -101,27 +101,32 @@ impl XlineClient {
         &self,
         url: HostUrl,
         start_revision: i64,
-    ) -> Result<Receiver<(EventType, Host)>, ClientError> {
+    ) -> Result<Receiver<(EventType, String, Option<Host>)>, ClientError> {
         let (tx, rx) = flume::bounded(WATCH_CHANNEL_SIZE);
-        println!("url: {url:?}");
         let req = WatchRequest::new(url)
             .with_prefix()
             .with_start_revision(start_revision);
-        let (_watcher, mut stream) = self.inner.watch_client().watch(req).await?;
+        let (watcher, mut stream) = self.inner.watch_client().watch(req).await?;
 
         let _handle = tokio::spawn(async move {
-            while let Ok(resp) = stream.message().await {
-                let Some(resp) = resp else { continue };
-                println!("resp: {resp:?}");
+            let _watcher = watcher;
+            while let Ok(Some(resp)) = stream.message().await {
                 for event in resp.events {
                     let Some(kv) = event.kv else { continue };
-                    let host: Host = bincode::deserialize(&kv.value)?;
-                    let event_type = match event.r#type {
-                        0 => EventType::Put,
-                        1 => EventType::Delete,
+                    let (event_type, host_id, host) = match event.r#type {
+                        0 => (
+                            EventType::Put,
+                            HostUrl::host_id(&String::from_utf8_lossy(&kv.key)).unwrap_or_default(),
+                            Some(bincode::deserialize(&kv.value)?),
+                        ),
+                        1 => (
+                            EventType::Delete,
+                            HostUrl::host_id(&String::from_utf8_lossy(&kv.key)).unwrap_or_default(),
+                            None,
+                        ),
                         _ => unreachable!("event type should only be 0 or 1"),
                     };
-                    let _ignore = tx.send((event_type, host));
+                    let _ignore = tx.send((event_type.clone(), host_id, host));
                 }
             }
 
@@ -132,7 +137,7 @@ impl XlineClient {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventType {
     /// Put
     Put,

@@ -31,6 +31,12 @@ impl Host {
             protocols: protocols.into_iter().map(|(s, p)| (s.into(), p)).collect(),
         }
     }
+
+    /// Get id
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
     /// Get the url of specific protocol scheme
     pub fn url_scheme(&self, scheme: String, path: String) -> Option<String> {
         self.protocols
@@ -64,6 +70,10 @@ impl HostUrl {
         Self {
             url: format!("{SERVICE_HOST_PATH}/{service_name}"),
         }
+    }
+
+    pub fn host_id(url: &str) -> Option<String> {
+        url.split('/').next_back().map(ToOwned::to_owned)
     }
 }
 

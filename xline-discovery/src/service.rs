@@ -158,23 +158,23 @@ impl Service {
         Ok(self
             .subscribe_all(start_revision)
             .await?
-            .filter_map(|(e, h)| (e == EventType::Delete).then(|| h)))
+            .filter_map(|(event, _id, host)| (event == EventType::Put).then(|| host).flatten()))
     }
 
     pub async fn subscribe_delete(
         &self,
         start_revision: i64,
-    ) -> Result<impl StreamExt<Item = Host>, ClientError> {
+    ) -> Result<impl StreamExt<Item = String>, ClientError> {
         Ok(self
             .subscribe_all(start_revision)
             .await?
-            .filter_map(|(e, h)| (e == EventType::Delete).then(|| h)))
+            .filter_map(|(event, id, _host)| (event == EventType::Delete).then(|| id)))
     }
 
     pub async fn subscribe_all(
         &self,
         start_revision: i64,
-    ) -> Result<impl StreamExt<Item = (EventType, Host)>, ClientError> {
+    ) -> Result<impl StreamExt<Item = (EventType, String, Option<Host>)>, ClientError> {
         let host_event = self
             .client
             .watch_host(HostUrl::new_prefix(&self.info.name), start_revision)

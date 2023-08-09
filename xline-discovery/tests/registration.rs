@@ -73,11 +73,11 @@ async fn watch_host_will_get_correct_info() -> Result<()> {
         Ok::<(), ClientError>(())
     });
 
-    let (event_type, host_received) = host_stream.next().await.expect("no host received");
-    assert_eq!(host_received, host);
+    let (event_type, _, host_received) = host_stream.next().await.expect("no host received");
+    assert_eq!(host_received, Some(host.clone()));
     assert_eq!(event_type, EventType::Put);
-    let (event_type, host_received) = host_stream.next().await.expect("no host received");
-    assert_eq!(host_received, host);
+    let (event_type, host_id, _) = host_stream.next().await.expect("no host received");
+    assert_eq!(host_id, host.id());
     assert_eq!(event_type, EventType::Delete);
 
     handle.await.unwrap().unwrap();
