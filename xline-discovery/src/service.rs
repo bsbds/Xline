@@ -108,7 +108,7 @@ impl ServiceInfo {
 impl Service {
     /// Register a host
     pub async fn register_host(&self, host: Host) -> Result<(), ClientError> {
-        let host_url = HostUrl::new(&self.info.name, &host.id);
+        let host_url = HostUrl::new(&self.info.name, host.id);
         self.client.add_host(host_url, host).await
     }
 
@@ -117,7 +117,7 @@ impl Service {
         &self,
         host: Host,
     ) -> Result<RegistrationKeeper, ClientError> {
-        let host_url = HostUrl::new(&self.info.name, &host.id);
+        let host_url = HostUrl::new(&self.info.name, host.id);
         self.client
             .add_host_with_keep_alive(host_url, host)
             .await
@@ -125,7 +125,7 @@ impl Service {
     }
 
     /// Deregister a host
-    pub async fn deregister_host(&self, host_id: &str) -> Result<(), ClientError> {
+    pub async fn deregister_host(&self, host_id: u64) -> Result<(), ClientError> {
         let host_url = HostUrl::new(&self.info.name, host_id);
         self.client.delete_host(host_url).await
     }
@@ -178,7 +178,7 @@ impl Service {
     pub async fn subscribe_delete(
         &self,
         start_revision: i64,
-    ) -> Result<impl StreamExt<Item = String>, ClientError> {
+    ) -> Result<impl StreamExt<Item = u64>, ClientError> {
         Ok(self
             .subscribe_all(start_revision)
             .await?
@@ -188,7 +188,7 @@ impl Service {
     pub async fn subscribe_all(
         &self,
         start_revision: i64,
-    ) -> Result<impl StreamExt<Item = (EventType, String, Option<Host>)>, ClientError> {
+    ) -> Result<impl StreamExt<Item = (EventType, u64, Option<Host>)>, ClientError> {
         let host_event = self
             .client
             .watch_host(HostUrl::new_prefix(&self.info.name), start_revision)

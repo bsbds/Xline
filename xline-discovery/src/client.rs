@@ -125,7 +125,7 @@ impl XlineClient {
         &self,
         url: HostUrl,
         start_revision: i64,
-    ) -> Result<Receiver<(EventType, String, Option<Host>)>, ClientError> {
+    ) -> Result<Receiver<(EventType, u64, Option<Host>)>, ClientError> {
         let (tx, rx) = flume::bounded(WATCH_CHANNEL_SIZE);
         let req = WatchRequest::new(url)
             .with_prefix()

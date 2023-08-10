@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
+    hash::Hasher,
+    time::SystemTime,
+};
 
 const SERVICE_HOST_PATH: &str = "/service";
 
@@ -7,7 +11,7 @@ const SERVICE_HOST_PATH: &str = "/service";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     /// The unique id of this host
-    pub(crate) id: String,
+    pub(crate) id: u64,
     /// Should be a fully qualified domain name
     pub(crate) hostname: String,
     /// The name of the service
@@ -19,22 +23,24 @@ pub struct Host {
 
 impl Host {
     /// Creates a new `Host`
-    pub fn new<S, P>(id: S, hostname: S, service_name: S, protocols: P) -> Self
+    pub fn new<S, P>(hostname: S, service_name: S, protocols: P) -> Self
     where
         S: Into<String>,
         P: IntoIterator<Item = (S, u16)>,
     {
+        let hostname = hostname.into();
+        let service_name = service_name.into();
         Self {
-            id: id.into(),
-            hostname: hostname.into(),
-            service_name: service_name.into(),
+            id: Self::gen_host_id(hostname.clone(), service_name.clone()),
+            hostname,
+            service_name,
             protocols: protocols.into_iter().map(|(s, p)| (s.into(), p)).collect(),
         }
     }
 
     /// Get id
-    pub fn id(&self) -> String {
-        self.id.clone()
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Get the url of specific protocol scheme
@@ -42,6 +48,19 @@ impl Host {
         self.protocols
             .get("scheme")
             .map(|port| format!("{scheme}://{}:{port}{path}", self.hostname))
+    }
+
+    fn gen_host_id(hostname: String, service_name: String) -> u64 {
+        let ts = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_else(|e| unreachable!("SystemTime before UNIX EPOCH! {e}"))
+            .as_secs();
+
+        let mut hasher = DefaultHasher::new();
+        hasher.write(service_name.as_bytes());
+        hasher.write(hostname.as_bytes());
+        hasher.write_u64(ts);
+        hasher.finish()
     }
 }
 
@@ -60,7 +79,7 @@ pub struct HostUrl {
 }
 
 impl HostUrl {
-    pub fn new(service_name: &str, host_id: &str) -> Self {
+    pub fn new(service_name: &str, host_id: u64) -> Self {
         Self {
             url: format!("{SERVICE_HOST_PATH}/{service_name}/{host_id}"),
         }
@@ -72,8 +91,8 @@ impl HostUrl {
         }
     }
 
-    pub fn host_id(url: &str) -> Option<String> {
-        url.split('/').next_back().map(ToOwned::to_owned)
+    pub fn host_id(url: &str) -> Option<u64> {
+        url.split('/').next_back().map(|s| s.parse().ok()).flatten()
     }
 }
 

@@ -34,13 +34,13 @@ async fn host_register_deregister_will_succeed() -> Result<()> {
         .register_service(ServiceInfo::new(service_name))
         .await?;
 
-    let host = Host::new("host0", "host0.example.com", service_name, [("https", 443)]);
+    let host = Host::new("host0.example.com", service_name, [("https", 443)]);
     service.register_host(host.clone()).await?;
 
     let (_revision, host_got) = service.one_host().await?;
     assert_eq!(host, host_got);
 
-    service.deregister_host("host0").await?;
+    service.deregister_host(host.id()).await?;
     assert!(service.one_host().await.is_err());
 
     Ok(())
@@ -57,7 +57,7 @@ async fn watch_host_will_get_correct_info() -> Result<()> {
         .await?;
     let service_c = service.clone();
 
-    let host = Host::new("host0", "host0.example.com", service_name, [("https", 443)]);
+    let host = Host::new("host0.example.com", service_name, [("https", 443)]);
     let host_c = host.clone();
     let mut host_stream = service.subscribe_all(0).await?;
 
@@ -67,7 +67,7 @@ async fn watch_host_will_get_correct_info() -> Result<()> {
         let (_revision, host_got) = service_c.one_host().await?;
         assert_eq!(host_c, host_got);
 
-        service_c.deregister_host("host0").await?;
+        service_c.deregister_host(host_c.id()).await?;
         assert!(service_c.one_host().await.is_err());
 
         Ok::<(), ClientError>(())
