@@ -23,18 +23,23 @@ pub struct Host {
 
 impl Host {
     /// Creates a new `Host`
-    pub fn new<S, P>(hostname: S, service_name: S, protocols: P) -> Self
+    pub fn new<H, S, P, PS>(hostname: H, service_name: S, protocols: P) -> Self
     where
-        S: Into<String>,
-        P: IntoIterator<Item = (S, u16)>,
+        H: AsRef<str>,
+        S: AsRef<str>,
+        PS: AsRef<str>,
+        P: IntoIterator<Item = (PS, u16)>,
     {
-        let hostname = hostname.into();
-        let service_name = service_name.into();
+        let hostname = hostname.as_ref().to_owned();
+        let service_name = service_name.as_ref().to_owned();
         Self {
             id: Self::gen_host_id(hostname.clone(), service_name.clone()),
             hostname,
             service_name,
-            protocols: protocols.into_iter().map(|(s, p)| (s.into(), p)).collect(),
+            protocols: protocols
+                .into_iter()
+                .map(|(s, p)| (s.as_ref().to_owned(), p))
+                .collect(),
         }
     }
 
