@@ -11,14 +11,14 @@ const SERVICE_HOST_PATH: &str = "/service";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     /// The unique id of this host
-    pub(crate) id: u64,
+    pub id: u64,
     /// Should be a fully qualified domain name
-    pub(crate) hostname: String,
+    pub hostname: String,
     /// The name of the service
-    pub(crate) service_name: String,
+    pub service_name: String,
     /// The protocols this host uses
     /// For examples: ("http", 80), ("ssh", 22), etc.
-    pub(crate) protocols: HashMap<String, u16>,
+    pub protocols: HashMap<String, u16>,
 }
 
 impl Host {
@@ -41,11 +41,6 @@ impl Host {
                 .map(|(s, p)| (s.as_ref().to_owned(), p))
                 .collect(),
         }
-    }
-
-    /// Get id
-    pub fn id(&self) -> u64 {
-        self.id
     }
 
     /// Get the url of specific protocol scheme

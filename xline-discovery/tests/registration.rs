@@ -40,7 +40,7 @@ async fn host_register_deregister_will_succeed() -> Result<()> {
     let (_revision, host_got) = service.one_host().await?;
     assert_eq!(host, host_got);
 
-    service.deregister_host(host.id()).await?;
+    service.deregister_host(host.id).await?;
     assert!(service.one_host().await.is_err());
 
     Ok(())
@@ -67,7 +67,7 @@ async fn watch_host_will_get_correct_info() -> Result<()> {
         let (_revision, host_got) = service_c.one_host().await?;
         assert_eq!(host_c, host_got);
 
-        service_c.deregister_host(host_c.id()).await?;
+        service_c.deregister_host(host_c.id).await?;
         assert!(service_c.one_host().await.is_err());
 
         Ok::<(), ClientError>(())
@@ -77,7 +77,7 @@ async fn watch_host_will_get_correct_info() -> Result<()> {
     assert_eq!(host_received, Some(host.clone()));
     assert_eq!(event_type, EventType::Put);
     let (event_type, host_id, _) = host_stream.next().await.expect("no host received");
-    assert_eq!(host_id, host.id());
+    assert_eq!(host_id, host.id);
     assert_eq!(event_type, EventType::Delete);
 
     handle.await.unwrap().unwrap();
