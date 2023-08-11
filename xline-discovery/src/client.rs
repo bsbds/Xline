@@ -20,8 +20,6 @@ use crate::{
 
 const WATCH_CHANNEL_SIZE: usize = 1024;
 
-const LEASE_TTL: i64 = 20;
-
 #[derive(Clone, Debug)]
 pub(crate) struct XlineClient {
     inner: Client,
@@ -97,10 +95,11 @@ impl XlineClient {
         &self,
         url: HostUrl,
         host: Host,
+        lease_ttl: i64,
     ) -> Result<LeaseKeeper, ClientError> {
         let mut lease_client = self.inner.lease_client();
         let lease_id = lease_client
-            .grant(LeaseGrantRequest::new(LEASE_TTL))
+            .grant(LeaseGrantRequest::new(lease_ttl))
             .await?
             .id;
         let req = PutRequest::new(url, bincode::serialize(&host)?).with_lease(lease_id);

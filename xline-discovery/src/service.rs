@@ -112,14 +112,15 @@ impl Service {
         self.client.add_host(host_url, host).await
     }
 
-    /// Register a host
+    /// Register a host with keep alive
     pub async fn register_host_with_keepalive(
         &self,
         host: Host,
+        keep_alive_ttl: i64,
     ) -> Result<RegistrationKeeper, ClientError> {
         let host_url = HostUrl::new(&self.info.name, host.id);
         self.client
-            .add_host_with_keep_alive(host_url, host)
+            .add_host_with_keep_alive(host_url, host, keep_alive_ttl)
             .await
             .map(|keeper| RegistrationKeeper(keeper))
     }
@@ -232,7 +233,10 @@ impl RegistrationKeeper {
     }
 
     /// Keep alive forever
-    pub async fn spawn_keep_alive(mut self, keep_alive_interval: Duration) {
+    pub async fn spawn_keep_alive(
+        mut self,
+        keep_alive_interval: Duration,
+    ) -> tokio::task::JoinHandle<Result<(), ClientError>> {
         tokio::spawn(async move {
             let mut interval = interval(keep_alive_interval);
             interval.tick().await;
@@ -243,6 +247,6 @@ impl RegistrationKeeper {
             } {}
 
             Ok::<(), ClientError>(())
-        });
+        })
     }
 }
