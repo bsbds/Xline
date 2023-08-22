@@ -1,10 +1,11 @@
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{borrow::Cow, pin::Pin, sync::Arc, time::Duration};
 
 use async_stream::{stream, try_stream};
 use clippy_utilities::Cast;
 use curp::{client::Client, cmd::ProposeId, members::ClusterInfo};
 use futures::stream::Stream;
 use tokio::time;
+use tonic::transport::Endpoint;
 use tracing::{debug, warn};
 use uuid::Uuid;
 use xlineapi::RequestWithToken;
@@ -163,14 +164,14 @@ where
     async fn follower_keep_alive(
         &self,
         mut request_stream: tonic::Streaming<LeaseKeepAliveRequest>,
-        leader_addr: &str,
+        leader_addr: &[String],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LeaseKeepAliveResponse, tonic::Status>> + Send>>,
         tonic::Status,
     > {
-        let mut lease_client = LeaseClient::connect(format!("http://{leader_addr}"))
-            .await
-            .map_err(|_e| tonic::Status::internal("Connect to leader error: {e}"))?;
+        let endpoints = build_endpoints(leader_addr)?;
+        let channel = tonic::transport::Channel::balance_list(endpoints.into_iter());
+        let mut lease_client = LeaseClient::new(channel);
 
         let redirect_stream = stream! {
             while let Ok(Some(req)) = request_stream.message().await {
@@ -185,6 +186,22 @@ where
 
         Ok(Box::pin(stream))
     }
+}
+
+/// Build endpoints from addresses
+fn build_endpoints(addrs: &[String]) -> Result<Vec<Endpoint>, tonic::Status> {
+    addrs
+        .iter()
+        .map(|addr| {
+            let addr = if addr.starts_with("http://") {
+                Cow::Borrowed(addr)
+            } else {
+                Cow::Owned(format!("http://{addr}"))
+            };
+            addr.parse()
+                .map_err(|e| tonic::Status::internal(format!("Connect to leader error: {e}")))
+        })
+        .collect()
 }
 
 #[tonic::async_trait]
@@ -219,6 +236,31 @@ where
         Ok(tonic::Response::new(res))
     }
 
+    /// LeaseRevoke revokes a lease. All keys attached to the lease will expire and be deleted.
+    async fn lease_revoke(
+        &self,
+        request: tonic::Request<LeaseRevokeRequest>,
+    ) -> Result<tonic::Response<LeaseRevokeResponse>, tonic::Status> {
+        debug!("Receive LeaseRevokeRequest {:?}", request);
+
+        let is_fast_path = true;
+        let (res, sync_res) = self.propose(request, is_fast_path).await?;
+
+        let mut res: LeaseRevokeResponse = res.decode().into();
+        if let Some(sync_res) = sync_res {
+            let revision = sync_res.revision();
+            debug!("Get revision {:?} for LeaseRevokeResponse", revision);
+            if let Some(mut header) = res.header.as_mut() {
+                header.revision = revision;
+            }
+        }
+        Ok(tonic::Response::new(res))
+    }
+
+    ///Server streaming response type for the LeaseKeepAlive method.
+    type LeaseKeepAliveStream =
+        Pin<Box<dyn Stream<Item = Result<LeaseKeepAliveResponse, tonic::Status>> + Send>>;
+
     /// LeaseKeepAlive keeps the lease alive by streaming keep alive requests from the client
     /// to the server and streaming keep alive responses from the server to the client.
     async fn lease_keep_alive(
@@ -243,57 +285,11 @@ where
                     )
                 });
                 break self
-                    .follower_keep_alive(request_stream, leader_addr)
+                    .follower_keep_alive(request_stream, leader_addr.as_slice())
                     .await?;
             }
         };
         Ok(tonic::Response::new(stream))
-    }
-
-    ///Server streaming response type for the LeaseKeepAlive method.
-    type LeaseKeepAliveStream =
-        Pin<Box<dyn Stream<Item = Result<LeaseKeepAliveResponse, tonic::Status>> + Send>>;
-
-    /// LeaseLeases lists all existing leases.
-    async fn lease_leases(
-        &self,
-        request: tonic::Request<LeaseLeasesRequest>,
-    ) -> Result<tonic::Response<LeaseLeasesResponse>, tonic::Status> {
-        debug!("Receive LeaseLeasesRequest {:?}", request);
-
-        let is_fast_path = true;
-        let (res, sync_res) = self.propose(request, is_fast_path).await?;
-
-        let mut res: LeaseLeasesResponse = res.decode().into();
-        if let Some(sync_res) = sync_res {
-            let revision = sync_res.revision();
-            debug!("Get revision {:?} for LeaseLeasesResponse", revision);
-            if let Some(mut header) = res.header.as_mut() {
-                header.revision = revision;
-            }
-        }
-        Ok(tonic::Response::new(res))
-    }
-
-    /// LeaseRevoke revokes a lease. All keys attached to the lease will expire and be deleted.
-    async fn lease_revoke(
-        &self,
-        request: tonic::Request<LeaseRevokeRequest>,
-    ) -> Result<tonic::Response<LeaseRevokeResponse>, tonic::Status> {
-        debug!("Receive LeaseRevokeRequest {:?}", request);
-
-        let is_fast_path = true;
-        let (res, sync_res) = self.propose(request, is_fast_path).await?;
-
-        let mut res: LeaseRevokeResponse = res.decode().into();
-        if let Some(sync_res) = sync_res {
-            let revision = sync_res.revision();
-            debug!("Get revision {:?} for LeaseRevokeResponse", revision);
-            if let Some(mut header) = res.header.as_mut() {
-                header.revision = revision;
-            }
-        }
-        Ok(tonic::Response::new(res))
     }
 
     /// LeaseTimeToLive retrieves lease information.
@@ -333,13 +329,32 @@ where
                 )
             });
             if !self.lease_storage.is_primary() {
-                let mut lease_client = LeaseClient::connect(format!("http://{leader_addr}"))
-                    .await
-                    .map_err(|e| {
-                        tonic::Status::internal(format!("Connect to leader error: {e}"))
-                    })?;
+                let endpoints = build_endpoints(leader_addr.as_slice())?;
+                let channel = tonic::transport::Channel::balance_list(endpoints.into_iter());
+                let mut lease_client = LeaseClient::new(channel);
                 return lease_client.lease_time_to_live(request).await;
             }
         }
+    }
+
+    /// LeaseLeases lists all existing leases.
+    async fn lease_leases(
+        &self,
+        request: tonic::Request<LeaseLeasesRequest>,
+    ) -> Result<tonic::Response<LeaseLeasesResponse>, tonic::Status> {
+        debug!("Receive LeaseLeasesRequest {:?}", request);
+
+        let is_fast_path = true;
+        let (res, sync_res) = self.propose(request, is_fast_path).await?;
+
+        let mut res: LeaseLeasesResponse = res.decode().into();
+        if let Some(sync_res) = sync_res {
+            let revision = sync_res.revision();
+            debug!("Get revision {:?} for LeaseLeasesResponse", revision);
+            if let Some(mut header) = res.header.as_mut() {
+                header.revision = revision;
+            }
+        }
+        Ok(tonic::Response::new(res))
     }
 }

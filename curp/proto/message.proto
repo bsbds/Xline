@@ -32,8 +32,11 @@ message FetchClusterRequest {
 }
 
 message FetchClusterResponse {
+    message Addrs {
+        repeated string addrs = 1;
+    }
     optional uint64 leader_id = 1;
-    map<uint64, string> all_members = 2;
+    map<uint64, Addrs> all_members = 2;
     uint64 term = 3;
 }
 
@@ -48,7 +51,7 @@ message WaitSyncedResponse {
     }
     oneof sync_result {
         Success success = 1;
-        bytes   error = 2;
+        bytes error = 2;
     }
 }
 
@@ -76,7 +79,7 @@ message VoteRequest {
 
 message VoteResponse {
     uint64 term = 1;
-    bool   vote_granted = 2;
+    bool vote_granted = 2;
     repeated bytes spec_pool = 3;
 }
 
@@ -98,7 +101,7 @@ message IdSet {
     repeated bytes ids = 1;
 }
 
-message FetchReadStateRequest{
+message FetchReadStateRequest {
     bytes command = 1;
 }
 

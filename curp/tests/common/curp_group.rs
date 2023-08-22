@@ -81,8 +81,19 @@ impl CurpGroup {
                 let ce = TestCE::new(name.clone(), exe_tx, as_tx);
                 let store = Arc::clone(&ce.store);
 
-                let cluster_info = Arc::new(ClusterInfo::new(all_members.clone(), &name));
-                all = cluster_info.all_members();
+                let cluster_info = Arc::new(ClusterInfo::new(
+                    all_members
+                        .clone()
+                        .into_iter()
+                        .map(|(id, addr)| (id, vec![addr]))
+                        .collect(),
+                    &name,
+                ));
+                all = cluster_info
+                    .all_members()
+                    .into_iter()
+                    .map(|(id, addrs)| (id, addrs[0].clone()))
+                    .collect();
                 let id = cluster_info.self_id();
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)

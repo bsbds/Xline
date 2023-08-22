@@ -503,7 +503,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
             Arc::clone(&shutdown_trigger),
             log_rx,
         )
-        .await;
+        .await?;
 
         Ok(Self {
             curp,
@@ -522,10 +522,11 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
         storage: Arc<impl StorageApi<Command = C> + 'static>,
         cluster_info: Arc<ClusterInfo>,
         shutdown_trigger: Arc<Event>,
-        log_rx: tokio::sync::mpsc::UnboundedReceiver<Arc<LogEntry<C>>>,
-    ) {
+        log_rx: mpsc::UnboundedReceiver<Arc<LogEntry<C>>>,
+    ) -> Result<(), CurpError> {
         let connects = rpc::connect(cluster_info.peers())
             .await
+            .map_err(|e| CurpError::Internal(format!("parse peers addresses failed, err {e:?}")))?
             .collect::<HashMap<_, _>>();
         let election_task = tokio::spawn(Self::election_task(Arc::clone(&curp), connects.clone()));
         let sync_task_daemons = connects
@@ -549,6 +550,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
             }
             log_persist_task.abort();
         });
+        Ok(())
     }
 
     /// Candidate broadcasts votes
