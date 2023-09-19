@@ -125,7 +125,7 @@ async fn reelect() {
 async fn propose_after_reelect() {
     init_logger();
 
-    let group = CurpGroup::new(5).await;
+    let group = CurpGroup::new(3).await;
     let client = group.new_client(ClientTimeout::default()).await;
     assert_eq!(
         client

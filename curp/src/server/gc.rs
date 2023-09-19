@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use utils::parking_lot_lock::MutexMap;
@@ -30,10 +32,6 @@ async fn gc_spec_pool<C: Command + 'static>(sp: SpecPoolRef<C>, interval: Durati
         sp.map_lock(|sp_l| sp_l.pool.keys().cloned().collect());
     loop {
         tokio::time::sleep(interval).await;
-        let mut sp = sp.lock();
-        sp.pool.retain(|k, _v| !last_check.contains(k));
-
-        last_check = sp.pool.keys().cloned().collect();
     }
 }
 
@@ -44,27 +42,6 @@ async fn gc_cmd_board<C: Command + 'static>(cmd_board: CmdBoardRef<C>, interval:
     let mut last_check_len_sync = 0;
     loop {
         tokio::time::sleep(interval).await;
-        let mut board = cmd_board.write();
-
-        // last_check_len_xxx should always be smaller than board.xxx_.len(), the check is just for precaution
-
-        if last_check_len_er <= board.er_buffer.len() {
-            let new_er_buffer = board.er_buffer.split_off(last_check_len_er);
-            board.er_buffer = new_er_buffer;
-            last_check_len_er = board.er_buffer.len();
-        }
-
-        if last_check_len_asr <= board.asr_buffer.len() {
-            let new_asr_buffer = board.asr_buffer.split_off(last_check_len_asr);
-            board.asr_buffer = new_asr_buffer;
-            last_check_len_asr = board.asr_buffer.len();
-        }
-
-        if last_check_len_sync <= board.sync.len() {
-            let new_sync = board.sync.split_off(last_check_len_sync);
-            board.sync = new_sync;
-            last_check_len_sync = board.sync.len();
-        }
     }
 }
 
