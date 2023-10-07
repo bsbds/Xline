@@ -162,8 +162,6 @@ mod revision_number;
 mod rpc {
     pub use xlineapi::*;
 }
-/// Request validation module
-mod request_validation;
 /// Revision check
 mod revision_check;
 /// Xline server

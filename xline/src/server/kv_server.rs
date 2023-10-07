@@ -4,7 +4,7 @@ use curp::client::{Client, ReadState};
 use futures::future::join_all;
 use tokio::time::timeout;
 use tracing::{debug, instrument};
-use xlineapi::ResponseWrapper;
+use xlineapi::{request_validation::RequestValidator, ExecuteError, ResponseWrapper};
 
 use super::{
     auth_server::get_token,
@@ -12,7 +12,6 @@ use super::{
     command::{propose_err_to_status, Command, CommandResponse, SyncResponse},
 };
 use crate::{
-    request_validation::RequestValidator,
     revision_check::RevisionCheck,
     rpc::{
         CompactionRequest, CompactionResponse, DeleteRangeRequest, DeleteRangeResponse, Kv,
@@ -20,7 +19,7 @@ use crate::{
         Response, ResponseOp, TxnRequest, TxnResponse,
     },
     server::command::command_from_request_wrapper,
-    storage::{storage_api::StorageApi, AuthStore, ExecuteError, KvStore},
+    storage::{storage_api::StorageApi, AuthStore, KvStore},
 };
 
 /// KV Server

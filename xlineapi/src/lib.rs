@@ -157,7 +157,10 @@
     )
 )]
 
+pub mod command;
 pub mod etcd_convert;
+pub mod execute_error;
+pub mod request_validation;
 
 mod etcdserverpb {
     tonic::include_proto!("etcdserverpb");
@@ -241,6 +244,7 @@ pub use self::{
         SnapshotResponse, StatusRequest, StatusResponse, TxnRequest, TxnResponse,
         WatchCancelRequest, WatchCreateRequest, WatchProgressRequest, WatchRequest, WatchResponse,
     },
+    execute_error::ExecuteError,
     leasepb::Lease as PbLease,
     mvccpb::{event::EventType, Event, KeyValue},
     v3lockpb::{

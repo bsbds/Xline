@@ -8,7 +8,7 @@ use tokio::time;
 use tonic::transport::Endpoint;
 use tracing::{debug, warn};
 use utils::shutdown;
-use xlineapi::RequestWithToken;
+use xlineapi::{ExecuteError, RequestWithToken};
 
 use super::{
     auth_server::get_token,
@@ -23,7 +23,7 @@ use crate::{
         LeaseKeepAliveResponse, LeaseLeasesRequest, LeaseLeasesResponse, LeaseRevokeRequest,
         LeaseRevokeResponse, LeaseTimeToLiveRequest, LeaseTimeToLiveResponse, RequestWrapper,
     },
-    storage::{storage_api::StorageApi, AuthStore, ExecuteError, LeaseStore},
+    storage::{storage_api::StorageApi, AuthStore, LeaseStore},
 };
 
 /// Default Lease Request Time

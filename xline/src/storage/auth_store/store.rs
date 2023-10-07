@@ -17,6 +17,7 @@ use pbkdf2::{
     Pbkdf2,
 };
 use utils::parking_lot_lock::RwLockMap;
+use xlineapi::ExecuteError;
 
 use super::{
     backend::{ROOT_ROLE, ROOT_USER},
@@ -46,7 +47,6 @@ use crate::{
         db::WriteOp,
         lease_store::{Lease, LeaseCollection},
         storage_api::StorageApi,
-        ExecuteError,
     },
 };
 

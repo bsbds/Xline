@@ -1,11 +1,11 @@
 //! An example to show how the errors are organized in `xline-client`
 use curp::error::CommandProposeError;
-use xline::storage::ExecuteError;
 use xline_client::{
     error::{ClientError, Result},
     types::kv::PutRequest,
     Client, ClientOptions,
 };
+use xlineapi::ExecuteError;
 
 #[tokio::main]
 async fn main() -> Result<()> {

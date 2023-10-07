@@ -11,6 +11,7 @@ use clippy_utilities::{Cast, OverflowArithmetic};
 use prost::Message;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+use xlineapi::execute_error::ExecuteError;
 
 use super::{
     index::{Index, IndexOperate},
@@ -29,10 +30,7 @@ use crate::{
         ResponseWrapper, SortOrder, SortTarget, TargetUnion, TxnRequest, TxnResponse,
     },
     server::command::{CommandResponse, KeyRange, SyncResponse, META_TABLE},
-    storage::{
-        db::{WriteOp, COMPACT_REVISION},
-        ExecuteError,
-    },
+    storage::db::{WriteOp, COMPACT_REVISION},
 };
 
 /// KV table name

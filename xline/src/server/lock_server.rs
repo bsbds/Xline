@@ -6,7 +6,7 @@ use curp::client::Client;
 use etcd_client::EventType;
 use tonic::transport::{Channel, Endpoint};
 use tracing::debug;
-use xlineapi::RequestWithToken;
+use xlineapi::{ExecuteError, RequestWithToken};
 
 use super::{
     auth_server::get_token,
@@ -24,7 +24,7 @@ use crate::{
         ResponseHeader, SortOrder, SortTarget, TargetUnion, TxnRequest, TxnResponse, UnlockRequest,
         UnlockResponse, WatchClient, WatchCreateRequest, WatchRequest,
     },
-    storage::{storage_api::StorageApi, ExecuteError},
+    storage::storage_api::StorageApi,
 };
 
 /// Default session ttl
