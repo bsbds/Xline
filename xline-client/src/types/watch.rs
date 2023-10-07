@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use futures::channel::mpsc::Sender;
-use xline::server::KeyRange;
+use xlineapi::command::KeyRange;
 pub use xlineapi::{Event, EventType, KeyValue, WatchResponse};
 use xlineapi::{RequestUnion, WatchCancelRequest, WatchProgressRequest};
 
