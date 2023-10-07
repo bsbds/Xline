@@ -4,7 +4,10 @@ use curp::client::{Client, ReadState};
 use futures::future::join_all;
 use tokio::time::timeout;
 use tracing::{debug, instrument};
-use xlineapi::{request_validation::RequestValidator, ExecuteError, ResponseWrapper};
+use xlineapi::{
+    command::command_from_request_wrapper, request_validation::RequestValidator, ExecuteError,
+    ResponseWrapper,
+};
 
 use super::{
     auth_server::get_token,
@@ -18,7 +21,6 @@ use crate::{
         PutRequest, PutResponse, RangeRequest, RangeResponse, RequestWithToken, RequestWrapper,
         Response, ResponseOp, TxnRequest, TxnResponse,
     },
-    server::command::command_from_request_wrapper,
     storage::{storage_api::StorageApi, AuthStore, KvStore},
 };
 
@@ -98,7 +100,7 @@ where
             .gen_propose_id()
             .await
             .map_err(propose_err_to_status)?;
-        let cmd = command_from_request_wrapper::<S>(propose_id, wrapper, None);
+        let cmd = command_from_request_wrapper(propose_id, wrapper);
 
         self.client
             .propose(cmd, use_fast_path)
@@ -207,7 +209,7 @@ where
             .gen_propose_id()
             .await
             .map_err(propose_err_to_status)?;
-        let cmd = command_from_request_wrapper::<S>(propose_id, wrapper, None);
+        let cmd = command_from_request_wrapper(propose_id, wrapper);
         if !is_serializable {
             self.wait_read_state(&cmd).await?;
             // Double check whether the range request is compacted or not since the compaction request
@@ -308,7 +310,7 @@ where
                 .gen_propose_id()
                 .await
                 .map_err(propose_err_to_status)?;
-            let cmd = command_from_request_wrapper::<S>(propose_id, wrapper, None);
+            let cmd = command_from_request_wrapper(propose_id, wrapper);
             if !is_serializable {
                 self.wait_read_state(&cmd).await?;
             }

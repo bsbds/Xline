@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
 use curp::client::Client;
 use pbkdf2::{
@@ -7,38 +7,30 @@ use pbkdf2::{
 };
 use tonic::metadata::MetadataMap;
 use tracing::debug;
-use xlineapi::{request_validation::RequestValidator, RequestWithToken};
-
-use super::command::{
-    command_from_request_wrapper, propose_err_to_status, Command, CommandResponse, SyncResponse,
+use xlineapi::{
+    command::command_from_request_wrapper, request_validation::RequestValidator, RequestWithToken,
 };
-use crate::{
-    rpc::{
-        Auth, AuthDisableRequest, AuthDisableResponse, AuthEnableRequest, AuthEnableResponse,
-        AuthRoleAddRequest, AuthRoleAddResponse, AuthRoleDeleteRequest, AuthRoleDeleteResponse,
-        AuthRoleGetRequest, AuthRoleGetResponse, AuthRoleGrantPermissionRequest,
-        AuthRoleGrantPermissionResponse, AuthRoleListRequest, AuthRoleListResponse,
-        AuthRoleRevokePermissionRequest, AuthRoleRevokePermissionResponse, AuthStatusRequest,
-        AuthStatusResponse, AuthUserAddRequest, AuthUserAddResponse, AuthUserChangePasswordRequest,
-        AuthUserChangePasswordResponse, AuthUserDeleteRequest, AuthUserDeleteResponse,
-        AuthUserGetRequest, AuthUserGetResponse, AuthUserGrantRoleRequest,
-        AuthUserGrantRoleResponse, AuthUserListRequest, AuthUserListResponse,
-        AuthUserRevokeRoleRequest, AuthUserRevokeRoleResponse, AuthenticateRequest,
-        AuthenticateResponse, RequestWrapper, ResponseWrapper,
-    },
-    storage::storage_api::StorageApi,
+
+use super::command::{propose_err_to_status, Command, CommandResponse, SyncResponse};
+use crate::rpc::{
+    Auth, AuthDisableRequest, AuthDisableResponse, AuthEnableRequest, AuthEnableResponse,
+    AuthRoleAddRequest, AuthRoleAddResponse, AuthRoleDeleteRequest, AuthRoleDeleteResponse,
+    AuthRoleGetRequest, AuthRoleGetResponse, AuthRoleGrantPermissionRequest,
+    AuthRoleGrantPermissionResponse, AuthRoleListRequest, AuthRoleListResponse,
+    AuthRoleRevokePermissionRequest, AuthRoleRevokePermissionResponse, AuthStatusRequest,
+    AuthStatusResponse, AuthUserAddRequest, AuthUserAddResponse, AuthUserChangePasswordRequest,
+    AuthUserChangePasswordResponse, AuthUserDeleteRequest, AuthUserDeleteResponse,
+    AuthUserGetRequest, AuthUserGetResponse, AuthUserGrantRoleRequest, AuthUserGrantRoleResponse,
+    AuthUserListRequest, AuthUserListResponse, AuthUserRevokeRoleRequest,
+    AuthUserRevokeRoleResponse, AuthenticateRequest, AuthenticateResponse, RequestWrapper,
+    ResponseWrapper,
 };
 
 /// Auth Server
 #[derive(Debug)]
-pub(crate) struct AuthServer<S>
-where
-    S: StorageApi,
-{
+pub(crate) struct AuthServer {
     /// Consensus client
     client: Arc<Client<Command>>,
-    /// Phantom
-    phantom: PhantomData<S>,
 }
 
 /// Get token from metadata
@@ -49,16 +41,10 @@ pub(crate) fn get_token(metadata: &MetadataMap) -> Option<String> {
         .and_then(|v| v.to_str().map(String::from).ok())
 }
 
-impl<S> AuthServer<S>
-where
-    S: StorageApi,
-{
+impl AuthServer {
     /// New `AuthServer`
     pub(crate) fn new(client: Arc<Client<Command>>) -> Self {
-        Self {
-            client,
-            phantom: PhantomData,
-        }
+        Self { client }
     }
 
     /// Propose request and get result with fast/slow path
@@ -77,7 +63,7 @@ where
             .gen_propose_id()
             .await
             .map_err(propose_err_to_status)?;
-        let cmd = command_from_request_wrapper::<S>(propose_id, wrapper, None);
+        let cmd = command_from_request_wrapper(propose_id, wrapper);
 
         self.client
             .propose(cmd, use_fast_path)
@@ -114,10 +100,7 @@ where
 }
 
 #[tonic::async_trait]
-impl<S> Auth for AuthServer<S>
-where
-    S: StorageApi,
-{
+impl Auth for AuthServer {
     async fn auth_enable(
         &self,
         request: tonic::Request<AuthEnableRequest>,
