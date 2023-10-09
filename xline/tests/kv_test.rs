@@ -300,3 +300,39 @@ async fn test_txn() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[abort_on_panic]
+async fn single_txn_get_after_put_is_ok() -> Result<(), Box<dyn Error>> {
+    let mut cluster = Cluster::new(3).await;
+    cluster.start().await;
+    let mut client: KvClient = cluster.client().await.kv_client();
+
+    let tnx_a = Txn::new()
+        .when([])
+        .and_then([TxnOp::put("f", "foo", None), TxnOp::get("f", None)]);
+    let res = client.txn(tnx_a).await?;
+    let TxnOpResponse::Get(ref resp) = res.op_responses()[1] else { panic!("invalid response") };
+    assert_eq!(resp.kvs()[0].value(), b"foo");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[abort_on_panic]
+async fn single_txn_get_after_delete_is_ok() -> Result<(), Box<dyn Error>> {
+    let mut cluster = Cluster::new(3).await;
+    cluster.start().await;
+    let mut client: KvClient = cluster.client().await.kv_client();
+
+    client.put("b", "bar", None).await?;
+
+    let tnx_a = Txn::new()
+        .when([])
+        .and_then([TxnOp::delete("b", None), TxnOp::get("b", None)]);
+    let res = client.txn(tnx_a).await?;
+    let TxnOpResponse::Get(ref resp) = res.op_responses()[1] else { panic!("invalid response") };
+    assert!(resp.kvs().is_empty());
+
+    Ok(())
+}
