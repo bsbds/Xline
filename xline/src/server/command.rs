@@ -145,7 +145,7 @@ where
     ) -> Result<<Command as CurpCommand>::ER, <Command as CurpCommand>::Error> {
         let wrapper = cmd.request();
         let res = match wrapper.request.backend() {
-            RequestBackend::Kv => self.kv_storage.execute(wrapper),
+            RequestBackend::Kv => self.kv_storage.execute(wrapper, 0),
             RequestBackend::Auth => self.auth_storage.execute(wrapper),
             RequestBackend::Lease => self.lease_storage.execute(wrapper),
         };
@@ -168,7 +168,7 @@ where
         let mut ops = vec![WriteOp::PutAppliedIndex(index)];
         let wrapper = cmd.request();
 
-        // Flush the applied index, as we will flush the ops inside the kv storeage for txn
+        // Flush the applied index, as we will flush the ops inside the kv storage for txn
         if let RequestWrapper::TxnRequest(_) = wrapper.request {
             let _ignore = self.persistent.flush_ops(ops.split_off(0))?;
         }
