@@ -613,12 +613,19 @@ impl<C: 'static + Command, RC: RoleChange + 'static> RawCurp<C, RC> {
 
     /// Handle `fetch_read_state`
     pub(super) fn handle_fetch_read_state(&self, cmd: &C) -> bincode::Result<ReadState> {
-        let ids = self.ctx.sp.map_lock(|sp| {
-            sp.pool
+        let ids = {
+            let sp_l = self.ctx.sp.lock();
+            let ucp_l = self.ctx.ucp.lock();
+            sp_l.pool
                 .iter()
                 .filter_map(|(id, c)| c.is_conflict(cmd).then_some(id.clone()))
+                .chain(
+                    ucp_l
+                        .iter()
+                        .filter_map(|(id, c)| c.is_conflict(cmd).then_some(id.clone())),
+                )
                 .collect_vec()
-        });
+        };
         if ids.is_empty() {
             Ok(ReadState::CommitIndex(self.log.read().commit_index))
         } else {
