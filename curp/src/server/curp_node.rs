@@ -311,7 +311,10 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
         req: FetchReadStateRequest,
     ) -> Result<FetchReadStateResponse, CurpError> {
         let cmd = req.cmd()?;
-        let state = self.curp.handle_fetch_read_state(&cmd)?;
+        let state = self
+            .curp
+            .handle_fetch_read_state(&cmd)
+            .map_err(|_| CurpError::Internal("not leader".to_owned()))?;
         Ok(FetchReadStateResponse::new(state))
     }
 }

@@ -612,7 +612,11 @@ impl<C: 'static + Command, RC: RoleChange + 'static> RawCurp<C, RC> {
     }
 
     /// Handle `fetch_read_state`
-    pub(super) fn handle_fetch_read_state(&self, cmd: &C) -> bincode::Result<ReadState> {
+    pub(super) fn handle_fetch_read_state(&self, cmd: &C) -> Result<ReadState, ProposeError> {
+        if self.st.read().role != Role::Leader {
+            return Err(ProposeError::NotLeader);
+        }
+
         let ids = {
             let sp_l = self.ctx.sp.lock();
             let ucp_l = self.ctx.ucp.lock();
