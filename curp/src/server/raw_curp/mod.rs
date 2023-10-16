@@ -628,6 +628,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> RawCurp<C, RC> {
                         .iter()
                         .filter_map(|(id, c)| c.is_conflict(cmd).then_some(id.clone())),
                 )
+                .unique()
                 .collect_vec()
         };
         if ids.is_empty() {
