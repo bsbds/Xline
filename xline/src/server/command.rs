@@ -6,6 +6,7 @@ use curp::{
     LogIndex,
 };
 use engine::Snapshot;
+use xlineapi::RequestWrapper;
 
 use super::barriers::{IdBarrier, IndexBarrier};
 use crate::{
