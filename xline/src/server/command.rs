@@ -179,6 +179,7 @@ where
             RequestBackend::Auth => self.auth_storage.after_sync(wrapper, revision)?,
             RequestBackend::Lease => self.lease_storage.after_sync(wrapper, revision).await?,
         };
+        tracing::debug!("after sync {cmd:?} with index: {index}, revision: {revision}");
         ops.append(&mut wr_ops);
         let key_revisions = self.persistent.flush_ops(ops)?;
         if !key_revisions.is_empty() {

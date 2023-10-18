@@ -497,6 +497,7 @@ where
             }
             _ => unreachable!("Other request should not be sent to this store"),
         };
+        debug!("execute result: {res:?}");
         res
     }
 
