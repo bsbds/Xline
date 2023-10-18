@@ -77,9 +77,13 @@ where
     }
 
     /// serializable execute request in current node
-    fn do_serializable(&self, wrapper: &RequestWithToken) -> Result<Response, tonic::Status> {
+    fn do_serializable(
+        &self,
+        wrapper: &RequestWithToken,
+        revision: i64,
+    ) -> Result<Response, tonic::Status> {
         self.auth_storage.check_permission(wrapper)?;
-        let cmd_res = self.kv_storage.execute(wrapper, 0)?;
+        let cmd_res = self.kv_storage.execute(wrapper, revision)?;
 
         Ok(Self::parse_response_op(cmd_res.into_inner().into()))
     }
@@ -150,7 +154,7 @@ where
     }
 
     /// Wait current node's state machine apply the conflict commands
-    async fn wait_read_state(&self, cmd: &Command) -> Result<(), tonic::Status> {
+    async fn wait_read_state(&self, cmd: &Command) -> Result<i64, tonic::Status> {
         loop {
             let rd_state = self
                 .client
@@ -165,20 +169,21 @@ where
                             .into_iter()
                             .map(|id| self.id_barrier.wait(id))
                             .collect::<Vec<_>>();
-                        let _ignore = join_all(fus).await;
+                        join_all(fus).await.into_iter().max()
                     }
                     ReadState::CommitIndex(index) => {
                         debug!(?index, "Range wait for commit index");
-                        self.index_barrier.wait(index).await;
+                        self.index_barrier.wait(index).await
                     }
                     _ => unreachable!(),
                 }
             };
-            if timeout(self.range_retry_timeout, wait_future).await.is_ok() {
-                break;
-            };
+            if let Ok(rev) = timeout(self.range_retry_timeout, wait_future).await {
+                if let Some(revision) = rev {
+                    break Ok(revision);
+                }
+            }
         }
-        Ok(())
     }
 }
 
@@ -210,8 +215,9 @@ where
             .await
             .map_err(propose_err_to_status)?;
         let cmd = command_from_request_wrapper(propose_id, wrapper);
+        let mut revision = 0;
         if !is_serializable {
-            self.wait_read_state(&cmd).await?;
+            revision = self.wait_read_state(&cmd).await?;
             // Double check whether the range request is compacted or not since the compaction request
             // may be executed during the process of `wait_read_state` which results in the result of
             // previous `check_range_request` outdated.
@@ -221,7 +227,7 @@ where
             )?;
         }
 
-        let res = self.do_serializable(cmd.request())?;
+        let res = self.do_serializable(cmd.request(), revision)?;
         if let Response::ResponseRange(response) = res {
             Ok(tonic::Response::new(response))
         } else {
@@ -311,10 +317,11 @@ where
                 .await
                 .map_err(propose_err_to_status)?;
             let cmd = command_from_request_wrapper(propose_id, wrapper);
+            let mut revision = 0;
             if !is_serializable {
-                self.wait_read_state(&cmd).await?;
+                revision = self.wait_read_state(&cmd).await?;
             }
-            self.do_serializable(cmd.request())?
+            self.do_serializable(cmd.request(), revision)?
         } else {
             let is_fast_path = true;
             let (cmd_res, sync_res) = self.propose(request, is_fast_path).await?;
