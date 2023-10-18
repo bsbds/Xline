@@ -33,6 +33,9 @@ impl IndexBarrier {
 
     /// Wait for the index until it is triggered.
     pub(crate) async fn wait(&self, index: u64) -> Option<i64> {
+        if index == 0 {
+            return Some(0);
+        }
         let (listener, revision) = {
             let mut inner_l = self.inner.lock();
             if inner_l.next > index {

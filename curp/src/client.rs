@@ -23,7 +23,7 @@ use crate::{
     rpc::{
         self, connect::ConnectApi, protocol_client::ProtocolClient, ConfChangeError,
         FetchClusterRequest, FetchClusterResponse, FetchReadStateRequest, ProposeConfChangeRequest,
-        ProposeRequest, ReadState as PbReadState, ShutdownRequest, SyncResult, WaitSyncedRequest,
+        ProposeRequest, ShutdownRequest, SyncResult, WaitSyncedRequest,
     },
     LogIndex,
 };
@@ -212,12 +212,11 @@ impl State {
 
 /// Read state of a command
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum ReadState {
+pub struct ReadState {
     /// need to wait other proposals
-    Ids(Vec<ProposeId>),
+    pub ids: Vec<ProposeId>,
     /// need to wait the commit index
-    CommitIndex(LogIndex),
+    pub index: LogIndex,
 }
 
 impl<C> Client<C>
@@ -708,19 +707,11 @@ where
                     continue;
                 }
             };
-            let pb_state = resp
-                .read_state
-                .unwrap_or_else(|| unreachable!("read state should be some"));
-            let state = match pb_state {
-                PbReadState::CommitIndex(i) => ReadState::CommitIndex(i),
-                PbReadState::Ids(i) => ReadState::Ids(
-                    i.ids
-                        .into_iter()
-                        .map(|id| bincode::deserialize(&id))
-                        .collect::<bincode::Result<Vec<ProposeId>>>()?,
-                ),
-            };
-            return Ok(state);
+
+            return Ok(ReadState {
+                index: resp.commit_index,
+                ids: resp.ids,
+            });
         }
         Err(ProposeError::Timeout)
     }

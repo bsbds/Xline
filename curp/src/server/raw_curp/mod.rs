@@ -46,10 +46,10 @@ use crate::{
     log_entry::{EntryData, LogEntry},
     members::{ClusterInfo, Member, ServerId},
     role_change::RoleChange,
-    rpc::{ConfChange, ConfChangeType, IdSet, ReadState},
+    rpc::{ConfChange, ConfChangeType},
     server::{cmd_board::CmdBoardRef, raw_curp::state::VoteResult, spec_pool::SpecPoolRef},
     snapshot::{Snapshot, SnapshotMeta},
-    LogIndex,
+    FetchReadStateResponse, LogIndex,
 };
 
 /// Curp state
@@ -612,7 +612,10 @@ impl<C: 'static + Command, RC: RoleChange + 'static> RawCurp<C, RC> {
     }
 
     /// Handle `fetch_read_state`
-    pub(super) fn handle_fetch_read_state(&self, cmd: &C) -> Result<ReadState, ProposeError> {
+    pub(super) fn handle_fetch_read_state(
+        &self,
+        cmd: &C,
+    ) -> Result<FetchReadStateResponse, ProposeError> {
         if self.st.read().role != Role::Leader {
             return Err(ProposeError::NotLeader);
         }
@@ -631,11 +634,10 @@ impl<C: 'static + Command, RC: RoleChange + 'static> RawCurp<C, RC> {
                 .unique()
                 .collect_vec()
         };
-        if ids.is_empty() {
-            Ok(ReadState::CommitIndex(self.log.read().commit_index))
-        } else {
-            Ok(ReadState::Ids(IdSet::new(ids)?))
-        }
+        Ok(FetchReadStateResponse {
+            ids,
+            commit_index: self.log.read().commit_index,
+        })
     }
 }
 

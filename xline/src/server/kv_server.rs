@@ -1,6 +1,6 @@
 use std::{fmt::Debug, sync::Arc, time::Duration};
 
-use curp::client::{Client, ReadState};
+use curp::client::Client;
 use futures::future::join_all;
 use tokio::time::timeout;
 use tracing::{debug, instrument};
@@ -161,21 +161,18 @@ where
                 .fetch_read_state(cmd)
                 .await
                 .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            debug!(
+                "wait read state: index: {}, ids: {:?}",
+                rd_state.index, rd_state.ids
+            );
             let wait_future = async move {
-                match rd_state {
-                    ReadState::Ids(ids) => {
-                        debug!(?ids, "Range wait for command ids");
-                        let fus = ids
-                            .into_iter()
-                            .map(|id| self.id_barrier.wait(id))
-                            .collect::<Vec<_>>();
-                        join_all(fus).await.into_iter().max()
-                    }
-                    ReadState::CommitIndex(index) => {
-                        debug!(?index, "Range wait for commit index");
-                        self.index_barrier.wait(index).await
-                    }
-                    _ => unreachable!(),
+                let fus = rd_state.ids.into_iter().map(|id| self.id_barrier.wait(id));
+                let id_revs = join_all(fus).await;
+                let index_rev = self.index_barrier.wait(rd_state.index).await;
+                if index_rev.is_none() {
+                    None
+                } else {
+                    id_revs.into_iter().chain(index_rev.into_iter()).max()
                 }
             };
             if let Ok(rev) = timeout(self.range_retry_timeout, wait_future).await {

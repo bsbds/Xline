@@ -22,9 +22,8 @@ pub(crate) use self::proto::{
         InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest, VoteResponse,
     },
     messagepb::{
-        fetch_read_state_response::ReadState,
         propose_conf_change_response::Error as ConfChangeError, protocol_server::Protocol,
-        FetchReadStateRequest, FetchReadStateResponse, IdSet, ShutdownRequest, ShutdownResponse,
+        FetchReadStateRequest, FetchReadStateResponse, ShutdownRequest, ShutdownResponse,
     },
 };
 pub use self::proto::{
@@ -401,18 +400,6 @@ impl InstallSnapshotResponse {
     }
 }
 
-impl IdSet {
-    /// Create a new `IdSet`
-    pub fn new(ids: Vec<ProposeId>) -> bincode::Result<Self> {
-        Ok(Self {
-            ids: ids
-                .into_iter()
-                .map(|id| bincode::serialize(&id))
-                .collect::<bincode::Result<Vec<Vec<u8>>>>()?,
-        })
-    }
-}
-
 impl FetchReadStateRequest {
     /// Create a new fetch read state request
     pub(crate) fn new<C: Command>(cmd: &C) -> bincode::Result<Self> {
@@ -424,15 +411,6 @@ impl FetchReadStateRequest {
     /// Get command
     pub(crate) fn cmd<C: Command>(&self) -> bincode::Result<C> {
         bincode::deserialize(&self.command)
-    }
-}
-
-impl FetchReadStateResponse {
-    /// Create a new fetch read state response
-    pub(crate) fn new(state: ReadState) -> Self {
-        Self {
-            read_state: Some(state),
-        }
     }
 }
 
