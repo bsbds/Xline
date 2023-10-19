@@ -25,11 +25,11 @@ use crate::{
 pub(super) mod conflict_checked_mpmc;
 
 /// Event for command executor
-pub(super) enum CEEvent<C> {
+pub(super) enum CEEvent<C: Command> {
     /// The cmd is ready for speculative execution
     SpecExeReady(Arc<LogEntry<C>>),
     /// The cmd is ready for after sync
-    ASReady(Arc<LogEntry<C>>),
+    ASReady((Arc<LogEntry<C>>, C::PR)),
     /// Reset the command executor, send(()) when finishes
     Reset(Option<Snapshot>, oneshot::Sender<()>),
     /// Take a snapshot
@@ -40,7 +40,11 @@ impl<C: Command> Debug for CEEvent<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             Self::SpecExeReady(ref entry) => f.debug_tuple("SpecExeReady").field(entry).finish(),
-            Self::ASReady(ref entry) => f.debug_tuple("ASReady").field(entry).finish(),
+            Self::ASReady((ref entry, ref prepare)) => f
+                .debug_tuple("ASReady")
+                .field(entry)
+                .field(prepare)
+                .finish(),
             Self::Reset(ref ss, _) => {
                 if ss.is_none() {
                     write!(f, "Reset(None)")
@@ -69,9 +73,7 @@ async fn cmd_worker<
 ) {
     while let Ok(mut task) = dispatch_rx.recv().await {
         let succeeded = match task.take() {
-            TaskType::SpecExe(entry, pre_err) => {
-                worker_exe(entry, pre_err, ce.as_ref(), curp.as_ref()).await
-            }
+            TaskType::SpecExe(entry) => worker_exe(entry, ce.as_ref(), curp.as_ref()).await,
             TaskType::AS(entry, prepare) => {
                 worker_as(entry, prepare, ce.as_ref(), curp.as_ref()).await
             }
@@ -96,7 +98,6 @@ async fn worker_exe<
     RC: RoleChange + 'static,
 >(
     entry: Arc<LogEntry<C>>,
-    pre_err: Option<C::Error>,
     ce: &CE,
     curp: &RawCurp<C, CE, RC>,
 ) -> bool {
@@ -104,11 +105,7 @@ async fn worker_exe<
     let id = curp.id();
     match entry.entry_data {
         EntryData::Command(ref cmd) => {
-            let er = if let Some(err_msg) = pre_err {
-                Err(err_msg)
-            } else {
-                ce.execute(cmd, entry.index).await
-            };
+            let er = ce.execute(cmd, entry.index).await;
             let er_ok = er.is_ok();
             cb.write().insert_er(entry.id(), er);
             if !er_ok {
@@ -255,7 +252,7 @@ pub(super) trait CEEventTxApi<C: Command + 'static>: Send + Sync + 'static {
     fn send_sp_exe(&self, entry: Arc<LogEntry<C>>);
 
     /// Send after sync event to the background cmd worker so that after sync can be called
-    fn send_after_sync(&self, entry: Arc<LogEntry<C>>);
+    fn send_after_sync(&self, entry: Arc<LogEntry<C>>, prepare: C::PR);
 
     /// Send reset
     fn send_reset(&self, snapshot: Option<Snapshot>) -> oneshot::Receiver<()>;
@@ -272,8 +269,8 @@ impl<C: Command + 'static> CEEventTxApi<C> for CEEventTx<C> {
         }
     }
 
-    fn send_after_sync(&self, entry: Arc<LogEntry<C>>) {
-        let event = CEEvent::ASReady(Arc::clone(&entry));
+    fn send_after_sync(&self, entry: Arc<LogEntry<C>>, prepare: C::PR) {
+        let event = CEEvent::ASReady((Arc::clone(&entry), prepare));
         if let Err(e) = self.0.send(event) {
             error!("failed to send cmd as event to background cmd worker, {e}");
         }
@@ -371,8 +368,7 @@ mod tests {
             StorageConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -385,12 +381,14 @@ mod tests {
             l,
         );
 
-        let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(TestCommand::default())));
+        let cmd = TestCommand::default();
+        let prepare = ce.prepare(&cmd, 0).unwrap();
+        let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
 
         ce_event_tx.send_sp_exe(Arc::clone(&entry));
         assert_eq!(er_rx.recv().await.unwrap().1.values, vec![]);
 
-        ce_event_tx.send_after_sync(entry);
+        ce_event_tx.send_after_sync(entry, prepare);
         assert_eq!(as_rx.recv().await.unwrap().1, 1);
         t.self_shutdown();
     }
@@ -409,8 +407,7 @@ mod tests {
             StorageConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -424,17 +421,15 @@ mod tests {
         );
 
         let begin = Instant::now();
-        let entry = Arc::new(LogEntry::new_cmd(
-            1,
-            1,
-            Arc::new(TestCommand::default().set_exe_dur(Duration::from_secs(1))),
-        ));
+        let cmd = TestCommand::default().set_exe_dur(Duration::from_secs(1));
+        let prepare = ce.prepare(&cmd, 0).unwrap();
+        let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
 
         ce_event_tx.send_sp_exe(Arc::clone(&entry));
 
         // at 500ms, sync has completed, call after sync, then needs_as will be updated
         sleep_millis(500).await;
-        ce_event_tx.send_after_sync(entry);
+        ce_event_tx.send_after_sync(entry, prepare);
 
         assert_eq!(as_rx.recv().await.unwrap().1, 1);
 
@@ -456,8 +451,7 @@ mod tests {
             StorageConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -470,21 +464,17 @@ mod tests {
             l,
         );
 
-        let entry = Arc::new(LogEntry::new_cmd(
-            1,
-            1,
-            Arc::new(
-                TestCommand::default()
-                    .set_exe_dur(Duration::from_secs(1))
-                    .set_exe_should_fail(),
-            ),
-        ));
+        let cmd = TestCommand::default()
+            .set_exe_dur(Duration::from_secs(1))
+            .set_exe_should_fail();
+        let prepare = ce.prepare(&cmd, 0).unwrap();
+        let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
 
         ce_event_tx.send_sp_exe(Arc::clone(&entry));
 
         // at 500ms, sync has completed
         sleep_millis(500).await;
-        ce_event_tx.send_after_sync(entry);
+        ce_event_tx.send_after_sync(entry, prepare);
 
         // at 1500ms, as should not be called
         sleep_secs(1).await;
@@ -507,8 +497,7 @@ mod tests {
             StorageConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -521,9 +510,11 @@ mod tests {
             l,
         );
 
-        let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(TestCommand::default())));
+        let cmd = TestCommand::default();
+        let prepare = ce.prepare(&cmd, 0).unwrap();
+        let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
 
-        ce_event_tx.send_after_sync(entry);
+        ce_event_tx.send_after_sync(entry, prepare);
 
         assert_eq!(er_rx.recv().await.unwrap().1.revisions, vec![]);
         assert_eq!(as_rx.recv().await.unwrap().1, 1);
@@ -544,8 +535,7 @@ mod tests {
             StorageConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -558,13 +548,11 @@ mod tests {
             l,
         );
 
-        let entry = Arc::new(LogEntry::new_cmd(
-            1,
-            1,
-            Arc::new(TestCommand::default().set_exe_should_fail()),
-        ));
+        let cmd = TestCommand::default().set_exe_should_fail();
+        let prepare = ce.prepare(&cmd, 0).unwrap();
+        let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
 
-        ce_event_tx.send_after_sync(entry);
+        ce_event_tx.send_after_sync(entry, prepare);
 
         sleep_millis(100).await;
         let er = er_rx.try_recv();
@@ -588,8 +576,7 @@ mod tests {
             StorageConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -602,16 +589,13 @@ mod tests {
             l,
         );
 
-        let entry1 = Arc::new(LogEntry::new_cmd(
-            1,
-            1,
-            Arc::new(TestCommand::new_put(vec![1], 1)),
-        ));
-        let entry2 = Arc::new(LogEntry::new_cmd(
-            2,
-            1,
-            Arc::new(TestCommand::new_get(vec![1])),
-        ));
+        let cmd1 = TestCommand::new_put(vec![1], 1);
+        let prepare1 = ce.prepare(&cmd1, 0).unwrap();
+        let entry1 = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd1)));
+
+        let cmd2 = TestCommand::new_get(vec![1]);
+        let prepare2 = ce.prepare(&cmd2, 1).unwrap();
+        let entry2 = Arc::new(LogEntry::new_cmd(2, 1, Arc::new(cmd2)));
 
         ce_event_tx.send_sp_exe(Arc::clone(&entry1));
         ce_event_tx.send_sp_exe(Arc::clone(&entry2));
@@ -626,8 +610,8 @@ mod tests {
         assert!(as_rx.try_recv().is_err());
 
         // cmd1 and cmd2 after sync
-        ce_event_tx.send_after_sync(entry1);
-        ce_event_tx.send_after_sync(entry2);
+        ce_event_tx.send_after_sync(entry1, prepare1);
+        ce_event_tx.send_after_sync(entry2, prepare2);
 
         assert_eq!(er_rx.recv().await.unwrap().1.revisions, vec![1]);
         assert_eq!(as_rx.recv().await.unwrap().1, 1);
@@ -648,8 +632,7 @@ mod tests {
             StorageConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -679,13 +662,11 @@ mod tests {
 
         ce_event_tx.send_reset(None);
 
-        let entry3 = Arc::new(LogEntry::new_cmd(
-            3,
-            1,
-            Arc::new(TestCommand::new_get(vec![1])),
-        ));
+        let cmd3 = TestCommand::new_get(vec![1]);
+        let prepare3 = ce.prepare(&cmd3, 0).unwrap();
+        let entry3 = Arc::new(LogEntry::new_cmd(3, 1, Arc::new(cmd3)));
 
-        ce_event_tx.send_after_sync(entry3);
+        ce_event_tx.send_after_sync(entry3, prepare3);
 
         assert_eq!(er_rx.recv().await.unwrap().1.revisions, vec![]);
 
@@ -710,8 +691,7 @@ mod tests {
             as_tx,
             StorageConfig::Memory,
         ));
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce1), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         let curp = RawCurp::new_test(3, ce_event_tx.clone(), mock_role_change());
         let s2_id = curp.cluster().get_id_by_name("S2").unwrap();
         curp.handle_append_entries(
@@ -731,13 +711,11 @@ mod tests {
             l.clone(),
         );
 
-        let entry = Arc::new(LogEntry::new_cmd(
-            1,
-            1,
-            Arc::new(TestCommand::new_put(vec![1], 1).set_exe_dur(Duration::from_millis(50))),
-        ));
+        let cmd = TestCommand::new_put(vec![1], 1).set_exe_dur(Duration::from_millis(50));
+        let prepare = ce1.prepare(&cmd, 0).unwrap();
+        let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
 
-        ce_event_tx.send_after_sync(entry);
+        ce_event_tx.send_after_sync(entry, prepare);
 
         let snapshot = ce_event_tx
             .send_snapshot(SnapshotMeta {
@@ -756,8 +734,7 @@ mod tests {
             as_tx,
             StorageConfig::Memory,
         ));
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce2), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce2),
             Arc::new(RawCurp::new_test(
@@ -772,12 +749,10 @@ mod tests {
 
         ce_event_tx.send_reset(Some(snapshot)).await.unwrap();
 
-        let entry = Arc::new(LogEntry::new_cmd(
-            1,
-            1,
-            Arc::new(TestCommand::new_get(vec![1])),
-        ));
-        ce_event_tx.send_after_sync(entry);
+        let cmd = TestCommand::new_get(vec![1]);
+        let prepare = ce2.prepare(&cmd, 0).unwrap();
+        let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
+        ce_event_tx.send_after_sync(entry, prepare);
         assert_eq!(er_rx.recv().await.unwrap().1.revisions, vec![1]);
         t.self_shutdown();
     }
