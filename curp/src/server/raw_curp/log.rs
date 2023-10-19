@@ -23,7 +23,7 @@ use crate::{
 /// Curp logs
 /// There exists a fake log entry 0 whose term equals 0
 /// For the leader, there should never be a gap between snapshot and entries
-pub(super) struct Log<C: Command> {
+pub(super) struct Log<C> {
     /// Log entries, should be persisted
     /// Note that the logical index in `LogEntry` is different from physical index
     entries: LogEntryVecDeque<C>,
@@ -45,7 +45,7 @@ pub(super) struct Log<C: Command> {
 
 /// That's a struct to store log entries and calculate batch of log
 #[derive(Debug)]
-struct LogEntryVecDeque<C: Command> {
+struct LogEntryVecDeque<C> {
     /// A VecDeque to store log entries, it will be serialized and persisted
     entries: VecDeque<Arc<LogEntry<C>>>,
     /// The sum of serialized size of previous log entries

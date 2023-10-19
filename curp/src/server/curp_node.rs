@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt::Debug, io, sync::Arc, time::Duration};
 
 use clippy_utilities::NumericCast;
-use curp_external_api::cmd::PbSerializeError;
+use curp_external_api::cmd::{CommandExecutor, PbSerializeError};
 use engine::{SnapshotAllocator, SnapshotApi};
 use event_listener::Event;
 use futures::{pin_mut, stream::FuturesUnordered, Stream, StreamExt};
@@ -27,7 +27,7 @@ use super::{
     storage::{StorageApi, StorageError},
 };
 use crate::{
-    cmd::{Command, CommandExecutor},
+    cmd::Command,
     error::{CommandSyncError, ProposeError, RpcError},
     log_entry::LogEntry,
     members::{ClusterInfo, ServerId},
@@ -103,9 +103,9 @@ enum SendSnapshotError {
 }
 
 /// `CurpNode` represents a single node of curp cluster
-pub(super) struct CurpNode<C: Command, RC: RoleChange> {
+pub(super) struct CurpNode<C: Command, CE, RC: RoleChange> {
     /// `RawCurp` state machine
-    curp: Arc<RawCurp<C, RC>>,
+    curp: Arc<RawCurp<C, CE, RC>>,
     /// The speculative cmd pool, shared with executor
     spec_pool: SpecPoolRef<C>,
     /// Cmd watch board for tracking the cmd sync results
@@ -119,7 +119,7 @@ pub(super) struct CurpNode<C: Command, RC: RoleChange> {
 }
 
 // handlers
-impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
+impl<C: 'static + Command, CE, RC: RoleChange + 'static> CurpNode<C, CE, RC> {
     /// Handle `Propose` requests
     pub(super) async fn propose(&self, req: ProposeRequest) -> Result<ProposeResponse, CurpError> {
         if self.curp.is_shutdown() {
@@ -318,11 +318,16 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
 }
 
 /// Spawned tasks
-impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
+impl<C, CE, RC> CurpNode<C, CE, RC>
+where
+    C: 'static + Command,
+    CE: CommandExecutor<C> + 'static,
+    RC: RoleChange + 'static,
+{
     /// Tick periodically
     #[allow(clippy::integer_arithmetic)]
     async fn election_task(
-        curp: Arc<RawCurp<C, RC>>,
+        curp: Arc<RawCurp<C, CE, RC>>,
         connects: HashMap<ServerId, Arc<impl InnerConnectApi + ?Sized>>,
         mut shutdown_listener: shutdown::Listener,
     ) {
@@ -352,7 +357,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
     /// Responsible for bringing up `sync_follower_task` when self becomes leader
     #[allow(clippy::integer_arithmetic)]
     async fn sync_followers_daemon(
-        curp: Arc<RawCurp<C, RC>>,
+        curp: Arc<RawCurp<C, CE, RC>>,
         connects: HashMap<u64, Arc<impl InnerConnectApi + ?Sized>>,
         shutdown_trigger: shutdown::Trigger,
     ) {
@@ -393,7 +398,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
 
     /// Leader use this task to keep a follower up-to-date, will return if self is no longer leader
     async fn sync_follower_task(
-        curp: Arc<RawCurp<C, RC>>,
+        curp: Arc<RawCurp<C, CE, RC>>,
         connect: Arc<impl InnerConnectApi + ?Sized>,
         sync_event: Arc<Event>,
         mut shutdown_listener: shutdown::Listener,
@@ -496,10 +501,15 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
 }
 
 // utils
-impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
+impl<C, CE, RC> CurpNode<C, CE, RC>
+where
+    C: 'static + Command,
+    CE: CommandExecutor<C> + 'static,
+    RC: RoleChange + 'static,
+{
     /// Create a new server instance
     #[inline]
-    pub(super) async fn new<CE: CommandExecutor<C> + 'static>(
+    pub(super) async fn new(
         cluster_info: Arc<ClusterInfo>,
         is_leader: bool,
         cmd_executor: Arc<CE>,
@@ -542,6 +552,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
                 log_tx,
                 role_change,
                 shutdown_trigger.clone(),
+                Arc::clone(&cmd_executor),
             ))
         } else {
             info!(
@@ -565,6 +576,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
                 last_applied,
                 role_change,
                 shutdown_trigger.clone(),
+                Arc::clone(&cmd_executor),
             ))
         };
 
@@ -603,7 +615,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
 
     /// Run background tasks for Curp server
     async fn run_bg_tasks(
-        curp: Arc<RawCurp<C, RC>>,
+        curp: Arc<RawCurp<C, CE, RC>>,
         storage: Arc<impl StorageApi<Command = C> + 'static>,
         cluster_info: Arc<ClusterInfo>,
         shutdown_trigger: shutdown::Trigger,
@@ -633,7 +645,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
 
     /// Candidate broadcasts votes
     async fn bcast_vote(
-        curp: &RawCurp<C, RC>,
+        curp: &RawCurp<C, CE, RC>,
         connects: &HashMap<ServerId, Arc<impl InnerConnectApi + ?Sized>>,
         vote: Vote,
     ) {
@@ -691,7 +703,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
     #[allow(clippy::integer_arithmetic)] // won't overflow
     async fn send_ae(
         connect: &(impl InnerConnectApi + ?Sized),
-        curp: &RawCurp<C, RC>,
+        curp: &RawCurp<C, CE, RC>,
         ae: AppendEntries<C>,
     ) -> Result<(), SendAEError> {
         let last_sent_index = (!ae.entries.is_empty())
@@ -731,7 +743,7 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
     /// Send snapshot
     async fn send_snapshot(
         connect: &(impl InnerConnectApi + ?Sized),
-        curp: &RawCurp<C, RC>,
+        curp: &RawCurp<C, CE, RC>,
         snapshot: Snapshot,
     ) -> Result<(), SendSnapshotError> {
         let meta = snapshot.meta;
@@ -749,7 +761,12 @@ impl<C: 'static + Command, RC: RoleChange + 'static> CurpNode<C, RC> {
     }
 }
 
-impl<C: Command, RC: RoleChange> Debug for CurpNode<C, RC> {
+impl<C, CE, RC> Debug for CurpNode<C, CE, RC>
+where
+    C: Command,
+    CE: Debug,
+    RC: RoleChange,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CurpNode")
             .field("raw_curp", &self.curp)
