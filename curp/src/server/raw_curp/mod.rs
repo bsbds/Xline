@@ -404,19 +404,7 @@ where
         let prev_commit_index = log_w.commit_index;
         log_w.commit_index = min(leader_commit, log_w.last_log_index());
         if prev_commit_index < log_w.commit_index {
-            for i in (log_w.last_as + 1)..=log_w.commit_index {
-                let entry = log_w.get(i).unwrap_or_else(|| {
-                    unreachable!(
-                        "system corrupted, apply log[{i}] when we only have {} log entries",
-                        log_w.last_log_index()
-                    )
-                });
-                if let EntryData::Command(ref cmd) = entry.entry_data {
-                    if let Ok(prepare) = self.ctx.cmd_executor.prepare(cmd.as_ref(), i) {
-                        let _ignore = self.ctx.pb.lock().insert(i, prepare);
-                    }
-                }
-            }
+            self.commit_prepare(&mut log_w);
             self.apply(&mut *log_w);
         }
 
@@ -477,11 +465,29 @@ where
             if last_sent_index > log_w.commit_index {
                 log_w.commit_index = last_sent_index;
                 debug!("{} updates commit index to {last_sent_index}", self.id());
+                self.commit_prepare(&mut log_w);
                 self.apply(&mut *log_w);
             }
         }
 
         Ok(true)
+    }
+
+    /// Commit the prepare result
+    fn commit_prepare(&self, log_w: &mut Log<C>) {
+        for i in (log_w.last_as + 1)..=log_w.commit_index {
+            let entry = log_w.get(i).unwrap_or_else(|| {
+                unreachable!(
+                    "system corrupted, apply log[{i}] when we only have {} log entries",
+                    log_w.last_log_index()
+                )
+            });
+            if let EntryData::Command(ref cmd) = entry.entry_data {
+                if let Ok(prepare) = self.ctx.cmd_executor.prepare_commit(cmd.as_ref(), i) {
+                    let _ignore = self.ctx.pb.lock().insert(i, prepare);
+                }
+            }
+        }
     }
 
     /// Handle `vote`
@@ -685,6 +691,7 @@ where
 impl<C, CE, RC> RawCurp<C, CE, RC>
 where
     C: 'static + Command,
+    CE: CommandExecutor<C> + 'static,
     RC: RoleChange + 'static,
 {
     /// Create a new `RawCurp`
@@ -1028,6 +1035,7 @@ where
 impl<C, CE, RC> RawCurp<C, CE, RC>
 where
     C: 'static + Command,
+    CE: CommandExecutor<C> + 'static,
     RC: RoleChange + 'static,
 {
     /// Server becomes a candidate
@@ -1259,6 +1267,7 @@ where
         self.ctx.cb.write().clear();
         self.ctx.ucp.lock().clear();
         self.ctx.pb.lock().clear();
+        self.ctx.cmd_executor.prepare_reset();
     }
 }
 
