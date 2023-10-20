@@ -1258,6 +1258,7 @@ where
         debug!("leader {} retires", self.id());
         self.ctx.cb.write().clear();
         self.ctx.ucp.lock().clear();
+        self.ctx.pb.lock().clear();
     }
 }
 
