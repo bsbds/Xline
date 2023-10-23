@@ -358,3 +358,42 @@ async fn nested_txn_compare_value_is_ok() -> Result<(), Box<dyn Error>> {
     assert_eq!(resp.kvs().first().unwrap().value(), b"baz");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[abort_on_panic]
+async fn nested_txn_compare_rev_is_ok() -> Result<(), Box<dyn Error>> {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "debug");
+    }
+    _ = tracing_subscriber::fmt()
+        .compact()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+
+    let mut cluster = Cluster::new(3).await;
+    cluster.start().await;
+    let mut client: KvClient = cluster.client().await.kv_client();
+    client.put("a", "foo", None).await?;
+    client.put("a", "foo1", None).await?;
+
+    let txn_inner_a = Txn::new()
+        .when([
+            Compare::create_revision("a", CompareOp::Equal, 2),
+            Compare::mod_revision("a", CompareOp::Equal, 4),
+            Compare::version("a", CompareOp::Equal, 3),
+            Compare::create_revision("b", CompareOp::Equal, 4),
+            Compare::mod_revision("b", CompareOp::Equal, 4),
+            Compare::version("b", CompareOp::Equal, 1),
+        ])
+        .and_then([TxnOp::put("c", "cc", None)]);
+    let tnx_a = Txn::new().when([]).and_then([
+        TxnOp::put("a", "foo2", None),
+        TxnOp::put("b", "bar", None),
+        TxnOp::txn(txn_inner_a),
+    ]);
+    let res = client.txn(tnx_a).await?;
+    let TxnOpResponse::Txn(ref resp) = res.op_responses()[2] else { panic!("invalid response") };
+
+    assert!(resp.succeeded());
+    Ok(())
+}
