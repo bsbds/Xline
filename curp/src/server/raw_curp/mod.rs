@@ -290,11 +290,11 @@ where
                 return (info, Ok(true));
             }
         };
-        let _ignore = self.ctx.pb.lock().insert(index, prepare);
+        let _ignore = self.ctx.pb.lock().insert(index, prepare.clone());
 
         if !conflict {
             log_w.last_exe = index;
-            self.ctx.cmd_tx.send_sp_exe(entry);
+            self.ctx.cmd_tx.send_sp_exe(entry, prepare);
         }
 
         self.ctx.sync_events.iter().for_each(|e| {

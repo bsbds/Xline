@@ -27,7 +27,7 @@ pub(super) mod conflict_checked_mpmc;
 /// Event for command executor
 pub(super) enum CEEvent<C: Command> {
     /// The cmd is ready for speculative execution
-    SpecExeReady(Arc<LogEntry<C>>),
+    SpecExeReady((Arc<LogEntry<C>>, C::PR)),
     /// The cmd is ready for after sync
     ASReady((Arc<LogEntry<C>>, Option<C::PR>)),
     /// Reset the command executor, send(()) when finishes
@@ -39,7 +39,11 @@ pub(super) enum CEEvent<C: Command> {
 impl<C: Command> Debug for CEEvent<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            Self::SpecExeReady(ref entry) => f.debug_tuple("SpecExeReady").field(entry).finish(),
+            Self::SpecExeReady((ref entry, ref prepare)) => f
+                .debug_tuple("SpecExeReady")
+                .field(entry)
+                .field(prepare)
+                .finish(),
             Self::ASReady((ref entry, ref prepare)) => f
                 .debug_tuple("ASReady")
                 .field(entry)
@@ -73,7 +77,9 @@ async fn cmd_worker<
 ) {
     while let Ok(mut task) = dispatch_rx.recv().await {
         let succeeded = match task.take() {
-            TaskType::SpecExe(entry) => worker_exe(entry, ce.as_ref(), curp.as_ref()).await,
+            TaskType::SpecExe(entry, prepare) => {
+                worker_exe(entry, prepare, ce.as_ref(), curp.as_ref()).await
+            }
             TaskType::AS(entry, prepare) => {
                 worker_as(entry, prepare, ce.as_ref(), curp.as_ref()).await
             }
@@ -98,6 +104,7 @@ async fn worker_exe<
     RC: RoleChange + 'static,
 >(
     entry: Arc<LogEntry<C>>,
+    prepare: Option<C::PR>,
     ce: &CE,
     curp: &RawCurp<C, CE, RC>,
 ) -> bool {
@@ -105,7 +112,10 @@ async fn worker_exe<
     let id = curp.id();
     match entry.entry_data {
         EntryData::Command(ref cmd) => {
-            let er = ce.execute(cmd, entry.index).await;
+            let Some(prepare) = prepare else {
+                unreachable!("prepare should always be Some(_) when entry is a command");
+            };
+            let er = ce.execute(cmd, entry.index, prepare).await;
             let er_ok = er.is_ok();
             cb.write().insert_er(entry.id(), er);
             if !er_ok {
@@ -249,7 +259,7 @@ struct TaskRx<C: Command>(flume::Receiver<Task<C>>);
 #[cfg_attr(test, automock)]
 pub(super) trait CEEventTxApi<C: Command + 'static>: Send + Sync + 'static {
     /// Send cmd to background cmd worker for speculative execution
-    fn send_sp_exe(&self, entry: Arc<LogEntry<C>>);
+    fn send_sp_exe(&self, entry: Arc<LogEntry<C>>, prepare: C::PR);
 
     /// Send after sync event to the background cmd worker so that after sync can be called
     fn send_after_sync(&self, entry: Arc<LogEntry<C>>, prepare: Option<C::PR>);
@@ -262,8 +272,8 @@ pub(super) trait CEEventTxApi<C: Command + 'static>: Send + Sync + 'static {
 }
 
 impl<C: Command + 'static> CEEventTxApi<C> for CEEventTx<C> {
-    fn send_sp_exe(&self, entry: Arc<LogEntry<C>>) {
-        let event = CEEvent::SpecExeReady(Arc::clone(&entry));
+    fn send_sp_exe(&self, entry: Arc<LogEntry<C>>, prepare: C::PR) {
+        let event = CEEvent::SpecExeReady((Arc::clone(&entry), prepare));
         if let Err(e) = self.0.send(event) {
             error!("failed to send cmd exe event to background cmd worker, {e}");
         }
@@ -385,7 +395,7 @@ mod tests {
         let prepare = ce.prepare(&cmd, 0).unwrap();
         let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
 
-        ce_event_tx.send_sp_exe(Arc::clone(&entry));
+        ce_event_tx.send_sp_exe(Arc::clone(&entry), prepare);
         assert_eq!(er_rx.recv().await.unwrap().1.values, vec![]);
 
         ce_event_tx.send_after_sync(entry, Some(prepare));
@@ -425,7 +435,7 @@ mod tests {
         let prepare = ce.prepare(&cmd, 0).unwrap();
         let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
 
-        ce_event_tx.send_sp_exe(Arc::clone(&entry));
+        ce_event_tx.send_sp_exe(Arc::clone(&entry), prepare);
 
         // at 500ms, sync has completed, call after sync, then needs_as will be updated
         sleep_millis(500).await;
@@ -470,7 +480,7 @@ mod tests {
         let prepare = ce.prepare(&cmd, 0).unwrap();
         let entry = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd)));
 
-        ce_event_tx.send_sp_exe(Arc::clone(&entry));
+        ce_event_tx.send_sp_exe(Arc::clone(&entry), prepare);
 
         // at 500ms, sync has completed
         sleep_millis(500).await;
@@ -597,8 +607,8 @@ mod tests {
         let prepare2 = ce.prepare(&cmd2, 1).unwrap();
         let entry2 = Arc::new(LogEntry::new_cmd(2, 1, Arc::new(cmd2)));
 
-        ce_event_tx.send_sp_exe(Arc::clone(&entry1));
-        ce_event_tx.send_sp_exe(Arc::clone(&entry2));
+        ce_event_tx.send_sp_exe(Arc::clone(&entry1), prepare1);
+        ce_event_tx.send_sp_exe(Arc::clone(&entry2), prepare2);
 
         // cmd1 exe done
         assert_eq!(er_rx.recv().await.unwrap().1.revisions, vec![]);
@@ -645,18 +655,14 @@ mod tests {
             l,
         );
 
-        let entry1 = Arc::new(LogEntry::new_cmd(
-            1,
-            1,
-            Arc::new(TestCommand::new_put(vec![1], 1).set_as_dur(Duration::from_millis(50))),
-        ));
-        let entry2 = Arc::new(LogEntry::new_cmd(
-            2,
-            1,
-            Arc::new(TestCommand::new_get(vec![1])),
-        ));
-        ce_event_tx.send_sp_exe(Arc::clone(&entry1));
-        ce_event_tx.send_sp_exe(Arc::clone(&entry2));
+        let cmd1 = TestCommand::new_put(vec![1], 1).set_as_dur(Duration::from_millis(50));
+        let cmd2 = TestCommand::new_get(vec![1]);
+        let prepare1 = ce.prepare(&cmd1, 0).unwrap();
+        let prepare2 = ce.prepare(&cmd2, 0).unwrap();
+        let entry1 = Arc::new(LogEntry::new_cmd(1, 1, Arc::new(cmd1)));
+        let entry2 = Arc::new(LogEntry::new_cmd(2, 1, Arc::new(cmd2)));
+        ce_event_tx.send_sp_exe(Arc::clone(&entry1), prepare1);
+        ce_event_tx.send_sp_exe(Arc::clone(&entry2), prepare2);
 
         assert_eq!(er_rx.recv().await.unwrap().1.revisions, vec![]);
 

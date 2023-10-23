@@ -70,9 +70,13 @@ where
         &self,
         request: &RequestWithToken,
         read_rev: i64,
+        write_rev: i64,
     ) -> Result<CommandResponse, ExecuteError> {
-        self.handle_kv_requests(&request.request, &mut ExecuteState::new(read_rev, 0))
-            .map(CommandResponse::new)
+        self.handle_kv_requests(
+            &request.request,
+            &mut ExecuteState::new(read_rev, write_rev),
+        )
+        .map(CommandResponse::new)
     }
 
     /// sync a kv request
