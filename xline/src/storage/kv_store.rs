@@ -69,9 +69,9 @@ where
     pub(crate) fn execute(
         &self,
         request: &RequestWithToken,
-        revision: i64,
+        read_rev: i64,
     ) -> Result<CommandResponse, ExecuteError> {
-        self.handle_kv_requests(&request.request, &mut ExecuteState::new(revision))
+        self.handle_kv_requests(&request.request, &mut ExecuteState::new(read_rev, 0))
             .map(CommandResponse::new)
     }
 
@@ -81,9 +81,13 @@ where
         request: &RequestWithToken,
         revision: i64,
     ) -> Result<(SyncResponse, Vec<WriteOp>), ExecuteError> {
-        self.sync_request(&request.request, revision, &mut ExecuteState::new(revision))
-            .await
-            .map(|(rev, ops)| (SyncResponse::new(rev), ops))
+        self.sync_request(
+            &request.request,
+            revision,
+            &mut ExecuteState::new(0, revision),
+        )
+        .await
+        .map(|(rev, ops)| (SyncResponse::new(rev), ops))
     }
 
     /// Recover data from persistent storage
@@ -510,7 +514,7 @@ where
     ) -> Result<RangeResponse, ExecuteError> {
         let mut req = req.clone();
         if req.revision == 0 {
-            req.revision = state.revision;
+            req.revision = state.read_rev;
         }
 
         req.check_revision(self.compacted_revision(), self.revision())?;
@@ -904,8 +908,10 @@ where
 #[derive(Debug)]
 #[cfg_attr(test, derive(Default))]
 struct ExecuteState {
-    /// Current txn revision
-    revision: i64,
+    /// Revision used for reading
+    read_rev: i64,
+    /// Revision used for writing
+    write_rev: i64,
     /// Put kvs
     put: BTreeMap<Vec<u8>, Vec<u8>>,
     /// Deleted kvs
@@ -932,9 +938,10 @@ impl DeleteInterval {
 // 2. Puts and Deletes does not overlap
 // These are guaranteed by `check_interval`
 impl ExecuteState {
-    fn new(revision: i64) -> Self {
+    fn new(read_rev: i64, write_rev: i64) -> Self {
         Self {
-            revision,
+            read_rev,
+            write_rev,
             put: BTreeMap::default(),
             deleted: DeleteInterval::default(),
         }
@@ -947,7 +954,7 @@ impl ExecuteState {
         range_end: &[u8],
         revision: i64,
     ) -> Vec<KeyValue> {
-        if revision != 0 && revision < self.revision {
+        if revision != 0 && revision < self.write_rev {
             return kvs;
         }
 
@@ -971,7 +978,7 @@ impl ExecuteState {
     }
 
     fn put(&mut self, req: &PutRequest, index: &Arc<Index>) {
-        let revision = self.revision();
+        let revision = self.write_rev;
         // we don't need sub revision here
         let sub_revision = 0;
         let new_rev = if self.deleted.intersects(&req.key) {
@@ -994,10 +1001,6 @@ impl ExecuteState {
     fn delete_range(&mut self, req: &DeleteRangeRequest) {
         let key_range = KeyRange::new(req.key.clone(), req.range_end.clone());
         self.deleted.insert(key_range.clone());
-    }
-
-    fn revision(&self) -> i64 {
-        self.revision
     }
 }
 
