@@ -336,3 +336,25 @@ async fn single_txn_get_after_delete_is_ok() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[abort_on_panic]
+async fn nested_txn_compare_value_is_ok() -> Result<(), Box<dyn Error>> {
+    let mut cluster = Cluster::new(3).await;
+    cluster.start().await;
+    let mut client: KvClient = cluster.client().await.kv_client();
+
+    let txn_inner = Txn::new()
+        .when([Compare::value("a", CompareOp::NotEqual, "bar")])
+        .or_else([TxnOp::put("b", "baz", None)]);
+    let tnx_a = Txn::new()
+        .when([])
+        .and_then([TxnOp::put("a", "bar", None), TxnOp::txn(txn_inner)]);
+    let res = client.txn(tnx_a).await?;
+    let TxnOpResponse::Txn(ref resp) = res.op_responses()[1] else { panic!("invalid response") };
+
+    assert!(!resp.succeeded());
+    let resp = client.get("b", None).await?;
+    assert_eq!(resp.kvs().first().unwrap().value(), b"baz");
+    Ok(())
+}

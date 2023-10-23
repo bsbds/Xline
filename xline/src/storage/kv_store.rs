@@ -81,7 +81,7 @@ where
         request: &RequestWithToken,
         revision: i64,
     ) -> Result<(SyncResponse, Vec<WriteOp>), ExecuteError> {
-        self.sync_request(&request.request, revision)
+        self.sync_request(&request.request, revision, &mut ExecuteState::new(revision))
             .await
             .map(|(rev, ops)| (SyncResponse::new(rev), ops))
     }
@@ -320,10 +320,11 @@ where
     }
 
     /// Check result of a `Compare`
-    fn check_compare(&self, cmp: &Compare) -> bool {
-        let kvs = self
+    fn check_compare(&self, cmp: &Compare, state: &mut ExecuteState) -> bool {
+        let kvs_ori = self
             .get_range(&cmp.key, &cmp.range_end, 0)
             .unwrap_or_default();
+        let kvs = state.update_kvs_get_range(kvs_ori, &cmp.key, &cmp.range_end, 0);
         if kvs.is_empty() {
             if let Some(TargetUnion::Value(_)) = cmp.target_union {
                 false
@@ -619,7 +620,7 @@ where
         let success = req
             .compare
             .iter()
-            .all(|compare| self.check_compare(compare));
+            .all(|compare| self.check_compare(compare, state));
         let requests = if success {
             req.success.iter()
         } else {
@@ -660,16 +661,21 @@ where
         &self,
         wrapper: &RequestWrapper,
         revision: i64,
+        state: &mut ExecuteState,
     ) -> Result<(i64, Vec<WriteOp>), ExecuteError> {
         debug!("After Sync {:?} with revision {}", wrapper, revision);
         #[allow(clippy::wildcard_enum_match_arm)] // only kv requests can be sent to kv store
         let (ops, events) = match *wrapper {
             RequestWrapper::RangeRequest(_) => (Vec::new(), Vec::new()),
-            RequestWrapper::PutRequest(ref req) => self.sync_put_request(req, revision, 0)?,
-            RequestWrapper::DeleteRangeRequest(ref req) => {
-                self.sync_delete_range_request(req, revision, 0)
+            RequestWrapper::PutRequest(ref req) => {
+                self.sync_put_request(req, revision, 0, state)?
             }
-            RequestWrapper::TxnRequest(ref req) => self.sync_txn_request(req, revision, 0)?,
+            RequestWrapper::DeleteRangeRequest(ref req) => {
+                self.sync_delete_range_request(req, revision, 0, state)
+            }
+            RequestWrapper::TxnRequest(ref req) => {
+                self.sync_txn_request(req, revision, 0, state)?
+            }
             RequestWrapper::CompactionRequest(ref req) => {
                 self.sync_compaction_request(req, revision).await?
             }
@@ -715,13 +721,14 @@ where
         req: &TxnRequest,
         revision: i64,
         mut sub_revision: i64,
+        state: &mut ExecuteState,
     ) -> Result<(Vec<WriteOp>, Vec<Event>), ExecuteError> {
         let mut all_events = Vec::new();
 
         let ops = if req
             .compare
             .iter()
-            .all(|compare| self.check_compare(compare))
+            .all(|compare| self.check_compare(compare, state))
         {
             &req.success
         } else {
@@ -732,13 +739,13 @@ where
             let (ops, mut events) = match request {
                 Request::RequestRange(_) => (Vec::new(), Vec::new()),
                 Request::RequestPut(ref put_req) => {
-                    self.sync_put_request(put_req, revision, sub_revision)?
+                    self.sync_put_request(put_req, revision, sub_revision, state)?
                 }
                 Request::RequestDeleteRange(del_req) => {
-                    self.sync_delete_range_request(&del_req, revision, sub_revision)
+                    self.sync_delete_range_request(&del_req, revision, sub_revision, state)
                 }
                 Request::RequestTxn(txn_req) => {
-                    self.sync_txn_request(txn_req, revision, sub_revision)?
+                    self.sync_txn_request(txn_req, revision, sub_revision, state)?
                 }
             };
             let key_revisions = self.db.flush_ops(ops)?;
@@ -758,6 +765,7 @@ where
         req: &PutRequest,
         revision: i64,
         sub_revision: i64,
+        state: &mut ExecuteState,
     ) -> Result<(Vec<WriteOp>, Vec<Event>), ExecuteError> {
         let mut ops = Vec::new();
         let new_rev = self
@@ -798,6 +806,9 @@ where
             kv: Some(kv),
             prev_kv: None,
         };
+
+        state.put(req, &self.index);
+
         Ok((ops, vec![event]))
     }
 
@@ -845,7 +856,10 @@ where
         req: &DeleteRangeRequest,
         revision: i64,
         sub_revision: i64,
+        state: &mut ExecuteState,
     ) -> (Vec<WriteOp>, Vec<Event>) {
+        state.delete_range(req);
+
         Self::delete_keys(
             &self.index,
             &self.lease_collection,
