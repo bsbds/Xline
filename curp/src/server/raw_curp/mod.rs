@@ -1197,8 +1197,12 @@ where
             let _ig_spec = sp_l.insert(Arc::clone(&cmd)); // may have been inserted before
             #[allow(clippy::expect_used)]
             let entry = log
-                .push_cmd(term, cmd)
+                .push_cmd(term, Arc::clone(&cmd))
                 .expect("cmd {cmd:?} cannot be serialized");
+            let index = entry.index;
+            if let Ok(prepare) = self.ctx.cmd_executor.prepare(cmd.as_ref(), index) {
+                let _ignore = self.ctx.pb.lock().insert(index, prepare);
+            }
             debug!(
                 "{} recovers speculatively executed cmd({}) in log[{}]",
                 self.id(),
