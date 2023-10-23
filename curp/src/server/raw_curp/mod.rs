@@ -400,15 +400,14 @@ where
             .try_append_entries(entries, prev_log_index, prev_log_term)
             .is_ok();
 
-        // update commit index
-        let prev_commit_index = log_w.commit_index;
-        log_w.commit_index = min(leader_commit, log_w.last_log_index());
-        if prev_commit_index < log_w.commit_index {
-            self.commit_prepare(&mut log_w);
-            self.apply(&mut *log_w);
-        }
-
         if append_succeeded {
+            // update commit index
+            let prev_commit_index = log_w.commit_index;
+            log_w.commit_index = min(leader_commit, log_w.last_log_index());
+            if prev_commit_index < log_w.commit_index {
+                self.commit_prepare(&mut log_w);
+                self.apply(&mut *log_w);
+            }
             Ok(term)
         } else {
             debug!(
