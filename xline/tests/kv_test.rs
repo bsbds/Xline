@@ -1,6 +1,7 @@
 use std::{error::Error, time::Duration};
 
 use etcd_client::{Client, Compare, CompareOp, GetOptions, KvClient, Txn, TxnOp, TxnOpResponse};
+use futures::future::join_all;
 use test_macros::abort_on_panic;
 use xline::client::kv_types::{
     DeleteRangeRequest, PutRequest, RangeRequest, SortOrder, SortTarget,
@@ -395,5 +396,200 @@ async fn nested_txn_compare_rev_is_ok() -> Result<(), Box<dyn Error>> {
     let TxnOpResponse::Txn(ref resp) = res.op_responses()[2] else { panic!("invalid response") };
 
     assert!(resp.succeeded());
+    Ok(())
+}
+
+enum CasResult {
+    Success(Vec<Vec<u8>>),
+    Fail(Vec<u8>),
+}
+
+/// Compare and swap
+async fn cas_with_reads(
+    client: &mut KvClient,
+    key: Vec<u8>,
+    read_value: Vec<u8>,
+    read_revision: i64,
+    new_value: Vec<u8>,
+    extra_reads: Vec<Vec<u8>>,
+) -> Result<CasResult, Box<dyn Error>> {
+    let txn = Txn::new()
+        .when(if read_value.is_empty() {
+            vec![Compare::mod_revision(
+                key.clone(),
+                CompareOp::Less,
+                read_revision,
+            )]
+        } else {
+            vec![Compare::mod_revision(
+                key.clone(),
+                CompareOp::Equal,
+                read_revision,
+            )]
+        })
+        .and_then(
+            [TxnOp::put(key.clone(), new_value, None)]
+                .into_iter()
+                .chain(extra_reads.into_iter().map(|key| TxnOp::get(key, None)))
+                .collect::<Vec<_>>(),
+        )
+        .or_else([TxnOp::get(key, None)]);
+    let resp = client.txn(txn).await?;
+
+    if resp.succeeded() {
+        let reads = resp
+            .op_responses()
+            .into_iter()
+            .skip(1)
+            .map(|op| {
+                let TxnOpResponse::Get(resp) = op else { panic!("invalid response") };
+                resp.kvs()
+                    .first()
+                    .map(|kv| kv.value())
+                    .unwrap_or(&[])
+                    .to_vec()
+            })
+            .collect();
+        Ok(CasResult::Success(reads))
+    } else {
+        let TxnOpResponse::Get(ref resp) = resp.op_responses()[0] else { panic!("invalid response") };
+        Ok(CasResult::Fail(
+            resp.kvs()
+                .first()
+                .map(|kv| kv.value())
+                .unwrap_or(&[])
+                .to_vec(),
+        ))
+    }
+}
+
+/// Append
+async fn txn_append(
+    client: &mut KvClient,
+    key: Vec<u8>,
+    value: u8,
+    // allows [append, read] in a single transaction
+    extra_reads: Vec<Vec<u8>>,
+) -> Result<(Vec<u8>, Vec<Vec<u8>>), Box<dyn Error>> {
+    loop {
+        let txn_read = Txn::new()
+            .when([])
+            .and_then([TxnOp::get(key.clone(), None)]);
+        let resp_read = client.txn(txn_read).await.unwrap();
+        let TxnOpResponse::Get(ref resp) = resp_read.op_responses()[0] else { panic!("invalid response") };
+        let old_value = resp
+            .kvs()
+            .first()
+            .map(|kv| kv.value())
+            .unwrap_or(&[])
+            .to_vec();
+        let old_revision = resp.header().unwrap().revision();
+        let append_value: Vec<_> = old_value.clone().into_iter().chain([value]).collect();
+
+        let cas_result = cas_with_reads(
+            client,
+            key.clone(),
+            old_value.clone(),
+            old_revision,
+            append_value.clone(),
+            extra_reads.clone(),
+        )
+        .await
+        .unwrap();
+        if let CasResult::Success(values) = cas_result {
+            return Ok((append_value, values));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[abort_on_panic]
+async fn txn_cas_operation_is_atomic() -> Result<(), Box<dyn Error>> {
+    const NUM_CLIENTS: usize = 10;
+    const NUM_PER_VALUE: usize = 4;
+    let mut cluster = Cluster::new(3).await;
+    cluster.start().await;
+    let mut client: KvClient = cluster.new_client().await.kv_client();
+    let key = vec![1];
+    client.put(key.clone(), [0], None).await?;
+    let mut handles = vec![];
+    let mut clients = vec![];
+    for _ in 1..=NUM_CLIENTS {
+        let client: KvClient = cluster.new_client().await.kv_client();
+        clients.push(client);
+    }
+    for (i, mut client) in (1..=NUM_CLIENTS).zip(clients) {
+        let key = key.clone();
+        let handle = tokio::spawn(async move {
+            for _ in 0..NUM_PER_VALUE {
+                let _val = txn_append(&mut client, key.clone(), i as u8, vec![])
+                    .await
+                    .unwrap();
+            }
+        });
+        handles.push(handle);
+    }
+    join_all(handles).await;
+
+    let resp = client.get(key, None).await?;
+    assert_eq!(
+        resp.kvs().first().unwrap().value().len() - 1,
+        NUM_CLIENTS * NUM_PER_VALUE
+    );
+
+    Ok(())
+}
+
+// Similar to Jepsen's etcd append test
+#[tokio::test(flavor = "multi_thread")]
+#[abort_on_panic]
+async fn txn_append_is_ok() -> Result<(), Box<dyn Error>> {
+    _ = tracing_subscriber::fmt()
+        .compact()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+
+    const NUM_CLIENTS: usize = 5;
+
+    let mut cluster = Cluster::new(3).await;
+    cluster.start().await;
+
+    let key = vec![1];
+    let mut handles = vec![];
+    let mut clients = vec![];
+    for _ in 1..=NUM_CLIENTS {
+        let client: KvClient = cluster.new_client().await.kv_client();
+        clients.push(client);
+    }
+
+    for (i, mut client) in (1..=NUM_CLIENTS).zip(clients) {
+        let key = key.clone();
+        let handle = tokio::spawn(async move {
+            let (append_value, read_values) =
+                txn_append(&mut client, key.clone(), i as u8, vec![key.clone()])
+                    .await
+                    .unwrap();
+            assert_eq!(append_value, read_values[0]);
+            read_values.into_iter().next().unwrap()
+        });
+        handles.push(handle);
+    }
+    let mut update_values = join_all(handles)
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    update_values.sort_unstable();
+    let is_last_prefix = |(x, y): (&Vec<u8>, &Vec<u8>)| {
+        x.len() + 1 == y.len() && x.iter().zip(y.iter()).all(|(xx, yy)| xx == yy)
+    };
+    assert!(update_values
+        .iter()
+        .zip(update_values.iter().skip(1))
+        .all(is_last_prefix));
+
+    let mut client = cluster.client().await.kv_client();
+    let resp = client.get(key, None).await?;
+    assert_eq!(resp.header().unwrap().revision() as usize, 1 + NUM_CLIENTS);
+
     Ok(())
 }

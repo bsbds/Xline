@@ -122,6 +122,19 @@ impl Cluster {
         self.client.as_mut().unwrap()
     }
 
+    /// Create or get the client with the specified index
+    pub async fn new_client(&mut self) -> Client {
+        Client::new(
+            self.all_members.values().cloned().collect(),
+            true,
+            ClientConfig::default(),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("Client connect error: {:?}", e);
+        })
+    }
+
     pub fn all_members(&self) -> &HashMap<String, String> {
         &self.all_members
     }
