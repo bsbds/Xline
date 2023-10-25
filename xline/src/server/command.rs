@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use clippy_utilities::OverflowArithmetic;
 use curp::{
     cmd::{Command as CurpCommand, CommandExecutor as CurpCommandExecutor},
     error::{CommandProposeError, ProposeError},
@@ -129,7 +130,17 @@ where
                 }
             }
             RequestBackend::Kv => {
-                if self.kv_storage.is_read_only(wrapper) {
+                let pre_rev = self.general_rev.get().overflow_add(1);
+                let is_read_only = match self.kv_storage.handle_prepare(&wrapper.request, pre_rev) {
+                    Ok(is_ro) => is_ro,
+                    Err(e) => {
+                        self.id_barrier.trigger(cmd.id(), -1);
+                        self.index_barrier.trigger(index, -1);
+                        return Err(e);
+                    }
+                };
+                self.kv_storage.insert_ro(pre_rev, is_read_only);
+                if is_read_only {
                     -1
                 } else {
                     self.general_rev.next()
@@ -166,7 +177,22 @@ where
                 }
             }
             RequestBackend::Kv => {
-                if self.kv_storage.is_read_only(wrapper) {
+                let pre_rev = self.general_rev.get();
+                let is_read_only = {
+                    if let Some(is_ro) = self.kv_storage.remove_ro(pre_rev) {
+                        is_ro
+                    } else {
+                        match self.kv_storage.handle_prepare(&wrapper.request, pre_rev) {
+                            Ok(is_ro) => is_ro,
+                            Err(e) => {
+                                self.id_barrier.trigger(cmd.id(), -1);
+                                self.index_barrier.trigger(index, -1);
+                                return Err(e);
+                            }
+                        }
+                    }
+                };
+                if is_read_only {
                     -1
                 } else {
                     self.general_rev.next_commit()

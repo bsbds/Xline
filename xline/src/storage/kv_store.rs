@@ -16,6 +16,7 @@ use xlineapi::execute_error::ExecuteError;
 use super::{
     index::{Index, IndexOperate},
     lease_store::LeaseCollection,
+    prepare_state::PrepareState,
     revision::{KeyRevision, Revision},
     storage_api::StorageApi,
 };
@@ -58,6 +59,8 @@ where
     compact_task_tx: mpsc::Sender<(i64, Option<Arc<event_listener::Event>>)>,
     /// Lease collection
     lease_collection: Arc<LeaseCollection>,
+    /// Execute state
+    prepare_state: PrepareState,
 }
 
 impl<DB> KvStore<DB>
@@ -138,10 +141,6 @@ where
         }
         Ok(())
     }
-
-    pub(crate) fn is_read_only(&self, request: &RequestWithToken) -> bool {
-        self.handle_is_read_only(&request.request, &mut TxnState::new(0, 0))
-    }
 }
 
 impl<DB> KvStore<DB>
@@ -166,6 +165,7 @@ where
             kv_update_tx,
             compact_task_tx,
             lease_collection,
+            prepare_state: PrepareState::default(),
         }
     }
 
@@ -340,6 +340,25 @@ where
         }
     }
 
+    /// Check result of a `Compare`
+    fn check_compare_prepare(&self, cmp: &Compare) -> bool {
+        let kvs_ori = self
+            .get_range(&cmp.key, &cmp.range_end, 0)
+            .unwrap_or_default();
+        let kvs = self
+            .prepare_state
+            .update_range(kvs_ori, &cmp.key, &cmp.range_end);
+        if kvs.is_empty() {
+            if let Some(TargetUnion::Value(_)) = cmp.target_union {
+                false
+            } else {
+                Self::compare_kv(cmp, &KeyValue::default())
+            }
+        } else {
+            kvs.iter().all(|kv| Self::compare_kv(cmp, kv))
+        }
+    }
+
     /// Send get lease to lease store
     fn get_lease(&self, key: &[u8]) -> i64 {
         self.lease_collection.get_lease(key)
@@ -393,7 +412,7 @@ where
     /// Get `KeyValue` of a range
     ///
     /// If `range_end` is `&[]`, this function will return one or zero `KeyValue`.
-    fn get_range(
+    pub(super) fn get_range(
         &self,
         key: &[u8],
         range_end: &[u8],
@@ -816,35 +835,49 @@ where
         Ok((ops, vec![event]))
     }
 
-    fn handle_is_read_only(&self, wrapper: &RequestWrapper, state: &mut TxnState) -> bool {
+    pub(crate) fn handle_prepare(
+        &self,
+        wrapper: &RequestWrapper,
+        revision: i64,
+    ) -> Result<bool, ExecuteError> {
         #[allow(clippy::wildcard_enum_match_arm)]
-        match *wrapper {
+        Ok(match *wrapper {
             RequestWrapper::RangeRequest(_) => true,
             RequestWrapper::PutRequest(ref req) => {
-                state.put(req, &self.index);
+                self.prepare_state.put(req, &self.index, revision);
                 false
             }
             RequestWrapper::DeleteRangeRequest(ref req) => {
-                state.delete_range(req);
+                self.prepare_state.delete_range(self, req)?;
                 false
             }
             RequestWrapper::TxnRequest(ref req) => {
                 let success = req
                     .compare
                     .iter()
-                    .all(|compare| self.check_compare(compare, state));
+                    .all(|compare| self.check_compare_prepare(compare));
                 let requests = if success {
                     req.success.iter()
                 } else {
                     req.failure.iter()
                 };
                 requests
-                    .map(|op| self.handle_is_read_only(&op.clone().into(), state))
+                    .map(|op| self.handle_prepare(&op.clone().into(), revision))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
                     .all(|is_read_only| is_read_only)
             }
             RequestWrapper::CompactionRequest(_) => true,
             _ => unreachable!("Other request should not be sent to this store"),
-        }
+        })
+    }
+
+    pub(crate) fn insert_ro(&self, revision: i64, is_read_only: bool) {
+        self.prepare_state.insert_ro(revision, is_read_only);
+    }
+
+    pub(crate) fn remove_ro(&self, revision: i64) -> Option<bool> {
+        self.prepare_state.remove_ro(revision)
     }
 
     /// create events for a deletion
@@ -968,6 +1001,7 @@ impl DeleteInterval {
 // 1. Puts does not duplicate
 // 2. Puts and Deletes does not overlap
 // These are guaranteed by `check_interval`
+// TODO: Refactor this with ExecuteState's approach
 impl TxnState {
     fn new(read_rev: i64, write_rev: i64) -> Self {
         Self {

@@ -12,6 +12,8 @@ pub(crate) mod kv_store;
 pub(crate) mod kvwatcher;
 /// Storage for lease
 pub(crate) mod lease_store;
+/// Preapre state
+pub(super) mod prepare_state;
 /// Revision module
 pub(crate) mod revision;
 /// Persistent storage abstraction
