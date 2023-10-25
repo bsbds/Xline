@@ -145,6 +145,10 @@ where
         }
         Ok(())
     }
+
+    pub(crate) fn is_read_only(&self, request: &RequestWithToken) -> bool {
+        self.handle_is_read_only(&request.request, &mut ExecuteState::new(0, 0))
+    }
 }
 
 impl<DB> KvStore<DB>
@@ -817,6 +821,37 @@ where
         state.put(req, &self.index);
 
         Ok((ops, vec![event]))
+    }
+
+    fn handle_is_read_only(&self, wrapper: &RequestWrapper, state: &mut ExecuteState) -> bool {
+        #[allow(clippy::wildcard_enum_match_arm)]
+        match *wrapper {
+            RequestWrapper::RangeRequest(_) => true,
+            RequestWrapper::PutRequest(ref req) => {
+                state.put(req, &self.index);
+                false
+            }
+            RequestWrapper::DeleteRangeRequest(ref req) => {
+                state.delete_range(req);
+                false
+            }
+            RequestWrapper::TxnRequest(ref req) => {
+                let success = req
+                    .compare
+                    .iter()
+                    .all(|compare| self.check_compare(compare, state));
+                let requests = if success {
+                    req.success.iter()
+                } else {
+                    req.failure.iter()
+                };
+                requests
+                    .map(|op| self.handle_is_read_only(&op.clone().into(), state))
+                    .all(|is_read_only| is_read_only)
+            }
+            RequestWrapper::CompactionRequest(_) => true,
+            _ => unreachable!("Other request should not be sent to this store"),
+        }
     }
 
     /// create events for a deletion

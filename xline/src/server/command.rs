@@ -128,8 +128,15 @@ where
                     self.auth_rev.next()
                 }
             }
-            RequestBackend::Kv | RequestBackend::Lease => {
-                if wrapper.request.skip_general_revision() {
+            RequestBackend::Kv => {
+                if self.kv_storage.is_read_only(wrapper) {
+                    -1
+                } else {
+                    self.general_rev.next()
+                }
+            }
+            RequestBackend::Lease => {
+                if wrapper.request.skip_lease_revision() {
                     -1
                 } else {
                     self.general_rev.next()
@@ -158,8 +165,15 @@ where
                     self.auth_rev.next_commit()
                 }
             }
-            RequestBackend::Kv | RequestBackend::Lease => {
-                if wrapper.request.skip_general_revision() {
+            RequestBackend::Kv => {
+                if self.kv_storage.is_read_only(wrapper) {
+                    -1
+                } else {
+                    self.general_rev.next_commit()
+                }
+            }
+            RequestBackend::Lease => {
+                if wrapper.request.skip_lease_revision() {
                     -1
                 } else {
                     self.general_rev.next_commit()
