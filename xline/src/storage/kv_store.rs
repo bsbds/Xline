@@ -71,11 +71,8 @@ where
         read_rev: i64,
         write_rev: i64,
     ) -> Result<CommandResponse, ExecuteError> {
-        self.handle_kv_requests(
-            &request.request,
-            &mut ExecuteState::new(read_rev, write_rev),
-        )
-        .map(CommandResponse::new)
+        self.handle_kv_requests(&request.request, &mut TxnState::new(read_rev, write_rev))
+            .map(CommandResponse::new)
     }
 
     /// sync a kv request
@@ -84,13 +81,9 @@ where
         request: &RequestWithToken,
         revision: i64,
     ) -> Result<(SyncResponse, Vec<WriteOp>), ExecuteError> {
-        self.sync_request(
-            &request.request,
-            revision,
-            &mut ExecuteState::new(0, revision),
-        )
-        .await
-        .map(|(rev, ops)| (SyncResponse::new(rev), ops))
+        self.sync_request(&request.request, revision, &mut TxnState::new(0, revision))
+            .await
+            .map(|(rev, ops)| (SyncResponse::new(rev), ops))
     }
 
     /// Recover data from persistent storage
@@ -147,7 +140,7 @@ where
     }
 
     pub(crate) fn is_read_only(&self, request: &RequestWithToken) -> bool {
-        self.handle_is_read_only(&request.request, &mut ExecuteState::new(0, 0))
+        self.handle_is_read_only(&request.request, &mut TxnState::new(0, 0))
     }
 }
 
@@ -331,7 +324,7 @@ where
     }
 
     /// Check result of a `Compare`
-    fn check_compare(&self, cmp: &Compare, state: &mut ExecuteState) -> bool {
+    fn check_compare(&self, cmp: &Compare, state: &mut TxnState) -> bool {
         let kvs_ori = self
             .get_range(&cmp.key, &cmp.range_end, state.read_rev)
             .unwrap_or_default();
@@ -418,7 +411,7 @@ where
         revision: i64,
         limit: usize,
         count_only: bool,
-        state: &ExecuteState,
+        state: &TxnState,
     ) -> Result<(Vec<KeyValue>, usize), ExecuteError> {
         let revisions = self.index.get(key, range_end, revision);
         let kvs_ori = self.get_values(&revisions)?;
@@ -485,7 +478,7 @@ where
     fn handle_kv_requests(
         &self,
         wrapper: &RequestWrapper,
-        state: &mut ExecuteState,
+        state: &mut TxnState,
     ) -> Result<ResponseWrapper, ExecuteError> {
         debug!("Execute {:?}", wrapper);
         #[allow(clippy::wildcard_enum_match_arm)]
@@ -517,7 +510,7 @@ where
     fn handle_range_request(
         &self,
         req: &RangeRequest,
-        state: &ExecuteState,
+        state: &TxnState,
     ) -> Result<RangeResponse, ExecuteError> {
         let mut req = req.clone();
         if req.revision == 0 {
@@ -578,7 +571,7 @@ where
     fn handle_put_request(
         &self,
         req: &PutRequest,
-        state: &mut ExecuteState,
+        state: &mut TxnState,
     ) -> Result<PutResponse, ExecuteError> {
         let mut response = PutResponse {
             header: Some(self.header_gen.gen_header()),
@@ -603,7 +596,7 @@ where
     fn handle_delete_range_request(
         &self,
         req: &DeleteRangeRequest,
-        state: &mut ExecuteState,
+        state: &mut TxnState,
     ) -> Result<DeleteRangeResponse, ExecuteError> {
         let prev_kvs = self.get_range(&req.key, &req.range_end, 0)?;
         let mut response = DeleteRangeResponse {
@@ -624,7 +617,7 @@ where
     fn handle_txn_request(
         &self,
         req: &TxnRequest,
-        state: &mut ExecuteState,
+        state: &mut TxnState,
     ) -> Result<TxnResponse, ExecuteError> {
         req.check_revision(self.compacted_revision(), self.revision())?;
 
@@ -672,7 +665,7 @@ where
         &self,
         wrapper: &RequestWrapper,
         revision: i64,
-        state: &mut ExecuteState,
+        state: &mut TxnState,
     ) -> Result<(i64, Vec<WriteOp>), ExecuteError> {
         debug!("After Sync {:?} with revision {}", wrapper, revision);
         #[allow(clippy::wildcard_enum_match_arm)] // only kv requests can be sent to kv store
@@ -732,7 +725,7 @@ where
         req: &TxnRequest,
         revision: i64,
         mut sub_revision: i64,
-        state: &mut ExecuteState,
+        state: &mut TxnState,
     ) -> Result<(Vec<WriteOp>, Vec<Event>), ExecuteError> {
         let mut all_events = Vec::new();
 
@@ -776,7 +769,7 @@ where
         req: &PutRequest,
         revision: i64,
         sub_revision: i64,
-        state: &mut ExecuteState,
+        state: &mut TxnState,
     ) -> Result<(Vec<WriteOp>, Vec<Event>), ExecuteError> {
         let mut ops = Vec::new();
         let new_rev = self
@@ -823,7 +816,7 @@ where
         Ok((ops, vec![event]))
     }
 
-    fn handle_is_read_only(&self, wrapper: &RequestWrapper, state: &mut ExecuteState) -> bool {
+    fn handle_is_read_only(&self, wrapper: &RequestWrapper, state: &mut TxnState) -> bool {
         #[allow(clippy::wildcard_enum_match_arm)]
         match *wrapper {
             RequestWrapper::RangeRequest(_) => true,
@@ -898,7 +891,7 @@ where
         req: &DeleteRangeRequest,
         revision: i64,
         sub_revision: i64,
-        state: &mut ExecuteState,
+        state: &mut TxnState,
     ) -> (Vec<WriteOp>, Vec<Event>) {
         state.delete_range(req);
 
@@ -945,7 +938,7 @@ where
 /// Temporary state when speculatively executing transaction request
 #[derive(Debug)]
 #[cfg_attr(test, derive(Default))]
-struct ExecuteState {
+struct TxnState {
     /// Revision used for reading
     read_rev: i64,
     /// Revision used for writing
@@ -975,7 +968,7 @@ impl DeleteInterval {
 // 1. Puts does not duplicate
 // 2. Puts and Deletes does not overlap
 // These are guaranteed by `check_interval`
-impl ExecuteState {
+impl TxnState {
     fn new(read_rev: i64, write_rev: i64) -> Self {
         Self {
             read_rev,
@@ -1159,7 +1152,7 @@ mod test {
             keys_only: true,
             ..Default::default()
         };
-        let response = store.handle_range_request(&request, &ExecuteState::default())?;
+        let response = store.handle_range_request(&request, &TxnState::default())?;
         assert_eq!(response.kvs.len(), 6);
         for kv in response.kvs {
             assert!(kv.value.is_empty());
@@ -1181,7 +1174,7 @@ mod test {
             keys_only: true,
             ..Default::default()
         };
-        let response = store.handle_range_request(&request, &ExecuteState::default())?;
+        let response = store.handle_range_request(&request, &TxnState::default())?;
         assert_eq!(response.kvs.len(), 0);
         assert_eq!(response.count, 0);
         tx.self_shutdown_and_wait().await;
@@ -1204,7 +1197,7 @@ mod test {
             min_mod_revision: 2,
             ..Default::default()
         };
-        let response = store.handle_range_request(&request, &ExecuteState::default())?;
+        let response = store.handle_range_request(&request, &TxnState::default())?;
         assert_eq!(response.count, 6);
         assert_eq!(response.kvs.len(), 2);
         assert_eq!(response.kvs[0].create_revision, 2);
@@ -1230,8 +1223,8 @@ mod test {
                 SortTarget::Mod,
                 SortTarget::Value,
             ] {
-                let response = store
-                    .handle_range_request(&sort_req(order, target), &ExecuteState::default())?;
+                let response =
+                    store.handle_range_request(&sort_req(order, target), &TxnState::default())?;
                 assert_eq!(response.count, 6);
                 assert_eq!(response.kvs.len(), 6);
                 let expected: [&str; 6] = match order {
@@ -1254,7 +1247,7 @@ mod test {
         for order in [SortOrder::Ascend, SortOrder::Descend, SortOrder::None] {
             let response = store.handle_range_request(
                 &sort_req(order, SortTarget::Version),
-                &ExecuteState::default(),
+                &TxnState::default(),
             )?;
             assert_eq!(response.count, 6);
             assert_eq!(response.kvs.len(), 6);
@@ -1294,13 +1287,13 @@ mod test {
             range_end: vec![],
             ..Default::default()
         };
-        let res = new_store.handle_range_request(&range_req, &ExecuteState::default())?;
+        let res = new_store.handle_range_request(&range_req, &TxnState::default())?;
         assert_eq!(res.kvs.len(), 0);
         assert_eq!(new_store.compacted_revision(), -1);
 
         new_store.recover().await?;
 
-        let res = new_store.handle_range_request(&range_req, &ExecuteState::default())?;
+        let res = new_store.handle_range_request(&range_req, &TxnState::default())?;
         assert_eq!(res.kvs.len(), 1);
         assert_eq!(res.kvs[0].key, b"a");
         assert_eq!(new_store.compacted_revision(), 8);
@@ -1360,7 +1353,7 @@ mod test {
             range_end: vec![],
             ..Default::default()
         };
-        let response = store.handle_range_request(&request, &ExecuteState::default())?;
+        let response = store.handle_range_request(&request, &TxnState::default())?;
         assert_eq!(response.count, 1);
         assert_eq!(response.kvs.len(), 1);
         assert_eq!(response.kvs[0].value, "1".as_bytes());
