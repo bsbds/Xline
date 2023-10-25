@@ -84,6 +84,7 @@ impl PrepareState {
         &self,
         store: &KvStore<DB>,
         req: &DeleteRangeRequest,
+        revision: i64,
     ) -> Result<(), ExecuteError> {
         let key_range = KeyRange::new(req.key.clone(), req.range_end.clone());
         let state_range = self.inner.range(key_range);
@@ -93,7 +94,19 @@ impl PrepareState {
             .map(|entry| entry.key().clone())
             .chain(store_range.into_iter().map(|kv| kv.key))
             // mark deleted by setting empty KeyValue
-            .map(|key| (key.to_vec(), KeyValue::default()))
+            .map(|key| {
+                (
+                    key.to_vec(),
+                    KeyValue {
+                        key: vec![],
+                        create_revision: 0,
+                        mod_revision: revision,
+                        version: 0,
+                        value: vec![],
+                        lease: 0,
+                    },
+                )
+            })
             .collect();
 
         for (k, v) in to_delete {
@@ -101,6 +114,24 @@ impl PrepareState {
         }
 
         Ok(())
+    }
+
+    pub(super) fn remove_key(&self, key: &[u8], revision: i64) {
+        if let Some(entry) = self.inner.get(key) {
+            if entry.value().read().mod_revision == revision {
+                let _ignore = self.inner.remove(key);
+            }
+        }
+    }
+
+    pub(super) fn remove_key_range(&self, key: Vec<u8>, range_end: Vec<u8>, revision: i64) {
+        let key_range = KeyRange::new(key, range_end);
+        for entry in self.inner.range(key_range) {
+            let value_r = entry.value().read();
+            if value_r.mod_revision == revision {
+                let _ignore = self.inner.remove(entry.key());
+            }
+        }
     }
 }
 

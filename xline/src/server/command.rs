@@ -260,6 +260,8 @@ where
         let key_revisions = self.persistent.flush_ops(ops)?;
         if !key_revisions.is_empty() {
             self.kv_storage.insert_index(key_revisions);
+            self.kv_storage
+                .update_execute_state(&wrapper.request, revision);
         }
         self.lease_storage.mark_lease_synced(&wrapper.request);
         self.id_barrier.trigger(cmd.id(), revision);

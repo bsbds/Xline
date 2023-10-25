@@ -848,7 +848,7 @@ where
                 false
             }
             RequestWrapper::DeleteRangeRequest(ref req) => {
-                self.prepare_state.delete_range(self, req)?;
+                self.prepare_state.delete_range(self, req, revision)?;
                 false
             }
             RequestWrapper::TxnRequest(ref req) => {
@@ -965,6 +965,33 @@ where
     #[inline]
     pub(crate) fn insert_index(&self, key_revisions: Vec<(Vec<u8>, KeyRevision)>) {
         self.index.insert(key_revisions);
+    }
+
+    /// Remove persistent keys from execute_state
+    pub(crate) fn update_execute_state(&self, request: &RequestWrapper, revision: i64) {
+        match request {
+            RequestWrapper::PutRequest(req) => {
+                self.prepare_state.remove_key(&req.key, revision);
+            }
+            RequestWrapper::DeleteRangeRequest(req) => {
+                self.prepare_state.remove_key_range(
+                    req.key.to_vec(),
+                    req.range_end.to_vec(),
+                    revision,
+                );
+            }
+            RequestWrapper::TxnRequest(req) => {
+                for op in req
+                    .success
+                    .iter()
+                    .chain(req.failure.iter())
+                    .map(|op| op.clone().into())
+                {
+                    self.update_execute_state(&op, revision);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
