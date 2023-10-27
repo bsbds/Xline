@@ -411,7 +411,7 @@ where
             let prev_commit_index = log_w.commit_index;
             log_w.commit_index = min(leader_commit, log_w.last_log_index());
             if prev_commit_index < log_w.commit_index {
-                self.commit_prepare(&mut log_w);
+                self.commit_prepare_follower(&mut log_w);
                 self.apply(&mut *log_w);
             }
             Ok(term)
@@ -470,7 +470,7 @@ where
             if last_sent_index > log_w.commit_index {
                 log_w.commit_index = last_sent_index;
                 debug!("{} updates commit index to {last_sent_index}", self.id());
-                self.commit_prepare(&mut log_w);
+                self.commit_prepare_leader(&mut log_w);
                 self.apply(&mut *log_w);
             }
         }
@@ -479,7 +479,7 @@ where
     }
 
     /// Commit the prepare result
-    fn commit_prepare(&self, log_w: &mut Log<C>) {
+    fn commit_prepare_leader(&self, log_w: &mut Log<C>) {
         for i in (log_w.last_as + 1)..=log_w.commit_index {
             let entry = log_w.get(i).unwrap_or_else(|| {
                 unreachable!(
@@ -490,6 +490,25 @@ where
             if let EntryData::Command(ref cmd) = entry.entry_data {
                 if let Ok(prepare) = self.ctx.cmd_executor.prepare_commit(cmd.as_ref(), i) {
                     let _ignore = self.ctx.pb.lock().insert(i, prepare);
+                }
+            }
+        }
+    }
+
+    /// Commit the prepare result
+    fn commit_prepare_follower(&self, log_w: &mut Log<C>) {
+        for i in (log_w.last_as + 1)..=log_w.commit_index {
+            let entry = log_w.get(i).unwrap_or_else(|| {
+                unreachable!(
+                    "system corrupted, apply log[{i}] when we only have {} log entries",
+                    log_w.last_log_index()
+                )
+            });
+            if let EntryData::Command(ref cmd) = entry.entry_data {
+                let _prepare_res = self.ctx.cmd_executor.prepare(cmd.as_ref(), i);
+                if let Ok(prepare) = self.ctx.cmd_executor.prepare_commit(cmd.as_ref(), i) {
+                    let _ignore = self.ctx.pb.lock().insert(i, prepare.clone());
+                    tracing::info!("commit prepare {prepare:?}, cmd: {cmd:?}");
                 }
             }
         }

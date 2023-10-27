@@ -139,7 +139,7 @@ where
                         return Err(e);
                     }
                 };
-                self.kv_storage.insert_ro(pre_rev, is_read_only);
+                self.kv_storage.insert_ro(cmd.id().clone(), is_read_only);
                 if is_read_only {
                     -1
                 } else {
@@ -177,21 +177,7 @@ where
                 }
             }
             RequestBackend::Kv => {
-                let pre_rev = self.general_rev.get();
-                let is_read_only = {
-                    if let Some(is_ro) = self.kv_storage.remove_ro(pre_rev) {
-                        is_ro
-                    } else {
-                        match self.kv_storage.handle_prepare(&wrapper.request, pre_rev) {
-                            Ok(is_ro) => is_ro,
-                            Err(e) => {
-                                self.id_barrier.trigger(cmd.id(), -1);
-                                self.index_barrier.trigger(index, -1);
-                                return Err(e);
-                            }
-                        }
-                    }
-                };
+                let is_read_only = self.kv_storage.remove_ro(cmd.id());
                 if is_read_only {
                     -1
                 } else {

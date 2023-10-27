@@ -872,12 +872,12 @@ where
         })
     }
 
-    pub(crate) fn insert_ro(&self, revision: i64, is_read_only: bool) {
-        self.prepare_state.insert_ro(revision, is_read_only);
+    pub(crate) fn insert_ro(&self, id: String, is_read_only: bool) {
+        self.prepare_state.insert_ro(id, is_read_only);
     }
 
-    pub(crate) fn remove_ro(&self, revision: i64) -> Option<bool> {
-        self.prepare_state.remove_ro(revision)
+    pub(crate) fn remove_ro(&self, id: &str) -> bool {
+        self.prepare_state.remove_ro(id)
     }
 
     /// create events for a deletion

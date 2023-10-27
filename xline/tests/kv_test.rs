@@ -409,6 +409,7 @@ async fn cas_with_reads(
     client: &mut KvClient,
     key: Vec<u8>,
     read_value: Vec<u8>,
+    mod_revision: i64,
     read_revision: i64,
     new_value: Vec<u8>,
     extra_reads: Vec<Vec<u8>>,
@@ -424,7 +425,7 @@ async fn cas_with_reads(
             vec![Compare::mod_revision(
                 key.clone(),
                 CompareOp::Equal,
-                read_revision,
+                mod_revision,
             )]
         })
         .and_then(
@@ -477,12 +478,11 @@ async fn txn_append(
             .and_then([TxnOp::get(key.clone(), None)]);
         let resp_read = client.txn(txn_read).await.unwrap();
         let TxnOpResponse::Get(ref resp) = resp_read.op_responses()[0] else { panic!("invalid response") };
-        let old_value = resp
+        let (old_value, mod_revision) = resp
             .kvs()
             .first()
-            .map(|kv| kv.value())
-            .unwrap_or(&[])
-            .to_vec();
+            .map(|kv| (kv.value().to_vec(), kv.mod_revision()))
+            .unwrap_or((vec![], 0));
         let old_revision = resp.header().unwrap().revision();
         let append_value: Vec<_> = old_value.clone().into_iter().chain([value]).collect();
 
@@ -490,6 +490,7 @@ async fn txn_append(
             client,
             key.clone(),
             old_value.clone(),
+            mod_revision,
             old_revision,
             append_value.clone(),
             extra_reads.clone(),
@@ -549,7 +550,7 @@ async fn txn_append_is_ok() -> Result<(), Box<dyn Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
-    const NUM_CLIENTS: usize = 5;
+    const NUM_CLIENTS: usize = 100;
 
     let mut cluster = Cluster::new(3).await;
     cluster.start().await;

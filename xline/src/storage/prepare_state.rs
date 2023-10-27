@@ -15,7 +15,7 @@ use super::{
 /// This state is mainly designed for solving txn compare operation
 #[derive(Debug, Default)]
 pub(super) struct PrepareState {
-    ro_cache: RwLock<HashMap<i64, bool>>,
+    ro_cache: RwLock<HashMap<String, bool>>,
     inner: SkipMap<Vec<u8>, RwLock<KeyValue>>,
 }
 
@@ -136,11 +136,14 @@ impl PrepareState {
 }
 
 impl PrepareState {
-    pub(super) fn insert_ro(&self, revision: i64, is_read_only: bool) {
-        let _ignore = self.ro_cache.write().insert(revision, is_read_only);
+    pub(super) fn insert_ro(&self, id: String, is_read_only: bool) {
+        let _ignore = self.ro_cache.write().insert(id, is_read_only);
     }
 
-    pub(super) fn remove_ro(&self, revision: i64) -> Option<bool> {
-        self.ro_cache.write().remove(&revision)
+    pub(super) fn remove_ro(&self, id: &str) -> bool {
+        self.ro_cache
+            .write()
+            .remove(id)
+            .unwrap_or_else(|| unreachable!("remove_ro should only be called after insert_ro"))
     }
 }
