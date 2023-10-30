@@ -16,7 +16,7 @@ use xlineapi::execute_error::ExecuteError;
 use super::{
     index::{Index, IndexOperate},
     lease_store::LeaseCollection,
-    prepare_state::PrepareState,
+    prepare_state::{PrepareState, PrepareStateLock},
     revision::{KeyRevision, Revision},
     storage_api::StorageApi,
 };
@@ -967,17 +967,27 @@ where
         self.index.insert(key_revisions);
     }
 
+    pub(crate) fn lock_prepare_state(&self) -> PrepareStateLock {
+        self.prepare_state.write_lock()
+    }
+
     /// Remove persistent keys from execute_state
-    pub(crate) fn update_execute_state(&self, request: &RequestWrapper, revision: i64) {
+    pub(crate) fn update_prepare_state(
+        &self,
+        request: &RequestWrapper,
+        revision: i64,
+        state_l: &mut PrepareStateLock,
+    ) {
         match request {
             RequestWrapper::PutRequest(req) => {
-                self.prepare_state.remove_key(&req.key, revision);
+                self.prepare_state.remove_key(&req.key, revision, state_l);
             }
             RequestWrapper::DeleteRangeRequest(req) => {
                 self.prepare_state.remove_key_range(
                     req.key.to_vec(),
                     req.range_end.to_vec(),
                     revision,
+                    state_l,
                 );
             }
             RequestWrapper::TxnRequest(req) => {
@@ -987,7 +997,7 @@ where
                     .chain(req.failure.iter())
                     .map(|op| op.clone().into())
                 {
-                    self.update_execute_state(&op, revision);
+                    self.update_prepare_state(&op, revision, state_l);
                 }
             }
             _ => {}

@@ -243,11 +243,17 @@ where
         };
         tracing::debug!("after sync {cmd:?} with index: {index}, revision: {revision}");
         ops.append(&mut wr_ops);
-        let key_revisions = self.persistent.flush_ops(ops)?;
-        if !key_revisions.is_empty() {
-            self.kv_storage.insert_index(key_revisions);
-            self.kv_storage
-                .update_execute_state(&wrapper.request, revision);
+        {
+            let mut prepare_state_lock = self.kv_storage.lock_prepare_state();
+            let key_revisions = self.persistent.flush_ops(ops)?;
+            if !key_revisions.is_empty() {
+                self.kv_storage.insert_index(key_revisions);
+                self.kv_storage.update_prepare_state(
+                    &wrapper.request,
+                    revision,
+                    &mut prepare_state_lock,
+                );
+            }
         }
         self.lease_storage.mark_lease_synced(&wrapper.request);
         self.id_barrier.trigger(cmd.id(), revision);

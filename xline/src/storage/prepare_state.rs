@@ -21,7 +21,7 @@ pub(super) struct PrepareState {
     inner: RwLock<BTreeMap<Vec<u8>, KeyValue>>,
 }
 
-type InnerLock<'a> = parking_lot::lock_api::RwLockWriteGuard<
+pub(super) type PrepareStateLock<'a> = parking_lot::lock_api::RwLockWriteGuard<
     'a,
     parking_lot::RawRwLock,
     BTreeMap<Vec<u8>, KeyValue>,
@@ -45,7 +45,7 @@ impl PrepareState {
             .collect()
     }
 
-    pub(super) fn write_lock(&self) -> InnerLock<'_> {
+    pub(super) fn write_lock(&self) -> PrepareStateLock<'_> {
         self.inner.write()
     }
 
@@ -130,8 +130,7 @@ impl PrepareState {
         Ok(())
     }
 
-    pub(super) fn remove_key(&self, key: &[u8], revision: i64) {
-        let mut inner_w = self.inner.write();
+    pub(super) fn remove_key(&self, key: &[u8], revision: i64, inner_w: &mut PrepareStateLock<'_>) {
         if let Some(kv) = inner_w.get(key) {
             if kv.mod_revision == revision {
                 let _ignore = inner_w.remove(key);
@@ -139,8 +138,13 @@ impl PrepareState {
         }
     }
 
-    pub(super) fn remove_key_range(&self, key: Vec<u8>, range_end: Vec<u8>, revision: i64) {
-        let mut inner_w = self.inner.write();
+    pub(super) fn remove_key_range(
+        &self,
+        key: Vec<u8>,
+        range_end: Vec<u8>,
+        revision: i64,
+        inner_w: &mut PrepareStateLock<'_>,
+    ) {
         let key_range = KeyRange::new(key, range_end);
         let entries: Vec<_> = inner_w
             .range(key_range)
