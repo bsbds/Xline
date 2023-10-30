@@ -1619,4 +1619,104 @@ mod test {
             ExecuteError::RevisionCompacted(_, _)
         ));
     }
+
+    #[tokio::test]
+    async fn handle_prepare_is_ok() -> Result<(), ExecuteError> {
+        let (_tx, rx) = shutdown::channel();
+        let db = DB::open(&StorageConfig::Memory)?;
+        let store = init_empty_store(db, rx);
+        let txn_a = TxnRequest {
+            compare: vec![Compare {
+                result: CompareResult::Equal as i32,
+                target: CompareTarget::Mod as i32,
+                key: "a".into(),
+                range_end: vec![],
+                target_union: Some(TargetUnion::ModRevision(2)),
+            }],
+            success: vec![RequestOp {
+                request: Some(UniRequest::RequestPut(PutRequest {
+                    key: "k".into(),
+                    value: "1".into(),
+                    ..Default::default()
+                })),
+            }],
+            failure: vec![RequestOp {
+                request: Some(UniRequest::RequestPut(PutRequest {
+                    key: "k".into(),
+                    value: "2".into(),
+                    ..Default::default()
+                })),
+            }],
+        };
+        let is_read_only = store.handle_prepare(&RequestWrapper::TxnRequest(txn_a), 2)?;
+        assert!(!is_read_only);
+
+        let txn_b = TxnRequest {
+            compare: vec![Compare {
+                result: CompareResult::Equal as i32,
+                target: CompareTarget::Mod as i32,
+                key: "k".into(),
+                range_end: vec![],
+                target_union: Some(TargetUnion::ModRevision(2)),
+            }],
+            success: vec![RequestOp {
+                request: Some(UniRequest::RequestRange(RangeRequest {
+                    key: "k".into(),
+                    ..Default::default()
+                })),
+            }],
+            failure: vec![RequestOp {
+                request: Some(UniRequest::RequestPut(PutRequest {
+                    key: "k".into(),
+                    value: "3".into(),
+                    ..Default::default()
+                })),
+            }],
+        };
+        let is_read_only = store.handle_prepare(&RequestWrapper::TxnRequest(txn_b), 3)?;
+        assert!(is_read_only);
+
+        let txn_c = TxnRequest {
+            compare: vec![Compare {
+                result: CompareResult::Equal as i32,
+                target: CompareTarget::Mod as i32,
+                key: "k".into(),
+                range_end: vec![],
+                target_union: Some(TargetUnion::ModRevision(2)),
+            }],
+            success: vec![RequestOp {
+                request: Some(UniRequest::RequestPut(PutRequest {
+                    key: "k".into(),
+                    value: "3".into(),
+                    ..Default::default()
+                })),
+            }],
+            failure: vec![],
+        };
+
+        let is_read_only = store.handle_prepare(&RequestWrapper::TxnRequest(txn_c), 3)?;
+        assert!(!is_read_only);
+
+        let txn_d = TxnRequest {
+            compare: vec![Compare {
+                result: CompareResult::Equal as i32,
+                target: CompareTarget::Mod as i32,
+                key: "k".into(),
+                range_end: vec![],
+                target_union: Some(TargetUnion::ModRevision(2)),
+            }],
+            success: vec![RequestOp {
+                request: Some(UniRequest::RequestRange(RangeRequest {
+                    key: "k".into(),
+                    ..Default::default()
+                })),
+            }],
+            failure: vec![],
+        };
+
+        let is_read_only = store.handle_prepare(&RequestWrapper::TxnRequest(txn_d), 4)?;
+        assert!(is_read_only);
+
+        Ok(())
+    }
 }
