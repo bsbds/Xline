@@ -1,7 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use clippy_utilities::OverflowArithmetic;
-use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
 use xlineapi::{command::KeyRange, DeleteRangeRequest, ExecuteError, KeyValue, PutRequest};
 
@@ -16,8 +18,14 @@ use super::{
 #[derive(Debug, Default)]
 pub(super) struct PrepareState {
     ro_cache: RwLock<HashMap<String, bool>>,
-    inner: SkipMap<Vec<u8>, RwLock<KeyValue>>,
+    inner: RwLock<BTreeMap<Vec<u8>, KeyValue>>,
 }
+
+type InnerLock<'a> = parking_lot::lock_api::RwLockWriteGuard<
+    'a,
+    parking_lot::RawRwLock,
+    BTreeMap<Vec<u8>, KeyValue>,
+>;
 
 impl PrepareState {
     /// Update range using current state
@@ -27,20 +35,25 @@ impl PrepareState {
         key: &[u8],
         range_end: &[u8],
     ) -> Vec<KeyValue> {
+        let inner_r = self.inner.read();
         let key_range = KeyRange::new(key.to_vec(), range_end.to_vec());
-        let state_range = self.inner.range(key_range);
+        let state_range = inner_r.range(key_range);
         let mut kvs: HashMap<_, _> = kvs.into_iter().map(|kv| (kv.key.clone(), kv)).collect();
-        kvs.extend(state_range.map(|entry| (entry.key().clone(), entry.value().read().clone())));
+        kvs.extend(state_range.map(|(key, kv)| (key.clone(), kv.clone())));
         kvs.into_iter()
             .filter_map(|(_, v)| (v != KeyValue::default()).then_some(v))
             .collect()
     }
 
+    pub(super) fn write_lock(&self) -> InnerLock<'_> {
+        self.inner.write()
+    }
+
     /// Execute a `PutRequest`
     pub(super) fn put(&self, req: &PutRequest, index: &Arc<Index>, revision: i64) {
+        let mut inner_w = self.inner.write();
         // If we update state on this key before, directly update it from current state
-        if let Some(entry) = self.inner.get(&req.key) {
-            let mut prev_kv = entry.value().write();
+        if let Some(prev_kv) = inner_w.get_mut(&req.key) {
             if *prev_kv == KeyValue::default() {
                 *prev_kv = KeyValue {
                     key: req.key.clone(),
@@ -64,16 +77,16 @@ impl PrepareState {
         // Other wise query from storage index
         {
             let new_rev = index.register_revision(&req.key, revision, 0);
-            let _ignore = self.inner.insert(
+            let _ignore = inner_w.insert(
                 req.key.clone(),
-                RwLock::new(KeyValue {
+                KeyValue {
                     key: req.key.clone(),
                     value: req.value.clone(),
                     create_revision: new_rev.create_revision,
                     mod_revision: new_rev.mod_revision,
                     version: new_rev.version,
                     lease: req.lease,
-                }),
+                },
             );
         }
     }
@@ -86,12 +99,13 @@ impl PrepareState {
         req: &DeleteRangeRequest,
         revision: i64,
     ) -> Result<(), ExecuteError> {
+        let mut inner_w = self.inner.write();
         let key_range = KeyRange::new(req.key.clone(), req.range_end.clone());
-        let state_range = self.inner.range(key_range);
+        let state_range = inner_w.range(key_range);
         let store_range = store.get_range(&req.key, &req.range_end, 0)?;
 
         let to_delete: HashMap<_, _> = state_range
-            .map(|entry| entry.key().clone())
+            .map(|(key, _)| key.clone())
             .chain(store_range.into_iter().map(|kv| kv.key))
             // mark deleted by setting empty KeyValue
             .map(|key| {
@@ -110,26 +124,32 @@ impl PrepareState {
             .collect();
 
         for (k, v) in to_delete {
-            let _ignore = self.inner.insert(k, RwLock::new(v));
+            let _ignore = inner_w.insert(k, v);
         }
 
         Ok(())
     }
 
     pub(super) fn remove_key(&self, key: &[u8], revision: i64) {
-        if let Some(entry) = self.inner.get(key) {
-            if entry.value().read().mod_revision == revision {
-                let _ignore = self.inner.remove(key);
+        let mut inner_w = self.inner.write();
+        if let Some(kv) = inner_w.get(key) {
+            if kv.mod_revision == revision {
+                let _ignore = inner_w.remove(key);
             }
         }
     }
 
     pub(super) fn remove_key_range(&self, key: Vec<u8>, range_end: Vec<u8>, revision: i64) {
+        let mut inner_w = self.inner.write();
         let key_range = KeyRange::new(key, range_end);
-        for entry in self.inner.range(key_range) {
-            let value_r = entry.value().read();
-            if value_r.mod_revision == revision {
-                let _ignore = self.inner.remove(entry.key());
+        let entries: Vec<_> = inner_w
+            .range(key_range)
+            .into_iter()
+            .map(|(key, kv)| (key.clone(), kv.clone()))
+            .collect();
+        for (key, kv) in &entries {
+            if kv.mod_revision == revision {
+                let _ignore = inner_w.remove(key);
             }
         }
     }
