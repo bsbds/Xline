@@ -594,3 +594,71 @@ async fn txn_append_is_ok() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+// Similar to Jepsen's etcd append test
+#[tokio::test(flavor = "multi_thread")]
+#[abort_on_panic]
+async fn txn_append_two_key_is_ok() -> Result<(), Box<dyn Error>> {
+    _ = tracing_subscriber::fmt()
+        .compact()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+
+    const NUM_CLIENTS: usize = 100;
+
+    let mut cluster = Cluster::new(3).await;
+    cluster.start().await;
+
+    let key_a = vec![1];
+    let key_b = vec![2];
+    let mut handles = vec![];
+    let mut clients = vec![];
+    for _ in 1..=NUM_CLIENTS {
+        let client: KvClient = cluster.new_client().await.kv_client();
+        clients.push(client);
+    }
+
+    for (i, mut client) in (1..=NUM_CLIENTS).zip(clients) {
+        let key_a = key_a.clone();
+        let key_b = key_b.clone();
+        let handle = tokio::spawn(async move {
+            let (append_value_a, read_values_a) =
+                txn_append(&mut client, key_a.clone(), i as u8, vec![key_a.clone()])
+                    .await
+                    .unwrap();
+            assert_eq!(append_value_a, read_values_a[0]);
+            let (append_value_b, read_values_b) =
+                txn_append(&mut client, key_b.clone(), i as u8, vec![key_b.clone()])
+                    .await
+                    .unwrap();
+            assert_eq!(append_value_b, read_values_b[0]);
+
+            (
+                read_values_a.into_iter().next().unwrap(),
+                read_values_b.into_iter().next().unwrap(),
+            )
+        });
+        handles.push(handle);
+    }
+    let (mut update_values_a, mut update_values_b): (Vec<_>, Vec<_>) = join_all(handles)
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .unzip();
+    update_values_a.sort_unstable();
+    update_values_b.sort_unstable();
+    let is_last_prefix = |(x, y): (&Vec<u8>, &Vec<u8>)| {
+        x.len() + 1 == y.len() && x.iter().zip(y.iter()).all(|(xx, yy)| xx == yy)
+    };
+    assert!(update_values_a
+        .iter()
+        .zip(update_values_a.iter().skip(1))
+        .all(is_last_prefix));
+    assert!(update_values_b
+        .iter()
+        .zip(update_values_b.iter().skip(1))
+        .all(is_last_prefix));
+
+    Ok(())
+}
