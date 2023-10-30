@@ -21,11 +21,13 @@ pub(super) struct PrepareState {
     inner: RwLock<BTreeMap<Vec<u8>, KeyValue>>,
 }
 
-pub(super) type PrepareStateLock<'a> = parking_lot::lock_api::RwLockWriteGuard<
+pub(super) type PrepareWriteLock<'a> = parking_lot::lock_api::RwLockWriteGuard<
     'a,
     parking_lot::RawRwLock,
     BTreeMap<Vec<u8>, KeyValue>,
 >;
+pub(super) type PrepareReadLock<'a> =
+    parking_lot::lock_api::RwLockReadGuard<'a, parking_lot::RawRwLock, BTreeMap<Vec<u8>, KeyValue>>;
 
 impl PrepareState {
     /// Update range using current state
@@ -34,19 +36,23 @@ impl PrepareState {
         kvs: Vec<KeyValue>,
         key: &[u8],
         range_end: &[u8],
+        inner_r: PrepareReadLock<'_>,
     ) -> Vec<KeyValue> {
-        let inner_r = self.inner.read();
         let key_range = KeyRange::new(key.to_vec(), range_end.to_vec());
         let state_range = inner_r.range(key_range);
         let mut kvs: HashMap<_, _> = kvs.into_iter().map(|kv| (kv.key.clone(), kv)).collect();
         kvs.extend(state_range.map(|(key, kv)| (key.clone(), kv.clone())));
         kvs.into_iter()
-            .filter_map(|(_, v)| (v != KeyValue::default()).then_some(v))
+            .filter_map(|(_, v)| (v.create_revision != 0).then_some(v))
             .collect()
     }
 
-    pub(super) fn write_lock(&self) -> PrepareStateLock<'_> {
+    pub(super) fn write_lock(&self) -> PrepareWriteLock<'_> {
         self.inner.write()
+    }
+
+    pub(super) fn read_lock(&self) -> PrepareReadLock<'_> {
+        self.inner.read()
     }
 
     /// Execute a `PutRequest`
@@ -130,7 +136,7 @@ impl PrepareState {
         Ok(())
     }
 
-    pub(super) fn remove_key(&self, key: &[u8], revision: i64, inner_w: &mut PrepareStateLock<'_>) {
+    pub(super) fn remove_key(&self, key: &[u8], revision: i64, inner_w: &mut PrepareWriteLock<'_>) {
         if let Some(kv) = inner_w.get(key) {
             if kv.mod_revision == revision {
                 let _ignore = inner_w.remove(key);
@@ -143,7 +149,7 @@ impl PrepareState {
         key: Vec<u8>,
         range_end: Vec<u8>,
         revision: i64,
-        inner_w: &mut PrepareStateLock<'_>,
+        inner_w: &mut PrepareWriteLock<'_>,
     ) {
         let key_range = KeyRange::new(key, range_end);
         let entries: Vec<_> = inner_w

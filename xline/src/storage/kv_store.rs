@@ -16,7 +16,7 @@ use xlineapi::execute_error::ExecuteError;
 use super::{
     index::{Index, IndexOperate},
     lease_store::LeaseCollection,
-    prepare_state::{PrepareState, PrepareStateLock},
+    prepare_state::{PrepareState, PrepareWriteLock},
     revision::{KeyRevision, Revision},
     storage_api::StorageApi,
 };
@@ -342,12 +342,13 @@ where
 
     /// Check result of a `Compare`
     fn check_compare_prepare(&self, cmp: &Compare) -> bool {
+        let prepare_read_lock = self.prepare_state.read_lock();
         let kvs_ori = self
             .get_range(&cmp.key, &cmp.range_end, 0)
             .unwrap_or_default();
-        let kvs = self
-            .prepare_state
-            .update_range(kvs_ori, &cmp.key, &cmp.range_end);
+        let kvs =
+            self.prepare_state
+                .update_range(kvs_ori, &cmp.key, &cmp.range_end, prepare_read_lock);
         if kvs.is_empty() {
             if let Some(TargetUnion::Value(_)) = cmp.target_union {
                 false
@@ -967,7 +968,7 @@ where
         self.index.insert(key_revisions);
     }
 
-    pub(crate) fn lock_prepare_state(&self) -> PrepareStateLock {
+    pub(crate) fn lock_prepare_state(&self) -> PrepareWriteLock {
         self.prepare_state.write_lock()
     }
 
@@ -976,7 +977,7 @@ where
         &self,
         request: &RequestWrapper,
         revision: i64,
-        state_l: &mut PrepareStateLock,
+        state_l: &mut PrepareWriteLock,
     ) {
         match request {
             RequestWrapper::PutRequest(req) => {
