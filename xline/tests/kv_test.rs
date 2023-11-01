@@ -665,3 +665,23 @@ async fn txn_append_two_key_is_ok() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+// Test for https://github.com/xline-kv/Xline/issues/468
+#[tokio::test(flavor = "multi_thread")]
+#[abort_on_panic]
+async fn txn_multiple_deletes_should_delete_once() -> Result<(), Box<dyn Error>> {
+    let mut cluster = Cluster::new(3).await;
+    cluster.start().await;
+    let mut client: KvClient = cluster.client().await.kv_client();
+    client.put("a", "foo", None).await?;
+
+    let txn = Txn::new()
+        .when([])
+        .and_then([TxnOp::delete("a", None), TxnOp::delete("a", None)]);
+    let res = client.txn(txn).await?;
+    let TxnOpResponse::Delete(ref resp) = res.op_responses()[0] else { panic!("invalid response") };
+    assert_eq!(resp.deleted(), 1);
+    let TxnOpResponse::Delete(ref resp) = res.op_responses()[1] else { panic!("invalid response") };
+    assert_eq!(resp.deleted(), 0);
+    Ok(())
+}
