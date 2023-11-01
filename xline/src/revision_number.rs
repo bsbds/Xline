@@ -31,6 +31,11 @@ impl RevisionNumberGenerator {
         self.inner.read().pre_revision
     }
 
+    /// Get the revision number
+    pub(crate) fn get_commit(&self) -> i64 {
+        self.inner.read().revision
+    }
+
     /// Get the next pre-allocated revision number
     pub(crate) fn next(&self) -> i64 {
         let mut inner_w = self.inner.write();

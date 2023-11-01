@@ -33,6 +33,16 @@ impl HeaderGenerator {
     }
 
     /// Generate `ResponseHeader`
+    pub(crate) fn gen_kv_header(&self, revision: i64) -> ResponseHeader {
+        ResponseHeader {
+            cluster_id: self.cluster_id,
+            member_id: self.member_id,
+            raft_term: *self.term.lock(),
+            revision,
+        }
+    }
+
+    /// Generate `ResponseHeader`
     pub(crate) fn gen_header(&self) -> ResponseHeader {
         ResponseHeader {
             cluster_id: self.cluster_id,

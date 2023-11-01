@@ -141,7 +141,7 @@ where
                 };
                 self.kv_storage.insert_ro(cmd.id().clone(), is_read_only);
                 if is_read_only {
-                    -1
+                    self.general_rev.get()
                 } else {
                     self.general_rev.next()
                 }
@@ -179,7 +179,7 @@ where
             RequestBackend::Kv => {
                 let is_read_only = self.kv_storage.remove_ro(cmd.id());
                 if is_read_only {
-                    -1
+                    self.general_rev.get_commit()
                 } else {
                     self.general_rev.next_commit()
                 }

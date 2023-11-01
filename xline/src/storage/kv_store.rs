@@ -559,7 +559,7 @@ where
             state,
         )?;
         let mut response = RangeResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_kv_header(state.write_rev)),
             count: total.cast(),
             ..RangeResponse::default()
         };
@@ -594,7 +594,7 @@ where
         state: &mut TxnState,
     ) -> Result<PutResponse, ExecuteError> {
         let mut response = PutResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_kv_header(state.write_rev)),
             ..Default::default()
         };
         if req.prev_kv || req.ignore_lease || req.ignore_value {
@@ -620,7 +620,7 @@ where
     ) -> Result<DeleteRangeResponse, ExecuteError> {
         let prev_kvs = self.get_range(&req.key, &req.range_end, 0)?;
         let mut response = DeleteRangeResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_kv_header(state.write_rev)),
             ..DeleteRangeResponse::default()
         };
         response.deleted = prev_kvs.len().cast();
@@ -656,7 +656,7 @@ where
             responses.push(response.into());
         }
         Ok(TxnResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_kv_header(state.write_rev)),
             succeeded: success,
             responses,
         })
