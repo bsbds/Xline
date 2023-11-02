@@ -169,11 +169,7 @@ where
                 let fus = rd_state.ids.into_iter().map(|id| self.id_barrier.wait(id));
                 let id_revs = join_all(fus).await;
                 let index_rev = self.index_barrier.wait(rd_state.index).await;
-                if index_rev.is_none() {
-                    None
-                } else {
-                    id_revs.into_iter().chain(index_rev.into_iter()).max()
-                }
+                id_revs.into_iter().chain(std::iter::once(index_rev)).max()
             };
             if let Ok(rev) = timeout(self.range_retry_timeout, wait_future).await {
                 if let Some(revision) = rev {

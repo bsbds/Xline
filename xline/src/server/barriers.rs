@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BinaryHeap, HashMap},
+    collections::{BinaryHeap, HashMap},
     sync::{
         atomic::{AtomicI64, Ordering},
         Arc,
@@ -26,20 +26,20 @@ impl IndexBarrier {
                 next: 1,
                 indices: BinaryHeap::new(),
                 barriers: HashMap::new(),
-                rev_cache: BTreeMap::new(),
+                latest_rev: 1,
             }),
         }
     }
 
     /// Wait for the index until it is triggered.
-    pub(crate) async fn wait(&self, index: u64) -> Option<i64> {
+    pub(crate) async fn wait(&self, index: u64) -> i64 {
         if index == 0 {
-            return Some(0);
+            return 0;
         }
         let (listener, revision) = {
             let mut inner_l = self.inner.lock();
             if inner_l.next > index {
-                return inner_l.get_revision(index);
+                return inner_l.latest_rev;
             }
             let Trigger { event, revision } = inner_l
                 .barriers
@@ -48,7 +48,7 @@ impl IndexBarrier {
             (event.listen(), Arc::clone(&revision))
         };
         listener.await;
-        Some(revision.load(Ordering::SeqCst))
+        revision.load(Ordering::SeqCst)
     }
 
     /// Trigger all barriers whose index is less than or equal to the given index.
@@ -61,11 +61,11 @@ impl IndexBarrier {
             .map_or(false, |i| i.index.eq(&inner_l.next))
         {
             let next = inner_l.next;
-            let IndexRevision { index, revision } = inner_l
+            let IndexRevision { index: _, revision } = inner_l
                 .indices
                 .pop()
                 .unwrap_or_else(|| unreachable!("IndexRevision should be Some"));
-            inner_l.insert_cache(index, revision);
+            inner_l.latest_rev = revision;
             if let Some(trigger) = inner_l.barriers.remove(&next) {
                 trigger.revision.store(revision, Ordering::SeqCst);
                 trigger.event.notify(usize::MAX);
@@ -81,21 +81,8 @@ struct IndexBarrierInner {
     next: u64,
     indices: BinaryHeap<IndexRevision>,
     barriers: HashMap<u64, Trigger>,
-    rev_cache: BTreeMap<u64, i64>,
-}
-
-impl IndexBarrierInner {
-    fn insert_cache(&mut self, index: u64, revision: i64) {
-        const REVISION_CACHE_SIZE: usize = 1024;
-        if self.rev_cache.len() == REVISION_CACHE_SIZE {
-            let _ignore = self.rev_cache.pop_first();
-        }
-        let _ignore = self.rev_cache.insert(index, revision);
-    }
-
-    fn get_revision(&self, index: u64) -> Option<i64> {
-        self.rev_cache.get(&index).map(ToOwned::to_owned)
-    }
+    /// latest revision of the last triggered log index
+    latest_rev: i64,
 }
 
 /// Barrier for id
