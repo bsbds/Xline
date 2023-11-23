@@ -872,7 +872,7 @@ mod test {
 
     use test_macros::abort_on_panic;
     use tokio::{runtime::Handle, task::block_in_place};
-    use utils::{config::StorageConfig, shutdown};
+    use utils::{config::EngineConfig, shutdown};
 
     use super::*;
     use crate::{
@@ -1001,7 +1001,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     #[abort_on_panic]
     async fn test_keys_only() -> Result<(), ExecuteError> {
-        let db = DB::open(&StorageConfig::Memory)?;
+        let db = DB::open(&EngineConfig::Memory)?;
         let (store, _rev) = init_store(db).await?;
         let request = RangeRequest {
             key: vec![0],
@@ -1020,7 +1020,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     #[abort_on_panic]
     async fn test_range_empty() -> Result<(), ExecuteError> {
-        let db = DB::open(&StorageConfig::Memory)?;
+        let db = DB::open(&EngineConfig::Memory)?;
         let (store, _rev) = init_store(db).await?;
 
         let request = RangeRequest {
@@ -1038,7 +1038,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     #[abort_on_panic]
     async fn test_range_filter() -> Result<(), ExecuteError> {
-        let db = DB::open(&StorageConfig::Memory)?;
+        let db = DB::open(&EngineConfig::Memory)?;
         let (store, _rev) = init_store(db).await?;
 
         let request = RangeRequest {
@@ -1061,7 +1061,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     #[abort_on_panic]
     async fn test_range_sort() -> Result<(), ExecuteError> {
-        let db = DB::open(&StorageConfig::Memory)?;
+        let db = DB::open(&EngineConfig::Memory)?;
         let (store, _rev) = init_store(db).await?;
         let keys = ["a", "b", "c", "d", "e", "z"];
         let reversed_keys = ["z", "e", "d", "c", "b", "a"];
@@ -1119,7 +1119,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     #[abort_on_panic]
     async fn test_recover() -> Result<(), ExecuteError> {
-        let db = DB::open(&StorageConfig::Memory)?;
+        let db = DB::open(&EngineConfig::Memory)?;
         let ops = vec![WriteOp::PutCompactRevision(8)];
         db.flush_ops(ops)?;
         let (store, _rev_gen) = init_store(Arc::clone(&db)).await?;
@@ -1189,7 +1189,7 @@ mod test {
             }
             .into(),
         );
-        let db = DB::open(&StorageConfig::Memory)?;
+        let db = DB::open(&EngineConfig::Memory)?;
         let (store, rev) = init_store(db).await?;
         exe_as_and_flush(&store, &txn_req, rev.next()).await?;
         let request = RangeRequest {
@@ -1208,7 +1208,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     #[abort_on_panic]
     async fn test_kv_store_index_available() {
-        let db = DB::open(&StorageConfig::Memory).unwrap();
+        let db = DB::open(&EngineConfig::Memory).unwrap();
         let (store, revision) = init_store(Arc::clone(&db)).await.unwrap();
         let handle = tokio::spawn({
             let store = Arc::clone(&store);
@@ -1241,7 +1241,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compaction() -> Result<(), ExecuteError> {
-        let db = DB::open(&StorageConfig::Memory)?;
+        let db = DB::open(&EngineConfig::Memory)?;
         let store = init_empty_store(db);
         let revision = RevisionNumberGenerator::default();
         // sample requests: (a, 1) (b, 2) (a, 3) (del a)
