@@ -5,9 +5,11 @@ use std::{
 };
 
 use fs2::FileExt;
+use sha2::{Digest, Sha256};
 use tokio::fs::File as TokioFile;
 
 /// File that is exclusively locked
+// TODO: when the locked file is dropped, we should make sure that the file is properly deleted
 #[derive(Debug)]
 pub(super) struct LockedFile {
     /// The inner std file
@@ -79,4 +81,16 @@ pub(super) fn get_file_paths_with_ext(
         }
     }
     Ok(files)
+}
+
+/// Get the checksum of the slice, we use Sha256 as the hash function
+pub(super) fn get_checksum(data: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into_iter().collect()
+}
+
+/// Validate the the data with the given checksum
+pub(super) fn validate_data(data: &[u8], checksum: &[u8]) -> bool {
+    get_checksum(data) == checksum
 }
