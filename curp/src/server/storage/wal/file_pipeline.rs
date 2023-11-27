@@ -12,7 +12,7 @@ use super::util::LockedFile;
 
 const TEMP_FILE_EXT: &'static str = ".tmp";
 
-struct FilePipeline {
+pub(super) struct FilePipeline {
     dir: PathBuf,
     file_size: u64,
     file_stream: RecvStream<'static, LockedFile>,
@@ -102,5 +102,14 @@ impl Stream for FilePipeline {
         }
 
         self.file_stream.poll_next_unpin(cx)
+    }
+}
+
+impl std::fmt::Debug for FilePipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilePipeline")
+            .field("dir", &self.dir)
+            .field("file_size", &self.file_size)
+            .finish()
     }
 }
