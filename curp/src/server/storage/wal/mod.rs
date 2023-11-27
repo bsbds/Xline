@@ -1,11 +1,11 @@
-#![allow(unused)]
 mod codec;
 
-use std::{
-    fs::{File as StdFile, OpenOptions},
-    io,
-    path::PathBuf,
-};
+/// File pipeline
+mod file_pipeline;
+
+mod util;
+
+use std::{fs::OpenOptions, io, path::PathBuf};
 
 use fs2::FileExt;
 use serde::Serialize;
@@ -40,15 +40,6 @@ impl LogStorage {
             dir,
             lfiles: vec![TokioFile::from_std(file)],
         })
-    }
-
-    /// Pre-allocates a file
-    fn allocate_file(file: &mut StdFile, size_in_bytes: u64) -> io::Result<()> {
-        if size_in_bytes == 0 {
-            return Ok(());
-        }
-
-        file.allocate(size_in_bytes)
     }
 
     pub(crate) fn framed_io<C: Serialize>(&mut self) -> Framed<TokioFile, WAL<C>> {
