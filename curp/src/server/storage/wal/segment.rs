@@ -1,17 +1,20 @@
-use std::{io, pin::Pin, sync::Arc, task::Poll};
+use std::{io, iter, pin::Pin, sync::Arc, task::Poll};
 
 use clippy_utilities::{NumericCast, OverflowArithmetic};
 use curp_external_api::LogIndex;
-use futures::{ready, FutureExt};
+use futures::{ready, FutureExt, SinkExt};
+use serde::Serialize;
 use tokio::{
     fs::File as TokioFile,
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     sync::Mutex,
 };
+use tokio_util::codec::Framed;
 
 use crate::server::storage::wal::WAL_FILE_EXT;
 
 use super::{
+    codec::{DataFrame, WAL},
     util::{get_checksum, validate_data, LockedFile},
     WAL_MAGIC, WAL_VERSION,
 };
@@ -65,6 +68,12 @@ impl WALSegment {
         })
     }
 
+    /// Seal the current segment
+    pub(super) async fn seal<C: Serialize>(&self, index: LogIndex) {
+        let mut framed = Framed::new(self.clone(), WAL::<C>::new());
+        framed.send(iter::once(DataFrame::SealIndex(index)));
+    }
+
     pub(super) fn len(&self) -> u64 {
         self.size
     }
@@ -84,6 +93,10 @@ impl WALSegment {
 
     pub(super) fn id(&self) -> u64 {
         self.segment_id
+    }
+
+    pub(super) fn base_index(&self) -> u64 {
+        self.base_index
     }
 
     /// Gets the file name of the WAL segment

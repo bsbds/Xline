@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use clippy_utilities::OverflowArithmetic;
 use curp_external_api::LogIndex;
 use futures::{future::join_all, ready, Future, FutureExt, StreamExt};
+use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -136,6 +137,33 @@ impl LogStorage {
             next_log_index,
             segment_opening: None,
         })
+    }
+
+    pub(crate) async fn truncate_tail<C>(&mut self, index: LogIndex) -> io::Result<()>
+    where
+        C: Serialize,
+    {
+        /// TODO: Make sure that all writing operations are completed, maybe guaranteed by type system?
+        assert!(
+            self.segment_opening.is_none(),
+            "There's a inflight segment file opening"
+        );
+
+        // last index of current segment
+        let mut last_index = self.next_log_index;
+
+        // segments to truncate
+        let segments = self
+            .segments
+            .iter()
+            .rev()
+            .take_while_inclusive::<_>(|s| s.base_index() > index);
+
+        for segment in segments {
+            segment.seal::<C>(index);
+        }
+
+        Ok(())
     }
 
     /// Recover log entries from a `WALSegment`
