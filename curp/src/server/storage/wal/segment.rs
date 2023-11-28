@@ -5,7 +5,7 @@ use curp_external_api::LogIndex;
 use futures::{ready, FutureExt};
 use tokio::{
     fs::File as TokioFile,
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     sync::Mutex,
 };
 
@@ -71,6 +71,19 @@ impl WALSegment {
 
     pub(super) async fn sync_all(&self) -> io::Result<()> {
         self.file.lock().await.sync_all().await
+    }
+
+    pub(super) async fn reset_offset(&self) -> io::Result<()> {
+        self.file
+            .lock()
+            .await
+            .seek(io::SeekFrom::Start(0))
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) fn id(&self) -> u64 {
+        self.segment_id
     }
 
     /// Gets the file name of the WAL segment
@@ -190,5 +203,25 @@ impl AsyncRead for WALSegment {
         let mut file_l = Box::pin(self.file.lock());
         let mut file = ready!(file_l.poll_unpin(cx));
         Pin::new(&mut *file).poll_read(cx, buf)
+    }
+}
+
+impl PartialEq for WALSegment {
+    fn eq(&self, other: &Self) -> bool {
+        self.segment_id.eq(&other.segment_id)
+    }
+}
+
+impl Eq for WALSegment {}
+
+impl PartialOrd for WALSegment {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.segment_id.partial_cmp(&other.segment_id)
+    }
+}
+
+impl Ord for WALSegment {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.segment_id.cmp(&other.segment_id)
     }
 }

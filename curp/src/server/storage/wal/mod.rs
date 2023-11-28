@@ -16,14 +16,21 @@ use async_trait::async_trait;
 use clippy_utilities::OverflowArithmetic;
 use curp_external_api::LogIndex;
 use futures::{future::join_all, ready, Future, FutureExt, StreamExt};
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::Mutex,
 };
 use tokio_util::codec::Framed;
 
-use self::{codec::WAL, file_pipeline::FilePipeline, segment::WALSegment, util::LockedFile};
+use crate::log_entry::LogEntry;
+
+use self::{
+    codec::{DataFrame, WAL},
+    file_pipeline::FilePipeline,
+    segment::WALSegment,
+    util::LockedFile,
+};
 
 const WAL_MAGIC: u32 = 0xd86e0be2;
 
@@ -80,7 +87,11 @@ impl LogStorage {
         })
     }
 
-    pub(crate) async fn recover(dir: PathBuf) -> io::Result<Self> {
+    /// Recover from the given directory
+    pub(crate) async fn recover<C>(dir: PathBuf) -> io::Result<Self>
+    where
+        C: Serialize + DeserializeOwned + 'static,
+    {
         let pipeline = FilePipeline::new(dir.clone(), SEGMENT_SIZE_BYTES);
         let file_paths = util::get_file_paths_with_ext(dir.clone(), WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
@@ -88,24 +99,105 @@ impl LogStorage {
             .map(|p| LockedFile::open_read_append(p))
             .collect::<io::Result<_>>()?;
 
-        // TODO: recover segment info from header
         let segment_futs = lfiles.into_iter().map(|f| WALSegment::open(f));
-        let segments = join_all(segment_futs)
+        let mut segments: Vec<_> = join_all(segment_futs)
             .await
             .into_iter()
             .collect::<io::Result<_>>()?;
+        segments.sort_unstable();
+
+        let logs_fut: Vec<_> = segments
+            .clone()
+            .into_iter()
+            .map(Self::recover_segment_logs::<C>)
+            .collect();
+        let logs: Vec<_> = join_all(logs_fut)
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+        let logs_flattened: Vec<_> = logs.into_iter().flatten().collect();
+
+        if !Self::check_log_continuity(logs_flattened.iter()) {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+
+        // TODO: seal the last segment and create a new one
+        let next_segment_id = segments.last().map(|s| s.id().overflow_add(1)).unwrap_or(0);
+        let next_log_index = logs_flattened
+            .last()
+            .map(|l| l.index.overflow_add(1))
+            .unwrap_or(1);
 
         Ok(Self {
             dir,
             pipeline,
             segments,
-            next_segment_id: 0,
-            next_log_index: 1,
+            next_segment_id,
+            next_log_index,
             segment_opening: None,
         })
     }
 
-    fn into_framed<C: Serialize>(self) -> Framed<Self, WAL<C>> {
+    /// Recover log entries from a `WALSegment`
+    async fn recover_segment_logs<C>(
+        segment: WALSegment,
+    ) -> io::Result<impl Iterator<Item = LogEntry<C>>>
+    where
+        C: Serialize + DeserializeOwned + 'static,
+    {
+        let mut framed = Framed::new(segment, WAL::<C>::new());
+        let mut result = vec![];
+        while let Some(r) = framed.next().await {
+            result.push(r);
+        }
+        let frame_batches: Vec<_> = result.into_iter().collect::<Result<_, _>>()?;
+        // The highest_index of this segment
+        let mut highest_index = u64::MAX;
+        // We get the last frame batch to check it's type
+        match frame_batches.last() {
+            Some(frames) => {
+                let frame = frames
+                    .last()
+                    .unwrap_or_else(|| unreachable!("a batch should contains at leat one frame"));
+                if let DataFrame::SealIndex(index) = *frame {
+                    highest_index = index;
+                }
+            }
+            // The segment does not contains any frame, only a file header
+            None => {
+                todo!("handle no frame")
+            }
+        }
+
+        // TODO: reset on drop might be better
+        framed.get_mut().reset_offset().await?;
+
+        /// Get log entries that index is no larger than `highest_index`
+        Ok(frame_batches.into_iter().flatten().filter_map(move |f| {
+            if let DataFrame::Entry(e) = f {
+                (e.index <= highest_index).then_some(e)
+            } else {
+                None
+            }
+        }))
+    }
+
+    /// Check if the log index are continuous
+    #[allow(single_use_lifetimes)] // the lifetime is required here
+    fn check_log_continuity<'a, C>(entries: impl Iterator<Item = &'a LogEntry<C>> + Clone) -> bool
+    where
+        C: 'static,
+    {
+        entries
+            .clone()
+            .zip(entries.skip(1))
+            .all(|(x, y)| x.index.overflow_add(1) == y.index)
+    }
+
+    fn into_framed<C>(self) -> Framed<Self, WAL<C>>
+    where
+        C: Serialize + DeserializeOwned + 'static,
+    {
         Framed::new(self, WAL::<C>::new())
     }
 
