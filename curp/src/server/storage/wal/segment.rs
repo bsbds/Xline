@@ -1,35 +1,47 @@
-use std::io;
+use std::{io, pin::Pin, sync::Arc, task::Poll};
 
+use clippy_utilities::{NumericCast, OverflowArithmetic};
 use curp_external_api::LogIndex;
+use futures::{ready, FutureExt};
 use tokio::{
     fs::File as TokioFile,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::Mutex,
 };
+
+use crate::server::storage::wal::WAL_FILE_EXT;
 
 use super::{
     util::{get_checksum, validate_data, LockedFile},
     WAL_MAGIC, WAL_VERSION,
 };
 
-#[derive(Debug)]
+/// The size of wal file header in bytes
+const WAL_HEADER_SIZE: usize = 56;
+
+#[derive(Clone, Debug)]
 pub(super) struct WALSegment {
-    file: TokioFile,
+    file: Arc<Mutex<TokioFile>>,
     base_index: LogIndex,
     segment_id: u64,
+    /// The file size of the segment
+    size: u64,
 }
 
 impl WALSegment {
     /// Open an existing WAL segment file
     pub(super) async fn open(lfile: LockedFile) -> io::Result<Self> {
         let mut file = lfile.into_async();
-        let mut buf = vec![0; 56];
-        file.read_exact(&mut buf).await;
+        let size = file.metadata().await?.len();
+        let mut buf = vec![0; WAL_HEADER_SIZE];
+        let _ignore = file.read_exact(&mut buf).await?;
         let (base_index, segment_id) = Self::parse_header(&buf)?;
 
         Ok(Self {
-            file,
+            file: Arc::new(Mutex::new(file)),
             base_index,
             segment_id,
+            size,
         })
     }
 
@@ -46,20 +58,24 @@ impl WALSegment {
             .await?;
 
         Ok(Self {
-            file,
+            file: Arc::new(Mutex::new(file)),
             base_index,
             segment_id,
+            size: WAL_HEADER_SIZE.numeric_cast(),
         })
     }
 
-    /// Convert this into the inner tokio file
-    pub(super) fn into_inner(self) -> TokioFile {
-        self.file
+    pub(super) fn len(&self) -> u64 {
+        self.size
+    }
+
+    pub(super) async fn sync_all(&self) -> io::Result<()> {
+        self.file.lock().await.sync_all().await
     }
 
     /// Gets the file name of the WAL segment
     fn segment_name(segment_id: u64, log_index: u64) -> String {
-        format!("{:016x}-{:016x}", segment_id, log_index)
+        format!("{:016x}-{:016x}{WAL_FILE_EXT}", segment_id, log_index)
     }
 
     // Generate the header
@@ -121,5 +137,58 @@ impl WALSegment {
         }
 
         Ok((base_index, segment_id))
+    }
+}
+
+impl AsyncWrite for WALSegment {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        let mut file_l = Box::pin(self.file.lock());
+        let mut file = ready!(file_l.poll_unpin(cx));
+        match Pin::new(&mut *file).poll_write(cx, buf) {
+            Poll::Ready(Err(e)) => {
+                return Poll::Ready(Err(e));
+            }
+            Poll::Ready(Ok(len)) => {
+                drop(file);
+                drop(file_l);
+                self.size = self.size.overflow_add(len.numeric_cast());
+                return Poll::Ready(Ok(len));
+            }
+            Poll::Pending => return Poll::Pending,
+        }
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        let mut file_l = Box::pin(self.file.lock());
+        let mut file = ready!(file_l.poll_unpin(cx));
+        Pin::new(&mut *file).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        let mut file_l = Box::pin(self.file.lock());
+        let mut file = ready!(file_l.poll_unpin(cx));
+        Pin::new(&mut *file).poll_shutdown(cx)
+    }
+}
+
+impl AsyncRead for WALSegment {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let mut file_l = Box::pin(self.file.lock());
+        let mut file = ready!(file_l.poll_unpin(cx));
+        Pin::new(&mut *file).poll_read(cx, buf)
     }
 }

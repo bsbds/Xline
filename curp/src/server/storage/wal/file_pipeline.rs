@@ -71,7 +71,7 @@ impl FilePipeline {
             let file = result?;
             if let Some(filename) = file.file_name().to_str() {
                 if filename.ends_with(TEMP_FILE_EXT) {
-                    std::fs::remove_file(file.path());
+                    std::fs::remove_file(file.path())?;
                 }
             }
         }

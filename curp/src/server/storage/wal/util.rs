@@ -50,7 +50,10 @@ impl LockedFile {
     /// We will discard this file if the rename has failed
     /// TODO: GC the orignal file
     pub(super) fn rename(self, new_name: impl AsRef<Path>) -> io::Result<Self> {
-        std::fs::rename(&self.path, new_name.as_ref())?;
+        let mut new_path = self.path.clone();
+        let _ignore = new_path.pop();
+        new_path.push(new_name.as_ref());
+        std::fs::rename(&self.path, new_path)?;
         Ok(Self {
             file: self.file,
             path: PathBuf::from(new_name.as_ref()),
