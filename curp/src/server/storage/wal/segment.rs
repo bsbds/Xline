@@ -94,7 +94,7 @@ impl WALSegment {
     /// Seal the current segment
     pub(super) async fn seal<C: Serialize>(&self, index: LogIndex) {
         let mut framed = Framed::new(self.clone(), WAL::<C>::new());
-        framed.send(iter::once(DataFrame::SealIndex(index))).await;
+        framed.send(vec![DataFrame::SealIndex(index)]).await;
         self.update_seal_index(index).await;
     }
 

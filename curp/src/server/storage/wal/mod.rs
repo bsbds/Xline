@@ -13,19 +13,26 @@ mod segment;
 /// Remover of the segment file
 mod remover;
 
-use std::{collections::LinkedList, io, path::PathBuf, pin::Pin, sync::Arc, task::Poll};
+use std::{
+    collections::LinkedList,
+    io,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::Arc,
+    task::Poll,
+};
 
 use async_trait::async_trait;
 use clippy_utilities::OverflowArithmetic;
 use curp_external_api::LogIndex;
-use futures::{future::join_all, ready, Future, FutureExt, StreamExt};
+use futures::{future::join_all, ready, Future, FutureExt, SinkExt, StreamExt};
 use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::Mutex,
 };
-use tokio_util::codec::Framed;
+use tokio_util::codec::{Encoder, Framed};
 use tracing::warn;
 
 use crate::log_entry::LogEntry;
@@ -49,10 +56,53 @@ const WAL_FILE_EXT: &'static str = ".wal";
 
 type SegmentOpenFut = Pin<Box<dyn Future<Output = io::Result<WALSegment>> + Send>>;
 
-#[async_trait]
-pub(super) trait Fsync {
-    /// Call fsync on the storage
-    async fn sync_all(&mut self) -> io::Result<()>;
+/// Wrapper type of Framed LogStorage
+pub(crate) struct FramedLogStorage<C> {
+    inner: Framed<LogStorage, WAL<C>>,
+}
+
+impl<C> FramedLogStorage<C>
+where
+    C: Serialize + DeserializeOwned + 'static,
+{
+    /// Creates a new `FramedLogStorage`
+    pub(crate) async fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
+        let storage = LogStorage::new(dir).await?;
+        Ok(Self {
+            inner: Framed::new(storage, WAL::<C>::new()),
+        })
+    }
+
+    /// Recover from the given directory
+    pub(crate) async fn recover(dir: impl AsRef<Path>) -> io::Result<Self> {
+        let storage = LogStorage::recover::<C>(dir).await?;
+        Ok(Self {
+            inner: Framed::new(storage, WAL::<C>::new()),
+        })
+    }
+
+    /// Send frames with fsync
+    async fn send_sync(&mut self, item: Vec<DataFrame<C>>) -> io::Result<()> {
+        if let Some(&DataFrame::Entry(ref entry)) = item.last() {
+            self.inner.get_mut().next_log_index = entry.index.overflow_add(1);
+        }
+        self.inner.send(item).await?;
+        self.inner.flush().await?;
+        self.inner.get_mut().sync_last_segment().await?;
+        Ok(())
+    }
+
+    /// Tuncate all the logs whose index is less than or equal to `compact_index`
+    ///
+    /// `compact_index` should be the smallest index required in CURP
+    pub(crate) async fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
+        self.inner.get_mut().truncate_head::<C>(compact_index).await
+    }
+
+    /// Tuncate all the logs whose index is greater than of equal to `next_index`
+    pub(crate) async fn truncate_tail(&mut self, next_index: LogIndex) -> io::Result<()> {
+        self.inner.get_mut().truncate_tail::<C>(next_index).await
+    }
 }
 
 /// The log storage
@@ -73,8 +123,8 @@ pub(super) struct LogStorage {
 
 impl LogStorage {
     /// Creates a new `LogStorage`
-    pub(crate) async fn new(dir: &str) -> io::Result<Self> {
-        let dir = PathBuf::from(dir);
+    pub(crate) async fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
+        let dir = PathBuf::from(dir.as_ref());
         let mut pipeline = FilePipeline::new(dir.clone(), SEGMENT_SIZE_BYTES);
         let Some(lfile) = pipeline.next().await else {
             return Err(io::Error::from(io::ErrorKind::BrokenPipe));
@@ -94,15 +144,15 @@ impl LogStorage {
     }
 
     /// Recover from the given directory
-    pub(crate) async fn recover<C>(dir: PathBuf) -> io::Result<Self>
+    pub(crate) async fn recover<C>(dir: impl AsRef<Path>) -> io::Result<Self>
     where
         C: Serialize + DeserializeOwned + 'static,
     {
         // We try to recover the removal first
         SegmentRemover::recover(&dir).await?;
 
-        let pipeline = FilePipeline::new(dir.clone(), SEGMENT_SIZE_BYTES);
-        let file_paths = util::get_file_paths_with_ext(dir.clone(), WAL_FILE_EXT)?;
+        let pipeline = FilePipeline::new(PathBuf::from(dir.as_ref()), SEGMENT_SIZE_BYTES);
+        let file_paths = util::get_file_paths_with_ext(&dir, WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
             .into_iter()
             .map(|p| LockedFile::open_read_append(p))
@@ -138,7 +188,7 @@ impl LogStorage {
             .unwrap_or(1);
 
         Ok(Self {
-            dir,
+            dir: PathBuf::from(dir.as_ref()),
             pipeline,
             segments,
             next_segment_id,
@@ -243,6 +293,11 @@ impl LogStorage {
         to_remove.into_iter().map(|(s, _)| s).collect()
     }
 
+    async fn sync_last_segment(&mut self) -> io::Result<()> {
+        let segment = self.last_segment().await?;
+        segment.sync_all().await
+    }
+
     /// Recover log entries from a `WALSegment`
     async fn recover_segment_logs<C>(
         segment: WALSegment,
@@ -302,10 +357,8 @@ impl LogStorage {
             .all(|(x, y)| x.index.overflow_add(1) == y.index)
     }
 
-    fn into_framed<C>(self) -> Framed<Self, WAL<C>>
-    where
-        C: Serialize + DeserializeOwned + 'static,
-    {
+    /// Convert self into a Framed instance
+    fn into_framed<C>(self) -> Framed<Self, WAL<C>> {
         Framed::new(self, WAL::<C>::new())
     }
 
@@ -364,14 +417,6 @@ impl AsyncRead for LogStorage {
     }
 }
 
-#[async_trait]
-impl Fsync for LogStorage {
-    async fn sync_all(&mut self) -> io::Result<()> {
-        let segment = self.last_segment().await?;
-        segment.sync_all().await
-    }
-}
-
 impl LogStorage {
     fn poll_last_segment(
         mut self: Pin<&mut Self>,
@@ -417,18 +462,6 @@ impl Future for LastSegmentFut<'_> {
     }
 }
 
-#[async_trait]
-impl<T, U> Fsync for Framed<T, U>
-where
-    T: Fsync + Send,
-    U: Send,
-{
-    async fn sync_all(&mut self) -> io::Result<()> {
-        let storage = self.get_mut();
-        storage.sync_all().await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use curp_external_api::cmd::ProposeId;
@@ -444,21 +477,15 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn append_and_read_is_ok() -> io::Result<()> {
-        let mut storage = LogStorage::new("/tmp/wal").await.unwrap();
-        let mut io = storage.into_framed();
+    async fn log_append_is_ok() -> io::Result<()> {
+        let mut storage = FramedLogStorage::new("/tmp/wal").await.unwrap();
         let frame = DataFrame::Entry(LogEntry::<TestCommand>::new(
             1,
             1,
             EntryData::Empty(ProposeId(1, 2)),
         ));
-        io.send(vec![frame].into_iter()).await.unwrap();
-        drop(io);
+        storage.send_sync(vec![frame]).await.unwrap();
 
-        let mut storage = LogStorage::new("/tmp/wal").await?;
-        let mut io = storage.into_framed::<TestCommand>();
-        let frame = io.next().await.unwrap().unwrap();
-        println!("{:?}", frame[0]);
         Ok(())
     }
 }

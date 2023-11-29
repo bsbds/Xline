@@ -154,14 +154,17 @@ pub(crate) struct WAL<C> {
     _phantom: PhantomData<C>,
 }
 
-impl<C, D> Encoder<D> for WAL<C>
+impl<C> Encoder<Vec<DataFrame<C>>> for WAL<C>
 where
     C: Serialize,
-    D: Iterator<Item = DataFrame<C>>,
 {
     type Error = io::Error;
 
-    fn encode(&mut self, frames: D, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+    fn encode(
+        &mut self,
+        frames: Vec<DataFrame<C>>,
+        dst: &mut bytes::BytesMut,
+    ) -> Result<(), Self::Error> {
         let frames_bytes: Vec<_> = frames.into_iter().map(|f| f.encode()).flatten().collect();
         let commit_frame = CommitFrame::new_from_data(&frames_bytes);
 
