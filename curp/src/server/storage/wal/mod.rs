@@ -10,8 +10,8 @@ mod util;
 /// WAL segment
 mod segment;
 
-/// Removal of the segment file
-mod segment_remove;
+/// Remover of the segment file
+mod remover;
 
 use std::{collections::LinkedList, io, path::PathBuf, pin::Pin, sync::Arc, task::Poll};
 
@@ -32,8 +32,8 @@ use crate::log_entry::LogEntry;
 use self::{
     codec::{DataFrame, WAL},
     file_pipeline::FilePipeline,
+    remover::SegmentRemover,
     segment::WALSegment,
-    segment_remove::SegmentRemover,
     util::LockedFile,
 };
 
