@@ -146,7 +146,8 @@ impl LogStorage {
         })
     }
 
-    pub(crate) async fn truncate_tail<C>(&mut self, index: LogIndex) -> io::Result<()>
+    /// Tuncate all the logs whose index is larger of equal to `next_index`
+    pub(crate) async fn truncate_tail<C>(&mut self, next_index: LogIndex) -> io::Result<()>
     where
         C: Serialize,
     {
@@ -164,37 +165,50 @@ impl LogStorage {
             .segments
             .iter()
             .rev()
-            .take_while_inclusive::<_>(|s| s.base_index() > index);
+            .take_while_inclusive::<_>(|s| s.base_index() > next_index);
 
         for segment in segments {
-            segment.seal::<C>(index);
+            segment.seal::<C>(next_index);
         }
 
-        self.remove_redundant_segments().await;
+        let to_remove = self.update_segments().await;
+        SegmentRemover::new_removal(&self.dir, &to_remove).await?;
+
+        self.next_log_index = next_index;
+        self.open_new_segment();
+
+        Ok(())
+    }
+
+    /// Open a new WAL segment
+    async fn open_new_segment(&mut self) -> io::Result<()> {
+        let lfile = self
+            .pipeline
+            .next()
+            .await
+            .ok_or(io::Error::from(io::ErrorKind::BrokenPipe))?;
+
+        let segment = WALSegment::create(lfile, self.next_log_index, self.next_segment_id).await?;
+
+        self.segments.push(segment);
+        self.next_segment_id = self.next_segment_id.overflow_add(1);
 
         Ok(())
     }
 
     /// Remove segments that is no long needed
-    async fn remove_redundant_segments(&mut self) {
+    async fn update_segments(&mut self) -> Vec<WALSegment> {
         let flags = join_all(self.segments.iter().map(|s| s.is_redundant())).await;
-        let to_remove: Vec<_> = self
-            .segments
-            .iter()
-            .zip(flags.iter())
-            .filter_map((|(s, f)| (*f).then_some(s)))
-            .collect();
-
-        self.segments = self
+        let (to_remove, remaining): (Vec<_>, Vec<_>) = self
             .segments
             .drain(..)
             .zip(flags.into_iter())
-            .filter_map(|(s, f)| (!f).then_some(s))
-            .collect();
-    }
+            .partition(|(_, f)| *f);
 
-    /// Atomically remove the segment files
-    async fn remove_segment_files(segments: Vec<&WALSegment>) {}
+        self.segments = remaining.into_iter().map(|(s, _)| s).collect();
+
+        to_remove.into_iter().map(|(s, _)| s).collect()
+    }
 
     /// Recover log entries from a `WALSegment`
     async fn recover_segment_logs<C>(
