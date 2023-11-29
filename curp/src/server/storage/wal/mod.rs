@@ -74,11 +74,14 @@ where
     }
 
     /// Recover from the given directory
-    pub(crate) async fn recover(dir: impl AsRef<Path>) -> io::Result<Self> {
-        let storage = WALStorage::recover::<C>(dir).await?;
-        Ok(Self {
-            inner: Framed::new(storage, WAL::<C>::new()),
-        })
+    pub(crate) async fn recover(dir: impl AsRef<Path>) -> io::Result<(Self, Vec<LogEntry<C>>)> {
+        let (storage, logs) = WALStorage::recover::<C>(dir).await?;
+        Ok((
+            Self {
+                inner: Framed::new(storage, WAL::<C>::new()),
+            },
+            logs,
+        ))
     }
 
     /// Send frames with fsync
@@ -144,7 +147,7 @@ impl WALStorage {
     }
 
     /// Recover from the given directory
-    pub(crate) async fn recover<C>(dir: impl AsRef<Path>) -> io::Result<Self>
+    pub(crate) async fn recover<C>(dir: impl AsRef<Path>) -> io::Result<(Self, Vec<LogEntry<C>>)>
     where
         C: Serialize + DeserializeOwned + 'static,
     {
@@ -187,14 +190,17 @@ impl WALStorage {
             .map(|l| l.index.overflow_add(1))
             .unwrap_or(1);
 
-        Ok(Self {
-            dir: PathBuf::from(dir.as_ref()),
-            pipeline,
-            segments,
-            next_segment_id,
-            next_log_index,
-            segment_opening: None,
-        })
+        Ok((
+            Self {
+                dir: PathBuf::from(dir.as_ref()),
+                pipeline,
+                segments,
+                next_segment_id,
+                next_log_index,
+                segment_opening: None,
+            },
+            logs_flattened,
+        ))
     }
 
     /// Tuncate all the logs whose index is less than or equal to `compact_index`
