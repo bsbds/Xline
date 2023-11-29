@@ -74,7 +74,7 @@ impl SegmentRemover {
     /// Creates a new removal
     pub(super) async fn new_removal(
         dir: impl AsRef<Path>,
-        segments: &[WALSegment],
+        segments: impl Iterator<Item = &WALSegment> + Clone,
     ) -> io::Result<()> {
         let wal_path = Self::rwal_path(&dir);
 
@@ -85,7 +85,7 @@ impl SegmentRemover {
 
         //let file_name = WALSegment::segment_name(segment_id, base_index);
         let mut wal_data: Vec<_> = segments
-            .iter()
+            .clone()
             .map(|s| {
                 s.base_index()
                     .to_le_bytes()
@@ -99,9 +99,7 @@ impl SegmentRemover {
         let mut wal = LockedFile::open_read_append(wal_path.clone())?.into_async();
         wal.write_all(&wal_data).await?;
 
-        let to_remove_paths = segments
-            .iter()
-            .map(|s| WALSegment::segment_name(s.id(), s.base_index()));
+        let to_remove_paths = segments.map(|s| WALSegment::segment_name(s.id(), s.base_index()));
 
         Self::start_remove(to_remove_paths, wal_path)
     }

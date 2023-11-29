@@ -26,6 +26,7 @@ use tokio::{
     sync::Mutex,
 };
 use tokio_util::codec::Framed;
+use tracing::warn;
 
 use crate::log_entry::LogEntry;
 
@@ -146,7 +147,39 @@ impl LogStorage {
         })
     }
 
-    /// Tuncate all the logs whose index is larger of equal to `next_index`
+    /// Tuncate all the logs whose index is less than or equal to `compact_index`
+    ///
+    /// `compact_index` should be the smallest index required in CURP
+    pub(crate) async fn truncate_head<C>(&mut self, compact_index: LogIndex) -> io::Result<()>
+    where
+        C: Serialize,
+    {
+        if compact_index >= self.next_log_index {
+            warn!(
+                "head truncation: compact index too large, compact index: {}, storage next index: {}",
+                compact_index, self.next_log_index
+            );
+            return Ok(());
+        }
+
+        let segments: Vec<_> = self
+            .segments
+            .iter()
+            .take_while(|s| s.base_index() <= compact_index)
+            .collect();
+
+        if segments.is_empty() {
+            return Ok(());
+        }
+
+        // The last segment does not need to be removed
+        let to_remove = segments.into_iter().rev().skip(1);
+        SegmentRemover::new_removal(&self.dir, to_remove).await?;
+
+        Ok(())
+    }
+
+    /// Tuncate all the logs whose index is greater than of equal to `next_index`
     pub(crate) async fn truncate_tail<C>(&mut self, next_index: LogIndex) -> io::Result<()>
     where
         C: Serialize,
@@ -172,7 +205,7 @@ impl LogStorage {
         }
 
         let to_remove = self.update_segments().await;
-        SegmentRemover::new_removal(&self.dir, &to_remove).await?;
+        SegmentRemover::new_removal(&self.dir, to_remove.iter()).await?;
 
         self.next_log_index = next_index;
         self.open_new_segment();
