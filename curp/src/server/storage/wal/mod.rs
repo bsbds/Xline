@@ -10,7 +10,10 @@ mod util;
 /// WAL segment
 mod segment;
 
-use std::{io, path::PathBuf, pin::Pin, sync::Arc, task::Poll};
+/// Removal of the segment file
+mod segment_remove;
+
+use std::{collections::LinkedList, io, path::PathBuf, pin::Pin, sync::Arc, task::Poll};
 
 use async_trait::async_trait;
 use clippy_utilities::OverflowArithmetic;
@@ -30,6 +33,7 @@ use self::{
     codec::{DataFrame, WAL},
     file_pipeline::FilePipeline,
     segment::WALSegment,
+    segment_remove::SegmentRemover,
     util::LockedFile,
 };
 
@@ -93,6 +97,9 @@ impl LogStorage {
     where
         C: Serialize + DeserializeOwned + 'static,
     {
+        // We try to recover the removal first
+        SegmentRemover::recover(&dir).await?;
+
         let pipeline = FilePipeline::new(dir.clone(), SEGMENT_SIZE_BYTES);
         let file_paths = util::get_file_paths_with_ext(dir.clone(), WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
@@ -163,8 +170,31 @@ impl LogStorage {
             segment.seal::<C>(index);
         }
 
+        self.remove_redundant_segments().await;
+
         Ok(())
     }
+
+    /// Remove segments that is no long needed
+    async fn remove_redundant_segments(&mut self) {
+        let flags = join_all(self.segments.iter().map(|s| s.is_redundant())).await;
+        let to_remove: Vec<_> = self
+            .segments
+            .iter()
+            .zip(flags.iter())
+            .filter_map((|(s, f)| (*f).then_some(s)))
+            .collect();
+
+        self.segments = self
+            .segments
+            .drain(..)
+            .zip(flags.into_iter())
+            .filter_map(|(s, f)| (!f).then_some(s))
+            .collect();
+    }
+
+    /// Atomically remove the segment files
+    async fn remove_segment_files(segments: Vec<&WALSegment>) {}
 
     /// Recover log entries from a `WALSegment`
     async fn recover_segment_logs<C>(
@@ -200,7 +230,10 @@ impl LogStorage {
         // TODO: reset on drop might be better
         framed.get_mut().reset_offset().await?;
 
-        /// Get log entries that index is no larger than `highest_index`
+        // Update seal index
+        framed.get_mut().update_seal_index(highest_index).await;
+
+        // Get log entries that index is no larger than `highest_index`
         Ok(frame_batches.into_iter().flatten().filter_map(move |f| {
             if let DataFrame::Entry(e) = f {
                 (e.index <= highest_index).then_some(e)
@@ -311,7 +344,7 @@ impl LogStorage {
             .last()
             .unwrap_or_else(|| unreachable!("there should exist at least one segement"))
             .clone();
-        if last.len() < SEGMENT_SIZE_BYTES {
+        if ready!(Box::pin(last.len()).poll_unpin(cx)) < SEGMENT_SIZE_BYTES {
             Poll::Ready(Ok(last))
         } else {
             // We open a new segment if the segment reaches the soft limit

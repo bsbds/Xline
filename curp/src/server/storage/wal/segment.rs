@@ -24,11 +24,22 @@ const WAL_HEADER_SIZE: usize = 56;
 
 #[derive(Clone, Debug)]
 pub(super) struct WALSegment {
-    file: Arc<Mutex<TokioFile>>,
+    /// The inner state
+    inner: Arc<Mutex<Inner>>,
+    /// The base index of this segment
     base_index: LogIndex,
+    /// The id of this segment
     segment_id: u64,
+}
+
+#[derive(Debug)]
+struct Inner {
+    /// The opened file of this segment
+    file: TokioFile,
     /// The file size of the segment
     size: u64,
+    /// The highest index of the segment
+    seal_index: LogIndex,
 }
 
 impl WALSegment {
@@ -40,11 +51,17 @@ impl WALSegment {
         let _ignore = file.read_exact(&mut buf).await?;
         let (base_index, segment_id) = Self::parse_header(&buf)?;
 
+        let inner = Inner {
+            file,
+            size,
+            // Index 0 means the seal_index hasn't been read yet
+            seal_index: 0,
+        };
+
         Ok(Self {
-            file: Arc::new(Mutex::new(file)),
+            inner: Arc::new(Mutex::new(inner)),
             base_index,
             segment_id,
-            size,
         })
     }
 
@@ -60,32 +77,46 @@ impl WALSegment {
         file.write_all(&Self::gen_header(base_index, segment_id))
             .await?;
 
+        let inner = Inner {
+            file,
+            size: WAL_HEADER_SIZE.numeric_cast(),
+            // For convenience we set it to largest u64 value that represent not sealed
+            seal_index: u64::MAX,
+        };
+
         Ok(Self {
-            file: Arc::new(Mutex::new(file)),
+            inner: Arc::new(Mutex::new(inner)),
             base_index,
             segment_id,
-            size: WAL_HEADER_SIZE.numeric_cast(),
         })
     }
 
     /// Seal the current segment
     pub(super) async fn seal<C: Serialize>(&self, index: LogIndex) {
         let mut framed = Framed::new(self.clone(), WAL::<C>::new());
-        framed.send(iter::once(DataFrame::SealIndex(index)));
+        framed.send(iter::once(DataFrame::SealIndex(index))).await;
+        self.update_seal_index(index).await;
     }
 
-    pub(super) fn len(&self) -> u64 {
-        self.size
+    pub(super) async fn len(&self) -> u64 {
+        self.inner.lock().await.size
+    }
+
+    pub(super) async fn update_seal_index(&self, index: LogIndex) {
+        let mut inner = self.inner.lock().await;
+        // Max is used here to avoid concurrent update issue
+        inner.seal_index = inner.seal_index.max(index);
     }
 
     pub(super) async fn sync_all(&self) -> io::Result<()> {
-        self.file.lock().await.sync_all().await
+        self.inner.lock().await.file.sync_all().await
     }
 
     pub(super) async fn reset_offset(&self) -> io::Result<()> {
-        self.file
+        self.inner
             .lock()
             .await
+            .file
             .seek(io::SeekFrom::Start(0))
             .await
             .map(|_| ())
@@ -99,8 +130,12 @@ impl WALSegment {
         self.base_index
     }
 
+    pub(super) async fn is_redundant(&self) -> bool {
+        self.inner.lock().await.seal_index < self.base_index
+    }
+
     /// Gets the file name of the WAL segment
-    fn segment_name(segment_id: u64, log_index: u64) -> String {
+    pub(super) fn segment_name(segment_id: u64, log_index: u64) -> String {
         format!("{:016x}-{:016x}{WAL_FILE_EXT}", segment_id, log_index)
     }
 
@@ -172,16 +207,14 @@ impl AsyncWrite for WALSegment {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        let mut file_l = Box::pin(self.file.lock());
-        let mut file = ready!(file_l.poll_unpin(cx));
-        match Pin::new(&mut *file).poll_write(cx, buf) {
+        let mut inner_l = Box::pin(self.inner.lock());
+        let mut inner = ready!(inner_l.poll_unpin(cx));
+        match Pin::new(&mut inner.file).poll_write(cx, buf) {
             Poll::Ready(Err(e)) => {
                 return Poll::Ready(Err(e));
             }
             Poll::Ready(Ok(len)) => {
-                drop(file);
-                drop(file_l);
-                self.size = self.size.overflow_add(len.numeric_cast());
+                inner.size = inner.size.overflow_add(len.numeric_cast());
                 return Poll::Ready(Ok(len));
             }
             Poll::Pending => return Poll::Pending,
@@ -192,18 +225,18 @@ impl AsyncWrite for WALSegment {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
-        let mut file_l = Box::pin(self.file.lock());
-        let mut file = ready!(file_l.poll_unpin(cx));
-        Pin::new(&mut *file).poll_flush(cx)
+        let mut inner_l = Box::pin(self.inner.lock());
+        let mut inner = ready!(inner_l.poll_unpin(cx));
+        Pin::new(&mut inner.file).poll_flush(cx)
     }
 
     fn poll_shutdown(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
-        let mut file_l = Box::pin(self.file.lock());
-        let mut file = ready!(file_l.poll_unpin(cx));
-        Pin::new(&mut *file).poll_shutdown(cx)
+        let mut inner_l = Box::pin(self.inner.lock());
+        let mut inner = ready!(inner_l.poll_unpin(cx));
+        Pin::new(&mut inner.file).poll_shutdown(cx)
     }
 }
 
@@ -213,9 +246,9 @@ impl AsyncRead for WALSegment {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let mut file_l = Box::pin(self.file.lock());
-        let mut file = ready!(file_l.poll_unpin(cx));
-        Pin::new(&mut *file).poll_read(cx, buf)
+        let mut inner_l = Box::pin(self.inner.lock());
+        let mut inner = ready!(inner_l.poll_unpin(cx));
+        Pin::new(&mut inner.file).poll_read(cx, buf)
     }
 }
 

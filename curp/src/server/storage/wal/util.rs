@@ -97,3 +97,16 @@ pub(super) fn get_checksum(data: &[u8]) -> Vec<u8> {
 pub(super) fn validate_data(data: &[u8], checksum: &[u8]) -> bool {
     get_checksum(data) == checksum
 }
+
+pub(super) fn is_exist(path: impl AsRef<Path>) -> bool {
+    std::fs::metadata(path).is_ok()
+}
+
+pub(super) fn parse_u64(bytes_le: &[u8]) -> u64 {
+    assert_eq!(bytes_le.len(), 8);
+    u64::from_le_bytes(
+        bytes_le
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("This conversion should always exist")),
+    )
+}
