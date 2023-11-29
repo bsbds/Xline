@@ -57,17 +57,17 @@ const WAL_FILE_EXT: &'static str = ".wal";
 type SegmentOpenFut = Pin<Box<dyn Future<Output = io::Result<WALSegment>> + Send>>;
 
 /// Wrapper type of Framed LogStorage
-pub(crate) struct FramedLogStorage<C> {
-    inner: Framed<LogStorage, WAL<C>>,
+pub(crate) struct FramedWALStorage<C> {
+    inner: Framed<WALStorage, WAL<C>>,
 }
 
-impl<C> FramedLogStorage<C>
+impl<C> FramedWALStorage<C>
 where
     C: Serialize + DeserializeOwned + 'static,
 {
     /// Creates a new `FramedLogStorage`
     pub(crate) async fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
-        let storage = LogStorage::new(dir).await?;
+        let storage = WALStorage::new(dir).await?;
         Ok(Self {
             inner: Framed::new(storage, WAL::<C>::new()),
         })
@@ -75,7 +75,7 @@ where
 
     /// Recover from the given directory
     pub(crate) async fn recover(dir: impl AsRef<Path>) -> io::Result<Self> {
-        let storage = LogStorage::recover::<C>(dir).await?;
+        let storage = WALStorage::recover::<C>(dir).await?;
         Ok(Self {
             inner: Framed::new(storage, WAL::<C>::new()),
         })
@@ -106,7 +106,7 @@ where
 }
 
 /// The log storage
-pub(super) struct LogStorage {
+pub(super) struct WALStorage {
     /// The directory to store the log files
     dir: PathBuf,
     /// The pipeline that pre-allocates files
@@ -121,7 +121,7 @@ pub(super) struct LogStorage {
     segment_opening: Option<SegmentOpenFut>,
 }
 
-impl LogStorage {
+impl WALStorage {
     /// Creates a new `LogStorage`
     pub(crate) async fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
         let dir = PathBuf::from(dir.as_ref());
@@ -367,7 +367,7 @@ impl LogStorage {
     }
 }
 
-impl AsyncWrite for LogStorage {
+impl AsyncWrite for WALStorage {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -403,7 +403,7 @@ impl AsyncWrite for LogStorage {
     }
 }
 
-impl AsyncRead for LogStorage {
+impl AsyncRead for WALStorage {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -417,7 +417,7 @@ impl AsyncRead for LogStorage {
     }
 }
 
-impl LogStorage {
+impl WALStorage {
     fn poll_last_segment(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -451,7 +451,7 @@ impl LogStorage {
 }
 
 struct LastSegmentFut<'a> {
-    storage: &'a mut LogStorage,
+    storage: &'a mut WALStorage,
 }
 
 impl Future for LastSegmentFut<'_> {
@@ -478,7 +478,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn log_append_is_ok() -> io::Result<()> {
-        let mut storage = FramedLogStorage::new("/tmp/wal").await.unwrap();
+        let mut storage = FramedWALStorage::new("/tmp/wal").await.unwrap();
         let frame = DataFrame::Entry(LogEntry::<TestCommand>::new(
             1,
             1,
