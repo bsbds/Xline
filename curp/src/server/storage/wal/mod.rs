@@ -60,17 +60,12 @@ impl<C> FramedWALStorage<C>
 where
     C: Serialize + DeserializeOwned + 'static,
 {
-    /// Creates a new `FramedLogStorage`
-    pub(crate) async fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
-        let storage = WALStorage::new(dir).await?;
-        Ok(Self {
-            inner: Framed::new(storage, WAL::<C>::new()),
-        })
-    }
-
-    /// Recover from the given directory
-    pub(crate) async fn recover(dir: impl AsRef<Path>) -> io::Result<(Self, Vec<LogEntry<C>>)> {
-        let (storage, logs) = WALStorage::recover::<C>(dir).await?;
+    /// Recover from the given directory if there's any segments
+    /// Otherwise, creates a new `FramedLogStorage`
+    pub(crate) async fn new_or_recover(
+        dir: impl AsRef<Path>,
+    ) -> io::Result<(Self, Vec<LogEntry<C>>)> {
+        let (storage, logs) = WALStorage::new_or_recover::<C>(dir).await?;
         Ok((
             Self {
                 inner: Framed::new(storage, WAL::<C>::new()),
@@ -120,36 +115,16 @@ struct WALStorage {
 }
 
 impl WALStorage {
-    /// Creates a new `LogStorage`
-    async fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
-        let dir = PathBuf::from(dir.as_ref());
-        let mut pipeline = FilePipeline::new(dir.clone(), SEGMENT_SIZE_BYTES);
-        let Some(lfile) = pipeline.next().await else {
-            return Err(io::Error::from(io::ErrorKind::BrokenPipe));
-        };
-        let initial_log_index = 1;
-        let initial_segment_id = 0;
-        let segment = WALSegment::create(lfile, initial_log_index, initial_segment_id).await?;
-
-        Ok(Self {
-            dir,
-            pipeline,
-            segments: vec![segment],
-            next_segment_id: initial_segment_id.overflow_add(1),
-            next_log_index: initial_segment_id.overflow_add(1),
-            segment_opening: None,
-        })
-    }
-
-    /// Recover from the given directory
-    async fn recover<C>(dir: impl AsRef<Path>) -> io::Result<(Self, Vec<LogEntry<C>>)>
+    /// Recover from the given directory if there's any segments
+    /// Otherwise, creates a new `LogStorage`
+    async fn new_or_recover<C>(dir: impl AsRef<Path>) -> io::Result<(Self, Vec<LogEntry<C>>)>
     where
         C: Serialize + DeserializeOwned + 'static,
     {
         // We try to recover the removal first
         SegmentRemover::recover(&dir).await?;
 
-        let pipeline = FilePipeline::new(PathBuf::from(dir.as_ref()), SEGMENT_SIZE_BYTES);
+        let mut pipeline = FilePipeline::new(PathBuf::from(dir.as_ref()), SEGMENT_SIZE_BYTES);
         let file_paths = util::get_file_paths_with_ext(&dir, WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
             .into_iter()
@@ -178,7 +153,13 @@ impl WALStorage {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
 
-        // TODO: seal the last segment and create a new one
+        /// If there's no segments to recover, create a new segment
+        if segments.is_empty() {
+            let Some(lfile) = pipeline.next().await else {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+            };
+            segments.push(WALSegment::create(lfile, 1, 0).await?);
+        }
         let next_segment_id = segments.last().map(|s| s.id().overflow_add(1)).unwrap_or(0);
         let next_log_index = logs_flattened
             .last()
@@ -474,7 +455,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn log_append_is_ok() -> io::Result<()> {
-        let mut storage = FramedWALStorage::new("/tmp/wal").await.unwrap();
+        let wal_test_path = "/tmp/wal-test";
+        std::fs::remove_dir_all(wal_test_path);
+        std::fs::create_dir(wal_test_path);
+        let (mut storage, _logs) = FramedWALStorage::new_or_recover(wal_test_path)
+            .await
+            .unwrap();
         let frame = DataFrame::Entry(LogEntry::<TestCommand>::new(
             1,
             1,
@@ -482,6 +468,7 @@ mod tests {
         ));
         storage.send_sync(vec![frame]).await.unwrap();
 
+        std::fs::remove_dir_all(wal_test_path);
         Ok(())
     }
 }
