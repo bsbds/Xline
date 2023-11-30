@@ -3,6 +3,7 @@ use std::{io, marker::PhantomData};
 use curp_external_api::LogIndex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::log_entry::LogEntry;
@@ -13,6 +14,16 @@ trait FrameType {
 
 trait FrameEncoder {
     fn encode(&self) -> Vec<u8>;
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum CodecError {
+    #[error("The WAL segment reach on end or has corrupted")]
+    EndOrCorrupted,
+    #[error("The WAL segment has corrupted")]
+    Corrupted,
+    #[error("IO error: {0}")]
+    IO(#[from] io::Error),
 }
 
 #[derive(Debug)]
@@ -26,7 +37,7 @@ where
     C: for<'a> Deserialize<'a>,
 {
     #[allow(clippy::indexing_slicing)] // The indexing is safe
-    fn decode(src: &[u8]) -> io::Result<Option<(Self, usize)>> {
+    fn decode(src: &[u8]) -> Result<Option<(Self, usize)>, CodecError> {
         if src.len() < 8 {
             return Ok(None);
         }
@@ -36,7 +47,7 @@ where
         let frame_type = header[0];
         Ok(Some(match frame_type {
             0x00 => {
-                return Ok(None);
+                return Err(CodecError::EndOrCorrupted);
             }
             0x01 => {
                 let len = Self::get_u64(header) as usize;
@@ -44,8 +55,8 @@ where
                     return Ok(None);
                 }
                 let payload = &src[8..8 + len];
-                let entry: LogEntry<C> = bincode::deserialize(payload)
-                    .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+                let entry: LogEntry<C> =
+                    bincode::deserialize(payload).map_err(|_| CodecError::Corrupted)?;
                 (Self::Data(DataFrame::Entry(entry)), 8 + len)
             }
             0x02 => {
@@ -60,7 +71,7 @@ where
                 (Self::Commit(CommitFrame { checksum }), 8 + 32)
             }
             _ => {
-                return Err(io::Error::from(io::ErrorKind::Unsupported));
+                return Err(CodecError::Corrupted);
             }
         }))
     }
@@ -184,7 +195,7 @@ where
 {
     type Item = Vec<DataFrame<C>>;
 
-    type Error = io::Error;
+    type Error = CodecError;
 
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let mut frames = vec![];
@@ -202,7 +213,7 @@ where
                             if commit.validate(&frames_bytes) {
                                 return Ok(Some(frames));
                             } else {
-                                return Err(io::Error::from(io::ErrorKind::InvalidData));
+                                return Err(CodecError::Corrupted);
                             }
                         }
                     }

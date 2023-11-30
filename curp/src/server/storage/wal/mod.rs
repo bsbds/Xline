@@ -37,7 +37,7 @@ use tracing::warn;
 use crate::log_entry::LogEntry;
 
 use self::{
-    codec::{DataFrame, WAL},
+    codec::{CodecError, DataFrame, WAL},
     file_pipeline::FilePipeline,
     remover::SegmentRemover,
     segment::WALSegment,
@@ -289,11 +289,21 @@ impl WALStorage {
         C: Serialize + DeserializeOwned + 'static,
     {
         let mut framed = Framed::new(segment, WAL::<C>::new());
-        let mut result = vec![];
-        while let Some(r) = framed.next().await {
-            result.push(r);
+        let mut frame_batches = vec![];
+        while let Some(result) = framed.next().await {
+            match result {
+                Ok(f) => frame_batches.push(f),
+                Err(e) => {
+                    /// If the segment file reaches on end, stop reading
+                    if matches!(e, CodecError::EndOrCorrupted) {
+                        break;
+                    } else {
+                        println!("{e}");
+                        return Err(io::Error::from(io::ErrorKind::InvalidData));
+                    }
+                }
+            }
         }
-        let frame_batches: Vec<_> = result.into_iter().collect::<Result<_, _>>()?;
         // The highest_index of this segment
         let mut highest_index = u64::MAX;
         // We get the last frame batch to check it's type
