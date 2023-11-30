@@ -20,7 +20,7 @@ pub(super) struct LockedFile {
 
 impl LockedFile {
     /// Open the file in read and append mode
-    pub(super) fn open_read_append(path: PathBuf) -> io::Result<Self> {
+    pub(super) fn open_rw(path: PathBuf) -> io::Result<Self> {
         let file = OpenOptions::new()
             .create(true)
             .read(true)

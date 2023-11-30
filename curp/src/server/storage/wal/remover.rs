@@ -46,7 +46,7 @@ impl SegmentRemover {
             return Ok(());
         }
 
-        let mut wal = LockedFile::open_read_append(wal_path.clone())?.into_async();
+        let mut wal = LockedFile::open_rw(wal_path.clone())?.into_async();
         let mut buf = vec![];
         let n = wal.read_to_end(&mut buf).await?;
         /// At least checksum + one record
@@ -96,7 +96,7 @@ impl SegmentRemover {
             .collect();
         wal_data.append(&mut get_checksum(&wal_data));
 
-        let mut wal = LockedFile::open_read_append(wal_path.clone())?.into_async();
+        let mut wal = LockedFile::open_rw(wal_path.clone())?.into_async();
         wal.write_all(&wal_data).await?;
 
         let to_remove_paths = segments.map(|s| WALSegment::segment_name(s.id(), s.base_index()));

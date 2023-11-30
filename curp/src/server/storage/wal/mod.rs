@@ -132,7 +132,7 @@ impl WALStorage {
         let file_paths = util::get_file_paths_with_ext(&dir, WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
             .into_iter()
-            .map(|p| LockedFile::open_read_append(p))
+            .map(|p| LockedFile::open_rw(p))
             .collect::<io::Result<_>>()?;
 
         let segment_futs = lfiles.into_iter().map(|f| WALSegment::open(f));
