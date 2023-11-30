@@ -96,9 +96,9 @@ where
         self.inner.get_mut().truncate_head::<C>(compact_index).await
     }
 
-    /// Tuncate all the logs whose index is greater than of equal to `next_index`
-    pub(crate) async fn truncate_tail(&mut self, next_index: LogIndex) -> io::Result<()> {
-        self.inner.get_mut().truncate_tail::<C>(next_index).await
+    /// Tuncate all the logs whose index is greater than `max_index`
+    pub(crate) async fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
+        self.inner.get_mut().truncate_tail::<C>(max_index).await
     }
 }
 
@@ -154,6 +154,9 @@ impl WALStorage {
         let logs_flattened: Vec<_> = logs.into_iter().flatten().collect();
 
         if !Self::check_log_continuity(logs_flattened.iter()) {
+            for logs in &logs_flattened {
+                println!("index: {}", logs.index);
+            }
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
 
@@ -215,8 +218,8 @@ impl WALStorage {
         Ok(())
     }
 
-    /// Tuncate all the logs whose index is greater than of equal to `next_index`
-    async fn truncate_tail<C>(&mut self, next_index: LogIndex) -> io::Result<()>
+    /// Tuncate all the logs whose index is greater than `max_index`
+    async fn truncate_tail<C>(&mut self, max_index: LogIndex) -> io::Result<()>
     where
         C: Serialize,
     {
@@ -231,16 +234,16 @@ impl WALStorage {
             .segments
             .iter()
             .rev()
-            .take_while_inclusive::<_>(|s| s.base_index() > next_index);
+            .take_while_inclusive::<_>(|s| s.base_index() > max_index);
 
         for segment in segments {
-            segment.seal::<C>(next_index).await;
+            segment.seal::<C>(max_index).await;
         }
 
         let to_remove = self.update_segments().await;
         SegmentRemover::new_removal(&self.dir, to_remove.iter()).await?;
 
-        self.next_log_index = next_index;
+        self.next_log_index = max_index.overflow_add(1);
         self.open_new_segment().await?;
 
         Ok(())

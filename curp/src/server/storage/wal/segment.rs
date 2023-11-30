@@ -94,10 +94,12 @@ impl WALSegment {
     }
 
     /// Seal the current segment
-    pub(super) async fn seal<C: Serialize>(&self, index: LogIndex) {
+    ///
+    /// After the seal, the log index in this segment should be less than `next_index`
+    pub(super) async fn seal<C: Serialize>(&self, next_index: LogIndex) {
         let mut framed = Framed::new(self.clone(), WAL::<C>::new());
-        framed.send(vec![DataFrame::SealIndex(index)]).await;
-        self.update_seal_index(index).await;
+        framed.send(vec![DataFrame::SealIndex(next_index)]).await;
+        self.update_seal_index(next_index).await;
     }
 
     pub(super) async fn len(&self) -> u64 {
