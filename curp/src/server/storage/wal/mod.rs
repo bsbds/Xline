@@ -14,6 +14,10 @@ mod segment;
 /// Remover of the segment file
 mod remover;
 
+/// WAL tests
+#[cfg(test)]
+mod tests;
+
 use std::{
     io,
     path::{Path, PathBuf},
@@ -438,37 +442,5 @@ impl Future for LastSegmentFut<'_> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut *self.storage).poll_last_segment(cx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use curp_external_api::cmd::ProposeId;
-    use curp_test_utils::test_cmd::TestCommand;
-
-    use crate::{
-        log_entry::{EntryData, LogEntry},
-        server::storage::wal::codec::DataFrame,
-    };
-
-    use super::*;
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn log_append_is_ok() -> io::Result<()> {
-        let wal_test_path = "/tmp/wal-test";
-        std::fs::remove_dir_all(wal_test_path);
-        std::fs::create_dir(wal_test_path);
-        let (mut storage, _logs) = FramedWALStorage::new_or_recover(wal_test_path)
-            .await
-            .unwrap();
-        let frame = DataFrame::Entry(LogEntry::<TestCommand>::new(
-            1,
-            1,
-            EntryData::Empty(ProposeId(1, 2)),
-        ));
-        storage.send_sync(vec![frame]).await.unwrap();
-
-        std::fs::remove_dir_all(wal_test_path);
-        Ok(())
     }
 }
