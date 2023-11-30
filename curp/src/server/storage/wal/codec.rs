@@ -35,6 +35,9 @@ where
             .unwrap_or_else(|_| unreachable!("this conversion will always succeed"));
         let frame_type = header[0];
         Ok(Some(match frame_type {
+            0x00 => {
+                return Ok(None);
+            }
             0x01 => {
                 let len = Self::get_u64(header) as usize;
                 if src.len() < 8 + len {

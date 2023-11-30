@@ -1,6 +1,6 @@
 use std::{
     fs::{File as StdFile, OpenOptions},
-    io,
+    io::{self, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -24,7 +24,7 @@ impl LockedFile {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
-            .append(true)
+            .write(true)
             .open(path.as_path())?;
         file.try_lock_exclusive()?;
 

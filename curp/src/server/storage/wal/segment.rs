@@ -76,6 +76,8 @@ impl WALSegment {
         let mut file = lfile.into_async();
         file.write_all(&Self::gen_header(base_index, segment_id))
             .await?;
+        file.flush().await?;
+        file.sync_all().await?;
 
         let inner = Inner {
             file,
@@ -162,7 +164,7 @@ impl WALSegment {
     fn gen_header(base_index: LogIndex, segment_id: u64) -> Vec<u8> {
         let mut buf = vec![];
         buf.extend(WAL_MAGIC.to_le_bytes());
-        buf.extend(vec![0; 7]);
+        buf.extend(vec![0; 3]);
         buf.push(WAL_VERSION);
         buf.extend(base_index.to_le_bytes());
         buf.extend(segment_id.to_le_bytes());
@@ -183,7 +185,7 @@ impl WALSegment {
             return parse_error;
         }
         if next_field(4) != WAL_MAGIC.to_le_bytes()
-            || next_field(3) != &[0; 7]
+            || next_field(3) != &[0; 3]
             || next_field(1) != &[WAL_VERSION]
         {
             return parse_error;
