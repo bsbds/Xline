@@ -36,9 +36,11 @@ impl FilePipeline {
                     _ = &mut stop_listener => {
                         break;
                     }
-                    // The receiver is already dropped, stop this task
-                    Err(_) = file_tx.send_async(file) => {
-                        break;
+                    result = file_tx.send_async(file) => {
+                        // The receiver is already dropped, stop this task
+                        if let Err(e) = result {
+                            break;
+                        }
                     }
                 }
             }
@@ -111,5 +113,34 @@ impl std::fmt::Debug for FilePipeline {
             .field("dir", &self.dir)
             .field("file_size", &self.file_size)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::server::storage::wal::util::get_file_paths_with_ext;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn file_pipeline_is_ok() {
+        let file_size = 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let mut pipline = FilePipeline::new(dir.as_ref().into(), file_size);
+
+        let check_size = |file: LockedFile| {
+            let file = file.into_std();
+            assert_eq!(file.metadata().unwrap().len(), file_size,);
+        };
+        let file0 = pipline.next().await.unwrap();
+        check_size(file0);
+        let file1 = pipline.next().await.unwrap();
+        check_size(file1);
+        let paths = get_file_paths_with_ext(&dir, TEMP_FILE_EXT).unwrap();
+        assert_eq!(paths.len(), 2);
+        pipline.stop();
+        assert!(pipline.next().await.is_none());
+        let paths_cleaned = get_file_paths_with_ext(dir, TEMP_FILE_EXT).unwrap();
+        assert_eq!(paths_cleaned.len(), 0);
     }
 }
