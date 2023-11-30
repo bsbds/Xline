@@ -16,18 +16,29 @@ async fn log_append_and_recovery_is_ok() -> io::Result<()> {
         .await
         .unwrap();
 
-    let entry = LogEntry::<TestCommand>::new(1, 1, EntryData::Empty(ProposeId(1, 2)));
-    storage
-        .send_sync(vec![DataFrame::Entry(entry.clone())])
-        .await
-        .unwrap();
+    let num_entries = 10;
+
+    let entries = (1..=10)
+        .map(|index| LogEntry::<TestCommand>::new(index, 1, EntryData::Empty(ProposeId(1, 2))));
+
+    for entry in entries.clone() {
+        storage
+            .send_sync(vec![DataFrame::Entry(entry.clone())])
+            .await
+            .unwrap();
+    }
+
     drop(storage);
 
     let (_storage, logs) = FramedWALStorage::<TestCommand>::new_or_recover(&wal_test_path)
         .await
         .unwrap();
 
-    assert_eq!(logs.first().unwrap(), &entry);
+    assert_eq!(logs.len(), num_entries, "failed to recover all logs");
+    assert!(
+        logs.into_iter().zip(entries).all(|(x, y)| x == y),
+        "log entries mismatched"
+    );
 
     Ok(())
 }
