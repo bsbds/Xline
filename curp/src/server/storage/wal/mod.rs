@@ -14,6 +14,9 @@ mod segment;
 /// Remover of the segment file
 mod remover;
 
+/// The config for WALStorage
+mod config;
+
 /// WAL tests
 #[cfg(test)]
 mod tests;
@@ -38,6 +41,7 @@ use crate::log_entry::LogEntry;
 
 use self::{
     codec::{CodecError, DataFrame, WAL},
+    config::WALConfig,
     file_pipeline::FilePipeline,
     remover::SegmentRemover,
     segment::WALSegment,
@@ -47,9 +51,6 @@ use self::{
 const WAL_MAGIC: u32 = 0xd86e0be2;
 
 const WAL_VERSION: u8 = 0x00;
-
-/// Size in bytes per segment, default is 64MiB
-const SEGMENT_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 
 const WAL_FILE_EXT: &'static str = ".wal";
 
@@ -66,10 +67,8 @@ where
 {
     /// Recover from the given directory if there's any segments
     /// Otherwise, creates a new `FramedLogStorage`
-    pub(crate) async fn new_or_recover(
-        dir: impl AsRef<Path>,
-    ) -> io::Result<(Self, Vec<LogEntry<C>>)> {
-        let (storage, logs) = WALStorage::new_or_recover::<C>(dir).await?;
+    pub(crate) async fn new_or_recover(config: WALConfig) -> io::Result<(Self, Vec<LogEntry<C>>)> {
+        let (storage, logs) = WALStorage::new_or_recover::<C>(config).await?;
         Ok((
             Self {
                 inner: Framed::new(storage, WAL::<C>::new()),
@@ -105,7 +104,7 @@ where
 /// The log storage
 struct WALStorage {
     /// The directory to store the log files
-    dir: PathBuf,
+    config: WALConfig,
     /// The pipeline that pre-allocates files
     pipeline: FilePipeline,
     /// WAL segements
@@ -121,15 +120,15 @@ struct WALStorage {
 impl WALStorage {
     /// Recover from the given directory if there's any segments
     /// Otherwise, creates a new `LogStorage`
-    async fn new_or_recover<C>(dir: impl AsRef<Path>) -> io::Result<(Self, Vec<LogEntry<C>>)>
+    async fn new_or_recover<C>(config: WALConfig) -> io::Result<(Self, Vec<LogEntry<C>>)>
     where
         C: Serialize + DeserializeOwned + 'static,
     {
         // We try to recover the removal first
-        SegmentRemover::recover(&dir).await?;
+        SegmentRemover::recover(&config.dir).await?;
 
-        let mut pipeline = FilePipeline::new(PathBuf::from(dir.as_ref()), SEGMENT_SIZE_BYTES);
-        let file_paths = util::get_file_paths_with_ext(&dir, WAL_FILE_EXT)?;
+        let mut pipeline = FilePipeline::new(config.dir.clone(), config.max_segment_size);
+        let file_paths = util::get_file_paths_with_ext(&config.dir, WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
             .into_iter()
             .map(|p| LockedFile::open_rw(p))
@@ -175,7 +174,7 @@ impl WALStorage {
 
         Ok((
             Self {
-                dir: PathBuf::from(dir.as_ref()),
+                config,
                 pipeline,
                 segments,
                 next_segment_id,
@@ -213,7 +212,7 @@ impl WALStorage {
 
         // The last segment does not need to be removed
         let to_remove = segments.into_iter().rev().skip(1);
-        SegmentRemover::new_removal(&self.dir, to_remove).await?;
+        SegmentRemover::new_removal(&self.config.dir, to_remove).await?;
 
         Ok(())
     }
@@ -241,7 +240,7 @@ impl WALStorage {
         }
 
         let to_remove = self.update_segments().await;
-        SegmentRemover::new_removal(&self.dir, to_remove.iter()).await?;
+        SegmentRemover::new_removal(&self.config.dir, to_remove.iter()).await?;
 
         self.next_log_index = max_index.overflow_add(1);
         self.open_new_segment().await?;
@@ -432,7 +431,7 @@ impl WALStorage {
             .last()
             .unwrap_or_else(|| unreachable!("there should exist at least one segement"))
             .clone();
-        if ready!(Box::pin(last.len()).poll_unpin(cx)) < SEGMENT_SIZE_BYTES {
+        if ready!(Box::pin(last.len()).poll_unpin(cx)) < self.config.max_segment_size {
             Poll::Ready(Ok(last))
         } else {
             // We open a new segment if the segment reaches the soft limit

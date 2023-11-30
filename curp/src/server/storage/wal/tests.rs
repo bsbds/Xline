@@ -12,7 +12,8 @@ use super::*;
 #[tokio::test(flavor = "multi_thread")]
 async fn log_append_and_recovery_is_ok() -> io::Result<()> {
     let wal_test_path = tempfile::tempdir().unwrap();
-    let (mut storage, _logs) = FramedWALStorage::new_or_recover(&wal_test_path)
+    let config = WALConfig::new(wal_test_path);
+    let (mut storage, _logs) = FramedWALStorage::new_or_recover(config.clone())
         .await
         .unwrap();
 
@@ -30,7 +31,7 @@ async fn log_append_and_recovery_is_ok() -> io::Result<()> {
 
     drop(storage);
 
-    let (_storage, logs) = FramedWALStorage::<TestCommand>::new_or_recover(&wal_test_path)
+    let (_storage, logs) = FramedWALStorage::<TestCommand>::new_or_recover(config)
         .await
         .unwrap();
 
@@ -46,7 +47,8 @@ async fn log_append_and_recovery_is_ok() -> io::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn log_tail_truncation_is_ok() -> io::Result<()> {
     let wal_test_path = tempfile::tempdir().unwrap();
-    let (mut storage, _logs) = FramedWALStorage::new_or_recover(&wal_test_path)
+    let config = WALConfig::new(wal_test_path);
+    let (mut storage, _logs) = FramedWALStorage::new_or_recover(config.clone())
         .await
         .unwrap();
 
@@ -71,7 +73,7 @@ async fn log_tail_truncation_is_ok() -> io::Result<()> {
 
     drop(storage);
 
-    let (_storage, logs) = FramedWALStorage::<TestCommand>::new_or_recover(&wal_test_path)
+    let (_storage, logs) = FramedWALStorage::<TestCommand>::new_or_recover(config)
         .await
         .unwrap();
 
