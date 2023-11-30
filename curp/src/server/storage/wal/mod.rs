@@ -1,5 +1,6 @@
-#![allow(unused, dead_code)]
+#![allow(unused)]
 
+/// The WAL codec
 mod codec;
 
 /// File pipeline
@@ -14,25 +15,19 @@ mod segment;
 mod remover;
 
 use std::{
-    collections::LinkedList,
     io,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
     task::Poll,
 };
 
-use async_trait::async_trait;
 use clippy_utilities::OverflowArithmetic;
 use curp_external_api::LogIndex;
 use futures::{future::join_all, ready, Future, FutureExt, SinkExt, StreamExt};
 use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::Mutex,
-};
-use tokio_util::codec::{Encoder, Framed};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::codec::Framed;
 use tracing::warn;
 
 use crate::log_entry::LogEntry;
@@ -109,7 +104,7 @@ where
 }
 
 /// The log storage
-pub(super) struct WALStorage {
+struct WALStorage {
     /// The directory to store the log files
     dir: PathBuf,
     /// The pipeline that pre-allocates files
@@ -126,7 +121,7 @@ pub(super) struct WALStorage {
 
 impl WALStorage {
     /// Creates a new `LogStorage`
-    pub(crate) async fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
+    async fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
         let dir = PathBuf::from(dir.as_ref());
         let mut pipeline = FilePipeline::new(dir.clone(), SEGMENT_SIZE_BYTES);
         let Some(lfile) = pipeline.next().await else {
@@ -147,7 +142,7 @@ impl WALStorage {
     }
 
     /// Recover from the given directory
-    pub(crate) async fn recover<C>(dir: impl AsRef<Path>) -> io::Result<(Self, Vec<LogEntry<C>>)>
+    async fn recover<C>(dir: impl AsRef<Path>) -> io::Result<(Self, Vec<LogEntry<C>>)>
     where
         C: Serialize + DeserializeOwned + 'static,
     {
@@ -206,7 +201,7 @@ impl WALStorage {
     /// Tuncate all the logs whose index is less than or equal to `compact_index`
     ///
     /// `compact_index` should be the smallest index required in CURP
-    pub(crate) async fn truncate_head<C>(&mut self, compact_index: LogIndex) -> io::Result<()>
+    async fn truncate_head<C>(&mut self, compact_index: LogIndex) -> io::Result<()>
     where
         C: Serialize,
     {
@@ -236,18 +231,15 @@ impl WALStorage {
     }
 
     /// Tuncate all the logs whose index is greater than of equal to `next_index`
-    pub(crate) async fn truncate_tail<C>(&mut self, next_index: LogIndex) -> io::Result<()>
+    async fn truncate_tail<C>(&mut self, next_index: LogIndex) -> io::Result<()>
     where
         C: Serialize,
     {
-        /// TODO: Make sure that all writing operations are completed, maybe guaranteed by type system?
+        // TODO: Make sure that all writing operations are completed, maybe guaranteed by type system?
         assert!(
             self.segment_opening.is_none(),
             "There's a inflight segment file opening"
         );
-
-        // last index of current segment
-        let mut last_index = self.next_log_index;
 
         // segments to truncate
         let segments = self
@@ -257,14 +249,14 @@ impl WALStorage {
             .take_while_inclusive::<_>(|s| s.base_index() > next_index);
 
         for segment in segments {
-            segment.seal::<C>(next_index);
+            segment.seal::<C>(next_index).await;
         }
 
         let to_remove = self.update_segments().await;
         SegmentRemover::new_removal(&self.dir, to_remove.iter()).await?;
 
         self.next_log_index = next_index;
-        self.open_new_segment();
+        self.open_new_segment().await?;
 
         Ok(())
     }
@@ -472,8 +464,6 @@ impl Future for LastSegmentFut<'_> {
 mod tests {
     use curp_external_api::cmd::ProposeId;
     use curp_test_utils::test_cmd::TestCommand;
-    use futures::SinkExt;
-    use tokio_stream::StreamExt;
 
     use crate::{
         log_entry::{EntryData, LogEntry},
