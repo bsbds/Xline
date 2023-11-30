@@ -110,3 +110,29 @@ pub(super) fn parse_u64(bytes_le: &[u8]) -> u64 {
             .unwrap_or_else(|_| unreachable!("This conversion should always exist")),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_file_paths_with_ext_is_ok() {
+        let dir = "/tmp/wal-test/";
+        let num_paths = 10;
+        let paths_create: Vec<_> = (0..num_paths)
+            .map(|i| {
+                let mut path = PathBuf::from(dir);
+                path.push(format!("{i}.test"));
+                std::fs::File::create(&path).unwrap();
+                path
+            })
+            .collect();
+        let mut paths = get_file_paths_with_ext(dir, ".test").unwrap();
+        paths.sort();
+        assert_eq!(paths.len(), num_paths);
+        assert!(paths
+            .into_iter()
+            .zip(paths_create.into_iter())
+            .all(|(x, y)| x.as_path() == y.as_path()));
+    }
+}
