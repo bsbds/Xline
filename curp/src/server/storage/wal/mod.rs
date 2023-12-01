@@ -22,6 +22,7 @@ mod config;
 mod tests;
 
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     io,
     path::{Path, PathBuf},
     pin::Pin,
@@ -45,7 +46,7 @@ use self::{
     config::WALConfig,
     file_pipeline::FilePipeline,
     remover::SegmentRemover,
-    segment::WALSegment,
+    segment::{IOState, WALSegment},
     util::LockedFile,
 };
 
@@ -113,6 +114,7 @@ where
 }
 
 type SegmentOpenFut = Pin<Box<dyn Future<Output = io::Result<WALSegment>> + Send>>;
+type SegmentStatesFut = Pin<Box<dyn Future<Output = Vec<IOState>> + Send>>;
 
 /// The log storage
 struct WALStorage {
@@ -127,7 +129,9 @@ struct WALStorage {
     /// Next segment id
     next_log_index: LogIndex,
     /// Future of an opening segment
-    segment_opening: Option<SegmentOpenFut>,
+    segment_opening_fut: Option<SegmentOpenFut>,
+    /// Future of the query for all segment state
+    segment_states_fut: Option<SegmentStatesFut>,
 }
 
 impl WALStorage {
@@ -195,7 +199,8 @@ impl WALStorage {
                 segments,
                 next_segment_id,
                 next_log_index,
-                segment_opening: None,
+                segment_opening_fut: None,
+                segment_states_fut: None,
             },
             logs_flattened,
         ))
@@ -238,12 +243,6 @@ impl WALStorage {
     where
         C: Serialize,
     {
-        // TODO: Make sure that all writing operations are completed, maybe guaranteed by type system?
-        assert!(
-            self.segment_opening.is_none(),
-            "There's a inflight segment file opening"
-        );
-
         // segments to truncate
         let segments = self
             .segments
@@ -379,7 +378,7 @@ impl WALStorage {
 
 impl AsyncWrite for WALStorage {
     fn poll_write(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
@@ -391,18 +390,31 @@ impl AsyncWrite for WALStorage {
     }
 
     fn poll_flush(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
-        let mut segment = match ready!(self.poll_last_segment(cx)) {
-            Ok(segment) => segment,
-            Err(e) => return Poll::Ready(Err(e)),
-        };
-        Pin::new(&mut segment).poll_flush(cx)
+        //Box::pin(async move { seg.state().await }).poll_unpin(cx);
+
+        // let to_flush: Vec<_> = self
+        //     .segments
+        //     .iter()
+        //     .map(|s| Box::pin(&mut s.clone().state()).poll_unpin(cx))
+        //     .collect();
+        let states = ready!(self.poll_all_segment_states(cx));
+        let to_flush = self
+            .segments
+            .clone()
+            .into_iter()
+            .zip(states.into_iter())
+            .filter_map(|(seg, st)| matches!(st, IOState::Written).then_some(seg));
+
+        for segment in to_flush {
+            Pin::new(&mut segment).poll_flush(cx)
+        }
     }
 
     fn poll_shutdown(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
         let mut segment = match ready!(self.poll_last_segment(cx)) {
@@ -415,7 +427,7 @@ impl AsyncWrite for WALStorage {
 
 impl AsyncRead for WALStorage {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
@@ -429,13 +441,13 @@ impl AsyncRead for WALStorage {
 
 impl WALStorage {
     fn poll_last_segment(
-        mut self: Pin<&mut Self>,
+        self: &mut Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<io::Result<WALSegment>> {
-        if let Some(ref mut fut) = self.segment_opening {
+        if let Some(ref mut fut) = self.segment_opening_fut {
             return match ready!(fut.poll_unpin(cx)) {
                 Ok(segment) => {
-                    self.segment_opening = None;
+                    self.segment_opening_fut = None;
                     self.segments.push(segment.clone());
                     Poll::Ready(Ok(segment))
                 }
@@ -466,9 +478,42 @@ impl WALStorage {
                 }
                 Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
                 Poll::Pending => {
-                    self.segment_opening = Some(create_fut);
+                    self.segment_opening_fut = Some(create_fut);
                     Poll::Pending
                 }
+            }
+        }
+    }
+
+    fn poll_all_segment_states(
+        self: &mut Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Vec<IOState>> {
+        if let Some(ref mut fut) = self.segment_states_fut {
+            match fut.poll_unpin(cx) {
+                Poll::Ready(states) => {
+                    self.segment_states_fut = None;
+                    return Poll::Ready(states);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        let segments = self.segments.clone();
+        let mut fut = Box::pin(async move {
+            let mut states = vec![];
+            for segment in segments {
+                let state = segment.state().await;
+                states.push(state);
+            }
+            states
+        });
+
+        match fut.poll_unpin(cx) {
+            Poll::Ready(states) => Poll::Ready(states),
+            Poll::Pending => {
+                self.segment_states_fut = Some(fut);
+                Poll::Pending
             }
         }
     }

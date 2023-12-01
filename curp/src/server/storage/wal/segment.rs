@@ -40,6 +40,24 @@ struct Inner {
     size: u64,
     /// The highest index of the segment
     seal_index: LogIndex,
+    /// The IO state of the file
+    io_state: IOState,
+}
+
+/// The IO state of the file
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) enum IOState {
+    /// The initial state that haven't written any data or fsynced
+    #[default]
+    Fsynced,
+    /// Already wrote some data, but haven't flushed yet
+    Written,
+    /// Already flushed, but haven't called fsync yet
+    Flushed,
+    /// Shutdowned
+    Shutdowned,
+    /// The IO has failed on this file
+    Errored,
 }
 
 impl WALSegment {
@@ -56,6 +74,7 @@ impl WALSegment {
             size,
             // Index 0 means the seal_index hasn't been read yet
             seal_index: 0,
+            io_state: IOState::default(),
         };
 
         Ok(Self {
@@ -84,6 +103,7 @@ impl WALSegment {
             size: WAL_HEADER_SIZE.numeric_cast(),
             // For convenience we set it to largest u64 value that represent not sealed
             seal_index: u64::MAX,
+            io_state: IOState::default(),
         };
 
         Ok(Self {
@@ -99,6 +119,8 @@ impl WALSegment {
     pub(super) async fn seal<C: Serialize>(&self, next_index: LogIndex) {
         let mut framed = Framed::new(self.clone(), WAL::<C>::new());
         framed.send(vec![DataFrame::SealIndex(next_index)]).await;
+        framed.flush().await;
+        self.sync_all().await;
         self.update_seal_index(next_index).await;
     }
 
@@ -136,6 +158,10 @@ impl WALSegment {
 
     pub(super) async fn is_redundant(&self) -> bool {
         self.inner.lock().await.seal_index < self.base_index
+    }
+
+    pub(super) async fn state(&self) -> IOState {
+        self.inner.lock().await.io_state
     }
 
     /// Gets the file name of the WAL segment
@@ -213,15 +239,16 @@ impl AsyncWrite for WALSegment {
     ) -> Poll<Result<usize, io::Error>> {
         let mut inner_l = Box::pin(self.inner.lock());
         let mut inner = ready!(inner_l.poll_unpin(cx));
-        match Pin::new(&mut inner.file).poll_write(cx, buf) {
-            Poll::Ready(Err(e)) => {
-                return Poll::Ready(Err(e));
-            }
-            Poll::Ready(Ok(len)) => {
+        match ready!(Pin::new(&mut inner.file).poll_write(cx, buf)) {
+            Ok(len) => {
+                inner.io_state.written();
                 inner.size = inner.size.overflow_add(len.numeric_cast());
-                return Poll::Ready(Ok(len));
+                Poll::Ready(Ok(len))
             }
-            Poll::Pending => return Poll::Pending,
+            Err(e) => {
+                inner.io_state.errored();
+                Poll::Ready(Err(e))
+            }
         }
     }
 
@@ -231,7 +258,16 @@ impl AsyncWrite for WALSegment {
     ) -> Poll<Result<(), io::Error>> {
         let mut inner_l = Box::pin(self.inner.lock());
         let mut inner = ready!(inner_l.poll_unpin(cx));
-        Pin::new(&mut inner.file).poll_flush(cx)
+        match ready!(Pin::new(&mut inner.file).poll_flush(cx)) {
+            Ok(()) => {
+                inner.io_state.flushed();
+                Poll::Ready(Ok(()))
+            }
+            Err(e) => {
+                inner.io_state.errored();
+                Poll::Ready(Err(e))
+            }
+        }
     }
 
     fn poll_shutdown(
@@ -240,7 +276,16 @@ impl AsyncWrite for WALSegment {
     ) -> Poll<Result<(), io::Error>> {
         let mut inner_l = Box::pin(self.inner.lock());
         let mut inner = ready!(inner_l.poll_unpin(cx));
-        Pin::new(&mut inner.file).poll_shutdown(cx)
+        match ready!(Pin::new(&mut inner.file).poll_shutdown(cx)) {
+            Ok(()) => {
+                inner.io_state.shutdowned();
+                Poll::Ready(Ok(()))
+            }
+            Err(e) => {
+                inner.io_state.errored();
+                Poll::Ready(Err(e))
+            }
+        }
     }
 }
 
@@ -273,5 +318,47 @@ impl PartialOrd for WALSegment {
 impl Ord for WALSegment {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.segment_id.cmp(&other.segment_id)
+    }
+}
+
+impl IOState {
+    /// Mutate the state to `IOState::Written`
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the state is not `IOState::Fsynced`
+    fn written(&mut self) {
+        assert!(matches!(self, IOState::Fsynced));
+        *self = IOState::Written
+    }
+
+    /// Mutate the state to `IOState::Flushed`
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the state is not `IOState::Written`
+    fn flushed(&mut self) {
+        assert!(matches!(self, IOState::Written));
+        *self = IOState::Flushed
+    }
+
+    /// Mutate the state to `IOState::Written`
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the state is not `IOState::Flushed`
+    fn fsynced(&mut self) {
+        assert!(matches!(self, IOState::Flushed));
+        *self = IOState::Fsynced
+    }
+
+    /// Mutate the state to `IOState::Errored`
+    fn errored(&mut self) {
+        *self = IOState::Errored
+    }
+
+    /// Mutate the state to `IOState::Shutdowned`
+    fn shutdowned(&mut self) {
+        *self = IOState::Shutdowned
     }
 }
