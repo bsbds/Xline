@@ -4,6 +4,7 @@ use clippy_utilities::OverflowArithmetic;
 use event_listener::Event;
 use flume::r#async::RecvStream;
 use futures::{FutureExt, StreamExt};
+use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_stream::Stream;
 use tracing::error;
@@ -82,7 +83,7 @@ impl FilePipeline {
 }
 
 impl Stream for FilePipeline {
-    type Item = LockedFile;
+    type Item = io::Result<LockedFile>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
@@ -92,18 +93,20 @@ impl Stream for FilePipeline {
             if let Poll::Ready(result) = self.handle.poll_unpin(cx) {
                 match result {
                     Ok(Err(e)) => {
-                        error!("IO error occured in background pipline task: {e}");
+                        return Poll::Ready(Some(Err(e)));
                     }
                     Err(e) => {
-                        error!("failed to join background pipline task: {e}");
+                        return Poll::Ready(Some(Err(e.into())));
                     }
-                    Ok(Ok(_)) => {}
+                    Ok(Ok(_)) => return Poll::Ready(None),
                 }
             }
-            return std::task::Poll::Ready(None);
+            return Poll::Ready(None);
         }
 
-        self.file_stream.poll_next_unpin(cx)
+        self.file_stream
+            .poll_next_unpin(cx)
+            .map(|opt| opt.map(|f| Ok(f)))
     }
 }
 
@@ -132,9 +135,9 @@ mod tests {
             let file = file.into_std();
             assert_eq!(file.metadata().unwrap().len(), file_size,);
         };
-        let file0 = pipline.next().await.unwrap();
+        let file0 = pipline.next().await.unwrap().unwrap();
         check_size(file0);
-        let file1 = pipline.next().await.unwrap();
+        let file1 = pipline.next().await.unwrap().unwrap();
         check_size(file1);
         let paths = get_file_paths_with_ext(&dir, TEMP_FILE_EXT).unwrap();
         assert_eq!(paths.len(), 2);

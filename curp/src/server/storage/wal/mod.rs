@@ -33,6 +33,7 @@ use curp_external_api::LogIndex;
 use futures::{future::join_all, ready, Future, FutureExt, SinkExt, StreamExt};
 use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
 use tracing::warn;
@@ -54,7 +55,15 @@ const WAL_VERSION: u8 = 0x00;
 
 const WAL_FILE_EXT: &'static str = ".wal";
 
-type SegmentOpenFut = Pin<Box<dyn Future<Output = io::Result<WALSegment>> + Send>>;
+#[derive(Debug, Error)]
+pub(crate) enum WALStorageError {
+    #[error("WAL corrupted")]
+    Corrupted,
+    #[error("Codec error: {0}")]
+    Codec(#[from] CodecError),
+    #[error("IO error: {0}")]
+    IO(#[from] io::Error),
+}
 
 /// Wrapper type of Framed LogStorage
 pub(crate) struct FramedWALStorage<C> {
@@ -67,7 +76,9 @@ where
 {
     /// Recover from the given directory if there's any segments
     /// Otherwise, creates a new `FramedLogStorage`
-    pub(crate) async fn new_or_recover(config: WALConfig) -> io::Result<(Self, Vec<LogEntry<C>>)> {
+    pub(crate) async fn new_or_recover(
+        config: WALConfig,
+    ) -> Result<(Self, Vec<LogEntry<C>>), WALStorageError> {
         let (storage, logs) = WALStorage::new_or_recover::<C>(config).await?;
         Ok((
             Self {
@@ -101,6 +112,8 @@ where
     }
 }
 
+type SegmentOpenFut = Pin<Box<dyn Future<Output = io::Result<WALSegment>> + Send>>;
+
 /// The log storage
 struct WALStorage {
     /// The directory to store the log files
@@ -120,7 +133,9 @@ struct WALStorage {
 impl WALStorage {
     /// Recover from the given directory if there's any segments
     /// Otherwise, creates a new `LogStorage`
-    async fn new_or_recover<C>(config: WALConfig) -> io::Result<(Self, Vec<LogEntry<C>>)>
+    async fn new_or_recover<C>(
+        config: WALConfig,
+    ) -> Result<(Self, Vec<LogEntry<C>>), WALStorageError>
     where
         C: Serialize + DeserializeOwned + 'static,
     {
@@ -156,14 +171,15 @@ impl WALStorage {
             for logs in &logs_flattened {
                 println!("index: {}", logs.index);
             }
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
+            return Err(WALStorageError::Corrupted);
         }
 
         /// If there's no segments to recover, create a new segment
         if segments.is_empty() {
-            let Some(lfile) = pipeline.next().await else {
-                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
-            };
+            let lfile = pipeline
+                .next()
+                .await
+                .ok_or(io::Error::from(io::ErrorKind::BrokenPipe))??;
             segments.push(WALSegment::create(lfile, 1, 0).await?);
         }
         let next_segment_id = segments.last().map(|s| s.id().overflow_add(1)).unwrap_or(0);
@@ -254,7 +270,7 @@ impl WALStorage {
             .pipeline
             .next()
             .await
-            .ok_or(io::Error::from(io::ErrorKind::BrokenPipe))?;
+            .ok_or(io::Error::from(io::ErrorKind::BrokenPipe))??;
 
         let segment = WALSegment::create(lfile, self.next_log_index, self.next_segment_id).await?;
 
@@ -286,7 +302,7 @@ impl WALStorage {
     /// Recover log entries from a `WALSegment`
     async fn recover_segment_logs<C>(
         segment: WALSegment,
-    ) -> io::Result<impl Iterator<Item = LogEntry<C>>>
+    ) -> Result<impl Iterator<Item = LogEntry<C>>, WALStorageError>
     where
         C: Serialize + DeserializeOwned + 'static,
     {
@@ -300,8 +316,7 @@ impl WALStorage {
                     if matches!(e, CodecError::EndOrCorrupted) {
                         break;
                     } else {
-                        println!("{e}");
-                        return Err(io::Error::from(io::ErrorKind::InvalidData));
+                        return Err(e.into());
                     }
                 }
             }
@@ -437,7 +452,10 @@ impl WALStorage {
         } else {
             // We open a new segment if the segment reaches the soft limit
             let mut create_fut = Box::pin(match ready!(self.pipeline.poll_next_unpin(cx)) {
-                Some(lfile) => WALSegment::create(lfile, self.next_log_index, self.next_segment_id),
+                Some(Ok(lfile)) => {
+                    WALSegment::create(lfile, self.next_log_index, self.next_segment_id)
+                }
+                Some(Err(e)) => return Poll::Ready(Err(e)),
                 None => return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
             });
 
