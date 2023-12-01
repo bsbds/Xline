@@ -420,6 +420,7 @@ impl WALStorage {
         if let Some(ref mut fut) = self.segment_opening {
             return match ready!(fut.poll_unpin(cx)) {
                 Ok(segment) => {
+                    self.segment_opening = None;
                     self.segments.push(segment.clone());
                     Poll::Ready(Ok(segment))
                 }
@@ -435,12 +436,22 @@ impl WALStorage {
             Poll::Ready(Ok(last))
         } else {
             // We open a new segment if the segment reaches the soft limit
-            let fut = match ready!(self.pipeline.poll_next_unpin(cx)) {
+            let mut create_fut = Box::pin(match ready!(self.pipeline.poll_next_unpin(cx)) {
                 Some(lfile) => WALSegment::create(lfile, self.next_log_index, self.next_segment_id),
                 None => return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
-            };
-            self.segment_opening = Some(Box::pin(fut));
-            Poll::Pending
+            });
+
+            match create_fut.poll_unpin(cx) {
+                Poll::Ready(Ok(res)) => {
+                    self.segments.push(res.clone());
+                    Poll::Ready(Ok(res))
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => {
+                    self.segment_opening = Some(create_fut);
+                    Poll::Pending
+                }
+            }
         }
     }
 }
