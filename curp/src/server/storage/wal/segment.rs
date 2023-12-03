@@ -3,20 +3,21 @@ use std::{io, iter, pin::Pin, sync::Arc, task::Poll};
 use clippy_utilities::{NumericCast, OverflowArithmetic};
 use curp_external_api::LogIndex;
 use futures::{ready, FutureExt, SinkExt};
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
     fs::File as TokioFile,
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     sync::Mutex,
 };
+use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
-use crate::server::storage::wal::WAL_FILE_EXT;
+use crate::{log_entry::LogEntry, server::storage::wal::WAL_FILE_EXT};
 
 use super::{
-    codec::{DataFrame, WAL},
+    codec::{CodecError, DataFrame, WAL},
     util::{get_checksum, validate_data, LockedFile},
-    WAL_MAGIC, WAL_VERSION,
+    WALStorageError, WAL_MAGIC, WAL_VERSION,
 };
 
 /// The size of wal file header in bytes
@@ -24,16 +25,11 @@ const WAL_HEADER_SIZE: usize = 56;
 
 #[derive(Debug)]
 pub(super) struct WALSegment {
-    /// The inner state
-    inner: Inner,
     /// The base index of this segment
     base_index: LogIndex,
     /// The id of this segment
     segment_id: u64,
-}
 
-#[derive(Debug)]
-struct Inner {
     /// The opened file of this segment
     file: TokioFile,
     /// The file size of the segment
@@ -69,18 +65,14 @@ impl WALSegment {
         let _ignore = file.read_exact(&mut buf).await?;
         let (base_index, segment_id) = Self::parse_header(&buf)?;
 
-        let inner = Inner {
+        Ok(Self {
+            base_index,
+            segment_id,
             file,
             size,
             // Index 0 means the seal_index hasn't been read yet
             seal_index: 0,
             io_state: IOState::default(),
-        };
-
-        Ok(Self {
-            inner,
-            base_index,
-            segment_id,
         })
     }
 
@@ -98,19 +90,71 @@ impl WALSegment {
         file.flush().await?;
         file.sync_all().await?;
 
-        let inner = Inner {
+        Ok(Self {
+            base_index,
+            segment_id,
             file,
             size: WAL_HEADER_SIZE.numeric_cast(),
             // For convenience we set it to largest u64 value that represent not sealed
             seal_index: u64::MAX,
             io_state: IOState::default(),
-        };
-
-        Ok(Self {
-            inner,
-            base_index,
-            segment_id,
         })
+    }
+
+    /// Recover log entries from a `WALSegment`
+    pub(super) async fn recover_segment_logs<C>(
+        &mut self,
+    ) -> Result<impl Iterator<Item = LogEntry<C>>, WALStorageError>
+    where
+        C: Serialize + DeserializeOwned + 'static,
+    {
+        let mut framed = Framed::new(self, WAL::<C>::new());
+        let mut frame_batches = vec![];
+        while let Some(result) = framed.next().await {
+            match result {
+                Ok(f) => frame_batches.push(f),
+                Err(e) => {
+                    /// If the segment file reaches on end, stop reading
+                    if matches!(e, CodecError::EndOrCorrupted) {
+                        break;
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+        // The highest_index of this segment
+        let mut highest_index = u64::MAX;
+        // We get the last frame batch to check it's type
+        match frame_batches.last() {
+            Some(frames) => {
+                let frame = frames
+                    .last()
+                    .unwrap_or_else(|| unreachable!("a batch should contains at leat one frame"));
+                if let DataFrame::SealIndex(index) = *frame {
+                    highest_index = index;
+                }
+            }
+            // The segment does not contains any frame, only a file header
+            None => {
+                todo!("handle no frame")
+            }
+        }
+
+        // TODO: reset on drop might be better
+        framed.get_mut().reset_offset().await?;
+
+        // Update seal index
+        framed.get_mut().update_seal_index(highest_index);
+
+        // Get log entries that index is no larger than `highest_index`
+        Ok(frame_batches.into_iter().flatten().filter_map(move |f| {
+            if let DataFrame::Entry(e) = f {
+                (e.index <= highest_index).then_some(e)
+            } else {
+                None
+            }
+        }))
     }
 
     /// Seal the current segment
@@ -125,23 +169,22 @@ impl WALSegment {
     }
 
     pub(super) fn size(&self) -> u64 {
-        self.inner.size
+        self.size
     }
 
     pub(super) fn update_seal_index(&mut self, index: LogIndex) {
-        self.inner.seal_index = self.inner.seal_index.max(index);
+        self.seal_index = self.seal_index.max(index);
     }
 
-    pub(super) async fn sync_all(&self) -> io::Result<()> {
-        self.inner.file.sync_all().await
+    pub(super) async fn sync_all(&mut self) -> io::Result<()> {
+        self.file.sync_all().await?;
+        self.io_state.fsynced();
+
+        Ok(())
     }
 
     pub(super) async fn reset_offset(&mut self) -> io::Result<()> {
-        self.inner
-            .file
-            .seek(io::SeekFrom::Start(0))
-            .await
-            .map(|_| ())
+        self.file.seek(io::SeekFrom::Start(0)).await.map(|_| ())
     }
 
     pub(super) fn id(&self) -> u64 {
@@ -153,11 +196,11 @@ impl WALSegment {
     }
 
     pub(super) fn is_redundant(&self) -> bool {
-        self.inner.seal_index < self.base_index
+        self.seal_index < self.base_index
     }
 
     pub(super) fn state(&self) -> IOState {
-        self.inner.io_state
+        self.io_state
     }
 
     /// Gets the file name of the WAL segment
@@ -177,13 +220,7 @@ impl WALSegment {
     // +------+------+------+------+------+------+------+------+
     // | SegmentID                                             |
     // +------+------+------+------+------+------+------+------+
-    // | Checksum (32bytes)                                    |
-    // +                                                       +
-    // |                                                       |
-    // +                                                       +
-    // |                                                       |
-    // +                                                       +
-    // |                                                       |
+    // | Checksum (32bytes) ...                                |
     // +------+------+------+------+------+------+------+------+
     fn gen_header(base_index: LogIndex, segment_id: u64) -> Vec<u8> {
         let mut buf = vec![];
@@ -233,14 +270,14 @@ impl AsyncWrite for WALSegment {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        match ready!(Pin::new(&mut self.inner.file).poll_write(cx, buf)) {
+        match ready!(Pin::new(&mut self.file).poll_write(cx, buf)) {
             Ok(len) => {
-                self.inner.io_state.written();
-                self.inner.size = self.inner.size.overflow_add(len.numeric_cast());
+                self.io_state.written();
+                self.size = self.size.overflow_add(len.numeric_cast());
                 Poll::Ready(Ok(len))
             }
             Err(e) => {
-                self.inner.io_state.errored();
+                self.io_state.errored();
                 Poll::Ready(Err(e))
             }
         }
@@ -250,13 +287,13 @@ impl AsyncWrite for WALSegment {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
-        match ready!(Pin::new(&mut self.inner.file).poll_flush(cx)) {
+        match ready!(Pin::new(&mut self.file).poll_flush(cx)) {
             Ok(()) => {
-                self.inner.io_state.flushed();
+                self.io_state.flushed();
                 Poll::Ready(Ok(()))
             }
             Err(e) => {
-                self.inner.io_state.errored();
+                self.io_state.errored();
                 Poll::Ready(Err(e))
             }
         }
@@ -266,13 +303,13 @@ impl AsyncWrite for WALSegment {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
-        match ready!(Pin::new(&mut self.inner.file).poll_shutdown(cx)) {
+        match ready!(Pin::new(&mut self.file).poll_shutdown(cx)) {
             Ok(()) => {
-                self.inner.io_state.shutdowned();
+                self.io_state.shutdowned();
                 Poll::Ready(Ok(()))
             }
             Err(e) => {
-                self.inner.io_state.errored();
+                self.io_state.errored();
                 Poll::Ready(Err(e))
             }
         }
@@ -285,7 +322,7 @@ impl AsyncRead for WALSegment {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner.file).poll_read(cx, buf)
+        Pin::new(&mut self.file).poll_read(cx, buf)
     }
 }
 
@@ -316,7 +353,10 @@ impl IOState {
     ///
     /// This method panics if the state is not `IOState::Fsynced`
     fn written(&mut self) {
-        assert!(matches!(self, IOState::Fsynced));
+        assert!(
+            matches!(self, IOState::Written | IOState::Fsynced),
+            "current state is {self:?}"
+        );
         *self = IOState::Written
     }
 
@@ -326,7 +366,7 @@ impl IOState {
     ///
     /// This method panics if the state is not `IOState::Written`
     fn flushed(&mut self) {
-        assert!(matches!(self, IOState::Written));
+        assert!(matches!(self, IOState::Flushed | IOState::Written));
         *self = IOState::Flushed
     }
 
@@ -336,7 +376,7 @@ impl IOState {
     ///
     /// This method panics if the state is not `IOState::Flushed`
     fn fsynced(&mut self) {
-        assert!(matches!(self, IOState::Flushed));
+        assert!(matches!(self, IOState::Fsynced | IOState::Flushed));
         *self = IOState::Fsynced
     }
 

@@ -158,7 +158,7 @@ where
 
         let logs_fut: Vec<_> = segments
             .iter_mut()
-            .map(Self::recover_segment_logs)
+            .map(|s| s.recover_segment_logs())
             .collect();
         let logs: Vec<_> = join_all(logs_fut)
             .await
@@ -167,9 +167,6 @@ where
         let logs_flattened: Vec<_> = logs.into_iter().flatten().collect();
 
         if !Self::check_log_continuity(logs_flattened.iter()) {
-            for logs in &logs_flattened {
-                println!("index: {}", logs.index);
-            }
             return Err(WALStorageError::Corrupted);
         }
 
@@ -309,59 +306,6 @@ where
         Ok(())
     }
 
-    /// Recover log entries from a `WALSegment`
-    async fn recover_segment_logs(
-        segment: &mut WALSegment,
-    ) -> Result<impl Iterator<Item = LogEntry<C>>, WALStorageError> {
-        let mut framed = Framed::new(segment, WAL::<C>::new());
-        let mut frame_batches = vec![];
-        while let Some(result) = framed.next().await {
-            match result {
-                Ok(f) => frame_batches.push(f),
-                Err(e) => {
-                    /// If the segment file reaches on end, stop reading
-                    if matches!(e, CodecError::EndOrCorrupted) {
-                        break;
-                    } else {
-                        return Err(e.into());
-                    }
-                }
-            }
-        }
-        // The highest_index of this segment
-        let mut highest_index = u64::MAX;
-        // We get the last frame batch to check it's type
-        match frame_batches.last() {
-            Some(frames) => {
-                let frame = frames
-                    .last()
-                    .unwrap_or_else(|| unreachable!("a batch should contains at leat one frame"));
-                if let DataFrame::SealIndex(index) = *frame {
-                    highest_index = index;
-                }
-            }
-            // The segment does not contains any frame, only a file header
-            None => {
-                todo!("handle no frame")
-            }
-        }
-
-        // TODO: reset on drop might be better
-        framed.get_mut().reset_offset().await?;
-
-        // Update seal index
-        framed.get_mut().update_seal_index(highest_index);
-
-        // Get log entries that index is no larger than `highest_index`
-        Ok(frame_batches.into_iter().flatten().filter_map(move |f| {
-            if let DataFrame::Entry(e) = f {
-                (e.index <= highest_index).then_some(e)
-            } else {
-                None
-            }
-        }))
-    }
-
     /// Check if the log index are continuous
     #[allow(single_use_lifetimes)] // the lifetime is required here
     fn check_log_continuity<'a>(entries: impl Iterator<Item = &'a LogEntry<C>> + Clone) -> bool {
@@ -369,12 +313,6 @@ where
             .clone()
             .zip(entries.skip(1))
             .all(|(x, y)| x.index.overflow_add(1) == y.index)
-    }
-
-    fn last_segment(&mut self) -> LastSegmentFut<'_, C> {
-        LastSegmentFut {
-            storage: Some(self),
-        }
     }
 }
 
@@ -488,22 +426,5 @@ impl<C> AsyncRead for Inner<C> {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         unimplemented!("AsyncRead for WALStorage not implemented yet")
-    }
-}
-
-/// The future that will resolv to the last segment of the storage
-struct LastSegmentFut<'a, C> {
-    /// The reference to the storage
-    storage: Option<&'a mut Inner<C>>,
-}
-
-impl<'a, C> Future for LastSegmentFut<'a, C> {
-    type Output = io::Result<&'a mut WALSegment>;
-
-    #[allow(clippy::unwrap_used)] // `storage` should always contains a value
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        /// This is to satisfy the borrow checker
-        let _ignore = ready!(self.storage.as_mut().unwrap().poll_last_segment(cx));
-        self.storage.take().unwrap().poll_last_segment(cx)
     }
 }
