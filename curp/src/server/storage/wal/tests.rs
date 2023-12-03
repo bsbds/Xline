@@ -15,9 +15,7 @@ use super::*;
 async fn log_append_and_recovery_is_ok() {
     let wal_test_path = tempfile::tempdir().unwrap();
     let config = WALConfig::new(wal_test_path);
-    let (mut storage, _logs) = FramedWALStorage::new_or_recover(config.clone())
-        .await
-        .unwrap();
+    let (mut storage, _logs) = WALStorage::new_or_recover(config.clone()).await.unwrap();
 
     let num_entries = 10;
 
@@ -33,7 +31,7 @@ async fn log_append_and_recovery_is_ok() {
 
     drop(storage);
 
-    let (_storage, logs) = FramedWALStorage::<TestCommand>::new_or_recover(config)
+    let (_storage, logs) = WALStorage::<TestCommand>::new_or_recover(config)
         .await
         .unwrap();
 
@@ -52,9 +50,7 @@ async fn log_append_and_recovery_is_ok() {
 async fn log_tail_truncation_is_ok() {
     let wal_test_path = tempfile::tempdir().unwrap();
     let config = WALConfig::new(wal_test_path);
-    let (mut storage, _logs) = FramedWALStorage::new_or_recover(config.clone())
-        .await
-        .unwrap();
+    let (mut storage, _logs) = WALStorage::new_or_recover(config.clone()).await.unwrap();
 
     let entries = (1..=10)
         .map(|index| LogEntry::<TestCommand>::new(index, 1, EntryData::Empty(ProposeId(1, 2))));
@@ -75,7 +71,7 @@ async fn log_tail_truncation_is_ok() {
 
     drop(storage);
 
-    let (_storage, logs) = FramedWALStorage::<TestCommand>::new_or_recover(config)
+    let (_storage, logs) = WALStorage::<TestCommand>::new_or_recover(config)
         .await
         .unwrap();
 
@@ -106,9 +102,7 @@ async fn log_head_truncation_is_ok() {
     let num_entries_per_segment = (max_segment_size - header_size + entry_size - 1) / entry_size;
 
     let config = WALConfig::new(&wal_test_path).with_max_segment_size(max_segment_size as u64);
-    let (mut storage, _logs) = FramedWALStorage::new_or_recover(config.clone())
-        .await
-        .unwrap();
+    let (mut storage, _logs) = WALStorage::new_or_recover(config.clone()).await.unwrap();
 
     let mut frame_gen = FrameGenerator::new();
     println!("num entries: {}", num_entries_per_segment);
