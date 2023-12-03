@@ -70,49 +70,8 @@ pub(crate) enum WALStorageError {
     IO(#[from] io::Error),
 }
 
-/// Wrapper type of Framed LogStorage
-///
-/// This exists beacuse we don't want to leak the implementation of the AsyncRead/AsyncWrite trait
-pub(crate) struct WALStorage<C> {
-    /// The inner storage type
-    inner: Inner<C>,
-}
-
-impl<C> WALStorage<C>
-where
-    C: Serialize + DeserializeOwned + Unpin + 'static,
-{
-    /// Recover from the given directory if there's any segments
-    /// Otherwise, creates a new `FramedLogStorage`
-    pub(crate) async fn new_or_recover(
-        config: WALConfig,
-    ) -> Result<(Self, Vec<LogEntry<C>>), WALStorageError> {
-        let (storage, logs) = Inner::new_or_recover(config).await?;
-        Ok((Self { inner: storage }, logs))
-    }
-
-    /// Send frames with fsync
-    async fn send_sync(&mut self, item: Vec<DataFrame<C>>) -> io::Result<()> {
-        self.inner.send_sync(item).await
-    }
-
-    /// Tuncate all the logs whose index is less than or equal to `compact_index`
-    ///
-    /// `compact_index` should be the smallest index required in CURP
-    pub(crate) async fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
-        self.inner.truncate_head(compact_index).await
-    }
-
-    /// Tuncate all the logs whose index is greater than `max_index`
-    pub(crate) async fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
-        self.inner.truncate_tail(max_index).await
-    }
-}
-
-type SegmentOpenFut = Pin<Box<dyn Future<Output = io::Result<WALSegment>> + Send>>;
-
 /// The log storage
-struct Inner<C> {
+struct WALStorage<C> {
     /// The directory to store the log files
     config: WALConfig,
     /// The pipeline that pre-allocates files
@@ -123,14 +82,11 @@ struct Inner<C> {
     next_segment_id: u64,
     /// Next segment id
     next_log_index: LogIndex,
-    /// Future of an opening segment
-    segment_opening_fut: Option<SegmentOpenFut>,
-
     /// The phantom data
     _phantom: PhantomData<C>,
 }
 
-impl<C> Inner<C>
+impl<C> WALStorage<C>
 where
     C: Serialize + DeserializeOwned + Unpin + 'static,
 {
@@ -149,7 +105,9 @@ where
             .map(|p| LockedFile::open_rw(p))
             .collect::<io::Result<_>>()?;
 
-        let segment_futs = lfiles.into_iter().map(|f| WALSegment::open(f));
+        let segment_futs = lfiles
+            .into_iter()
+            .map(|f| WALSegment::open(f, config.max_segment_size));
         let mut segments: Vec<_> = join_all(segment_futs)
             .await
             .into_iter()
@@ -176,7 +134,7 @@ where
                 .next()
                 .await
                 .ok_or(io::Error::from(io::ErrorKind::BrokenPipe))??;
-            segments.push(WALSegment::create(lfile, 1, 0).await?);
+            segments.push(WALSegment::create(lfile, 1, 0, config.max_segment_size).await?);
         }
         let next_segment_id = segments.last().map(|s| s.id().overflow_add(1)).unwrap_or(0);
         let next_log_index = logs_flattened
@@ -191,7 +149,6 @@ where
                 segments,
                 next_segment_id,
                 next_log_index,
-                segment_opening_fut: None,
                 _phantom: PhantomData,
             },
             logs_flattened,
@@ -200,13 +157,22 @@ where
 
     /// Send frames with fsync
     async fn send_sync(&mut self, item: Vec<DataFrame<C>>) -> io::Result<()> {
-        let mut self_framed = Framed::new(self, WAL::<C>::new());
+        let last_segment = self
+            .segments
+            .last_mut()
+            .unwrap_or_else(|| unreachable!("there should be at least on segment"));
+        let mut framed = Framed::new(last_segment, WAL::<C>::new());
         if let Some(&DataFrame::Entry(ref entry)) = item.last() {
-            self_framed.get_mut().next_log_index = entry.index.overflow_add(1);
+            self.next_log_index = entry.index.overflow_add(1);
         }
-        self_framed.send(item).await?;
-        self_framed.flush().await?;
-        self_framed.get_mut().sync_segments().await?;
+        framed.send(item).await?;
+        framed.flush().await?;
+        framed.get_mut().sync_all().await?;
+
+        if framed.get_ref().is_full() {
+            self.open_new_segment().await?;
+        }
+
         Ok(())
     }
 
@@ -270,7 +236,13 @@ where
             .await
             .ok_or(io::Error::from(io::ErrorKind::BrokenPipe))??;
 
-        let segment = WALSegment::create(lfile, self.next_log_index, self.next_segment_id).await?;
+        let segment = WALSegment::create(
+            lfile,
+            self.next_log_index,
+            self.next_segment_id,
+            self.config.max_segment_size,
+        )
+        .await?;
 
         self.segments.push(segment);
         self.next_segment_id = self.next_segment_id.overflow_add(1);
@@ -313,118 +285,5 @@ where
             .clone()
             .zip(entries.skip(1))
             .all(|(x, y)| x.index.overflow_add(1) == y.index)
-    }
-}
-
-impl<C> Inner<C> {
-    fn poll_last_segment(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<io::Result<&mut WALSegment>> {
-        if let Some(ref mut fut) = self.segment_opening_fut {
-            return match ready!(fut.poll_unpin(cx)) {
-                Ok(segment) => {
-                    self.segment_opening_fut = None;
-                    self.segments.push(segment);
-                    Poll::Ready(Ok(self
-                        .segments
-                        .last_mut()
-                        .unwrap_or_else(|| unreachable!())))
-                }
-                Err(e) => Poll::Ready(Err(e)),
-            };
-        }
-
-        let last = self
-            .segments
-            .last_mut()
-            .unwrap_or_else(|| unreachable!("there should exist at least one segement"));
-        if last.size() < self.config.max_segment_size {
-            Poll::Ready(Ok(self.segments.last_mut().unwrap()))
-        } else {
-            // We open a new segment if the segment reaches the soft limit
-            let mut create_fut = Box::pin(match ready!(self.pipeline.poll_next_unpin(cx)) {
-                Some(Ok(lfile)) => {
-                    WALSegment::create(lfile, self.next_log_index, self.next_segment_id)
-                }
-                Some(Err(e)) => return Poll::Ready(Err(e)),
-                None => return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
-            });
-
-            match create_fut.poll_unpin(cx) {
-                Poll::Ready(Ok(res)) => {
-                    self.segments.push(res);
-                    Poll::Ready(Ok(self
-                        .segments
-                        .last_mut()
-                        .unwrap_or_else(|| unreachable!())))
-                }
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-                Poll::Pending => {
-                    self.segment_opening_fut = Some(create_fut);
-                    Poll::Pending
-                }
-            }
-        }
-    }
-}
-
-impl<C> AsyncWrite for Inner<C>
-where
-    C: Unpin,
-{
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, io::Error>> {
-        let mut segment = match ready!(self.get_mut().poll_last_segment(cx)) {
-            Ok(segment) => segment,
-            Err(e) => return Poll::Ready(Err(e)),
-        };
-        Pin::new(&mut segment).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
-        let mut to_flush = self
-            .segments
-            .as_mut_slice()
-            .into_iter()
-            .filter(|s| matches!(s.state(), IOState::Written));
-
-        if to_flush.all(|s| Pin::new(s).poll_flush(cx).is_ready()) {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        }
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
-        if self
-            .segments
-            .as_mut_slice()
-            .into_iter()
-            .all(|s| Pin::new(s).poll_shutdown(cx).is_ready())
-        {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        }
-    }
-}
-
-impl<C> AsyncRead for Inner<C> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        unimplemented!("AsyncRead for WALStorage not implemented yet")
     }
 }

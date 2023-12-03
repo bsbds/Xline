@@ -29,7 +29,8 @@ pub(super) struct WALSegment {
     base_index: LogIndex,
     /// The id of this segment
     segment_id: u64,
-
+    /// The soft size limit of this segment
+    size_limit: u64,
     /// The opened file of this segment
     file: TokioFile,
     /// The file size of the segment
@@ -58,7 +59,7 @@ pub(super) enum IOState {
 
 impl WALSegment {
     /// Open an existing WAL segment file
-    pub(super) async fn open(lfile: LockedFile) -> io::Result<Self> {
+    pub(super) async fn open(lfile: LockedFile, size_limit: u64) -> io::Result<Self> {
         let mut file = lfile.into_async();
         let size = file.metadata().await?.len();
         let mut buf = vec![0; WAL_HEADER_SIZE];
@@ -68,6 +69,7 @@ impl WALSegment {
         Ok(Self {
             base_index,
             segment_id,
+            size_limit,
             file,
             size,
             // Index 0 means the seal_index hasn't been read yet
@@ -81,6 +83,7 @@ impl WALSegment {
         tmp_file: LockedFile,
         base_index: LogIndex,
         segment_id: u64,
+        size_limit: u64,
     ) -> io::Result<Self> {
         let segment_name = Self::segment_name(segment_id, base_index);
         let lfile = tmp_file.rename(segment_name)?;
@@ -93,6 +96,7 @@ impl WALSegment {
         Ok(Self {
             base_index,
             segment_id,
+            size_limit,
             file,
             size: WAL_HEADER_SIZE.numeric_cast(),
             // For convenience we set it to largest u64 value that represent not sealed
@@ -168,8 +172,14 @@ impl WALSegment {
         framed.get_mut().update_seal_index(next_index);
     }
 
+    /// Get the size of the segment
     pub(super) fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Checks if the segment is full
+    pub(super) fn is_full(&self) -> bool {
+        self.size >= self.size_limit
     }
 
     pub(super) fn update_seal_index(&mut self, index: LogIndex) {

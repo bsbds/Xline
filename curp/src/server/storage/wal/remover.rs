@@ -99,7 +99,11 @@ impl SegmentRemover {
         let mut wal = LockedFile::open_rw(wal_path.clone())?.into_async();
         wal.write_all(&wal_data).await?;
 
-        let to_remove_paths = segments.map(|s| WALSegment::segment_name(s.id(), s.base_index()));
+        let to_remove_paths = segments.map(|s| {
+            let mut path = PathBuf::from(dir.as_ref());
+            path.push(WALSegment::segment_name(s.id(), s.base_index()));
+            path
+        });
 
         Self::start_remove(to_remove_paths, wal_path)
     }
@@ -110,9 +114,8 @@ impl SegmentRemover {
         wal_path: impl AsRef<Path>,
     ) -> io::Result<()> {
         for path in to_remove_paths.clone() {
-            if std::fs::metadata(path.as_ref()).is_ok() {
-                std::fs::remove_file(path.as_ref())?;
-            }
+            let _ignore = std::fs::metadata(path.as_ref())?;
+            std::fs::remove_file(path.as_ref())?;
         }
 
         // Check if all record have been removed from fs

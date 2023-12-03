@@ -98,27 +98,20 @@ async fn log_head_truncation_is_ok() {
     wal_codec.encode(vec![DataFrame::Entry(sample_entry)], &mut buf);
     let entry_size = buf.len();
 
-    println!("entry size: {}", entry_size);
     let num_entries_per_segment = (max_segment_size - header_size + entry_size - 1) / entry_size;
 
     let config = WALConfig::new(&wal_test_path).with_max_segment_size(max_segment_size as u64);
     let (mut storage, _logs) = WALStorage::new_or_recover(config.clone()).await.unwrap();
 
     let mut frame_gen = FrameGenerator::new();
-    println!("num entries: {}", num_entries_per_segment);
-    for frame in frame_gen.take(num_entries_per_segment) {
-        println!("sent");
+    for frame in frame_gen.take(num_entries_per_segment + 1) {
         storage.send_sync(vec![frame]).await.unwrap();
     }
-    println!("2");
 
-    assert_eq!(num_wals(), 1);
-    storage.truncate_head(num_entries_per_segment as u64).await;
-    assert_eq!(num_wals(), 1);
-
-    storage.send_sync(vec![frame_gen.next()]);
     assert_eq!(num_wals(), 2);
-    storage.truncate_head(num_entries_per_segment as u64).await;
+    storage
+        .truncate_head(num_entries_per_segment as u64 + 1)
+        .await;
     assert_eq!(num_wals(), 1);
 }
 
