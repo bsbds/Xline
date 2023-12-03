@@ -23,7 +23,7 @@ impl WALConfig {
         }
     }
 
-    /// Sets the max_segment_size
+    /// Sets the `max_segment_size`
     pub(crate) fn with_max_segment_size(self, size: u64) -> Self {
         Self {
             dir: self.dir,

@@ -93,7 +93,7 @@ async fn log_head_truncation_is_ok() {
     };
 
     let sample_entry = LogEntry::<TestCommand>::new(1, 1, EntryData::Empty(ProposeId(1, 2)));
-    let mut wal_codec = WAL::<TestCommand>::new();
+    let mut wal_codec = Wal::<TestCommand>::new();
     let mut buf = BytesMut::new();
     wal_codec.encode(vec![DataFrame::Entry(sample_entry)], &mut buf);
     let entry_size = buf.len();

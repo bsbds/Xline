@@ -15,14 +15,15 @@ use tokio_util::codec::Framed;
 use crate::{log_entry::LogEntry, server::storage::wal::WAL_FILE_EXT};
 
 use super::{
-    codec::{CodecError, DataFrame, WAL},
-    util::{get_checksum, validate_data, LockedFile},
+    codec::{CodecError, DataFrame, Wal},
+    util::{get_checksum, parse_u64, validate_data, LockedFile},
     WALStorageError, WAL_MAGIC, WAL_VERSION,
 };
 
 /// The size of wal file header in bytes
 const WAL_HEADER_SIZE: usize = 56;
 
+/// A segment of WAL
 #[derive(Debug)]
 pub(super) struct WALSegment {
     /// The base index of this segment
@@ -60,17 +61,17 @@ pub(super) enum IOState {
 impl WALSegment {
     /// Open an existing WAL segment file
     pub(super) async fn open(lfile: LockedFile, size_limit: u64) -> io::Result<Self> {
-        let mut file = lfile.into_async();
-        let size = file.metadata().await?.len();
+        let mut tokio_file = lfile.into_async();
+        let size = tokio_file.metadata().await?.len();
         let mut buf = vec![0; WAL_HEADER_SIZE];
-        let _ignore = file.read_exact(&mut buf).await?;
+        let _ignore = tokio_file.read_exact(&mut buf).await?;
         let (base_index, segment_id) = Self::parse_header(&buf)?;
 
         Ok(Self {
             base_index,
             segment_id,
             size_limit,
-            file,
+            file: tokio_file,
             size,
             // Index 0 means the seal_index hasn't been read yet
             seal_index: 0,
@@ -87,17 +88,18 @@ impl WALSegment {
     ) -> io::Result<Self> {
         let segment_name = Self::segment_name(segment_id, base_index);
         let lfile = tmp_file.rename(segment_name)?;
-        let mut file = lfile.into_async();
-        file.write_all(&Self::gen_header(base_index, segment_id))
+        let mut tokio_file = lfile.into_async();
+        tokio_file
+            .write_all(&Self::gen_header(base_index, segment_id))
             .await?;
-        file.flush().await?;
-        file.sync_all().await?;
+        tokio_file.flush().await?;
+        tokio_file.sync_all().await?;
 
         Ok(Self {
             base_index,
             segment_id,
             size_limit,
-            file,
+            file: tokio_file,
             size: WAL_HEADER_SIZE.numeric_cast(),
             // For convenience we set it to largest u64 value that represent not sealed
             seal_index: u64::MAX,
@@ -112,44 +114,38 @@ impl WALSegment {
     where
         C: Serialize + DeserializeOwned + 'static,
     {
-        let mut framed = Framed::new(self, WAL::<C>::new());
+        let mut self_framed = Framed::new(self, Wal::<C>::new());
         let mut frame_batches = vec![];
-        while let Some(result) = framed.next().await {
+        while let Some(result) = self_framed.next().await {
             match result {
                 Ok(f) => frame_batches.push(f),
                 Err(e) => {
                     /// If the segment file reaches on end, stop reading
                     if matches!(e, CodecError::EndOrCorrupted) {
                         break;
-                    } else {
-                        return Err(e.into());
                     }
+                    return Err(e.into());
                 }
             }
         }
         // The highest_index of this segment
         let mut highest_index = u64::MAX;
         // We get the last frame batch to check it's type
-        match frame_batches.last() {
-            Some(frames) => {
-                let frame = frames
-                    .last()
-                    .unwrap_or_else(|| unreachable!("a batch should contains at leat one frame"));
-                if let DataFrame::SealIndex(index) = *frame {
-                    highest_index = index;
-                }
-            }
-            // The segment does not contains any frame, only a file header
-            None => {
-                todo!("handle no frame")
+        // TODO: The segment does not contains any frame, only a file header
+        if let Some(frames) = frame_batches.last() {
+            let frame = frames
+                .last()
+                .unwrap_or_else(|| unreachable!("a batch should contains at leat one frame"));
+            if let DataFrame::SealIndex(index) = *frame {
+                highest_index = index;
             }
         }
 
         // TODO: reset on drop might be better
-        framed.get_mut().reset_offset().await?;
+        self_framed.get_mut().reset_offset().await?;
 
         // Update seal index
-        framed.get_mut().update_seal_index(highest_index);
+        self_framed.get_mut().update_seal_index(highest_index);
 
         // Get log entries that index is no larger than `highest_index`
         Ok(frame_batches.into_iter().flatten().filter_map(move |f| {
@@ -165,7 +161,7 @@ impl WALSegment {
     ///
     /// After the seal, the log index in this segment should be less than `next_index`
     pub(super) async fn seal<C: Serialize>(&mut self, next_index: LogIndex) {
-        let mut framed = Framed::new(self, WAL::<C>::new());
+        let mut framed = Framed::new(self, Wal::<C>::new());
         framed.send(vec![DataFrame::SealIndex(next_index)]).await;
         framed.flush().await;
         framed.get_mut().sync_all().await;
@@ -182,10 +178,12 @@ impl WALSegment {
         self.size >= self.size_limit
     }
 
+    /// Updates the seal index
     pub(super) fn update_seal_index(&mut self, index: LogIndex) {
         self.seal_index = self.seal_index.max(index);
     }
 
+    /// Syncs the file of this segment
     pub(super) async fn sync_all(&mut self) -> io::Result<()> {
         self.file.sync_all().await?;
         self.io_state.fsynced();
@@ -193,45 +191,53 @@ impl WALSegment {
         Ok(())
     }
 
+    /// Resets the file offset
     pub(super) async fn reset_offset(&mut self) -> io::Result<()> {
         self.file.seek(io::SeekFrom::Start(0)).await.map(|_| ())
     }
 
+    /// Gets the id of this segment
     pub(super) fn id(&self) -> u64 {
         self.segment_id
     }
 
+    /// Gets the base log index of this segment
     pub(super) fn base_index(&self) -> u64 {
         self.base_index
     }
 
+    /// Checks if the segment is redundant
+    ///
+    /// The segment is redundant if the `seal_index` is less than the `base_index`
     pub(super) fn is_redundant(&self) -> bool {
         self.seal_index < self.base_index
     }
 
-    pub(super) fn state(&self) -> IOState {
+    /// Gets the io state of this segment
+    pub(super) fn io_state(&self) -> IOState {
         self.io_state
     }
 
     /// Gets the file name of the WAL segment
     pub(super) fn segment_name(segment_id: u64, log_index: u64) -> String {
-        format!("{:016x}-{:016x}{WAL_FILE_EXT}", segment_id, log_index)
+        format!("{segment_id:016x}-{log_index:016x}{WAL_FILE_EXT}")
     }
 
-    // Generate the header
-    //
-    // The header layout:
-    //
-    // 0      1      2      3      4      5      6      7      8
-    // +------+------+------+------+------+------+------+------+
-    // | Magic                     | Reserved           | Vsn  |
-    // +------+------+------+------+------+------+------+------+
-    // | BaseIndex                                             |
-    // +------+------+------+------+------+------+------+------+
-    // | SegmentID                                             |
-    // +------+------+------+------+------+------+------+------+
-    // | Checksum (32bytes) ...                                |
-    // +------+------+------+------+------+------+------+------+
+    #[allow(clippy::doc_markdown)] // False positive for ASCII graph
+    /// Generate the header
+    ///
+    /// The header layout:
+    ///
+    /// 0      1      2      3      4      5      6      7      8
+    /// +------+------+------+------+------+------+------+------+
+    /// | Magic                     | Reserved           | Vsn  |
+    /// +------+------+------+------+------+------+------+------+
+    /// | BaseIndex                                             |
+    /// +------+------+------+------+------+------+------+------+
+    /// | SegmentID                                             |
+    /// +------+------+------+------+------+------+------+------+
+    /// | Checksum (32bytes) ...                                |
+    /// +------+------+------+------+------+------+------+------+
     fn gen_header(base_index: LogIndex, segment_id: u64) -> Vec<u8> {
         let mut buf = vec![];
         buf.extend(WAL_MAGIC.to_le_bytes());
@@ -244,7 +250,13 @@ impl WALSegment {
     }
 
     /// Parse the header from the given buffer
-    #[allow(clippy::unwrap_used)] // unwrap is used to convert slice to const length and is safe
+    #[allow(
+        clippy::unwrap_used,
+        clippy::integer_arithmetic,
+        clippy::indexing_slicing
+    )] // * unwrap is used to convert slice to const length and is safe
+       // * index arithmetic cannot overflow
+       // * index slicing is checked
     fn parse_header(src: &[u8]) -> io::Result<(LogIndex, u64)> {
         let mut offset = 0;
         let mut next_field = |len: usize| {
@@ -256,13 +268,13 @@ impl WALSegment {
             return parse_error;
         }
         if next_field(4) != WAL_MAGIC.to_le_bytes()
-            || next_field(3) != &[0; 3]
-            || next_field(1) != &[WAL_VERSION]
+            || next_field(3) != [0; 3]
+            || next_field(1) != [WAL_VERSION]
         {
             return parse_error;
         }
-        let base_index = u64::from_le_bytes(next_field(8).try_into().unwrap());
-        let segment_id = u64::from_le_bytes(next_field(8).try_into().unwrap());
+        let base_index = parse_u64(next_field(8));
+        let segment_id = parse_u64(next_field(8));
         let checksum = next_field(32);
 
         // TODO: better return custom error
@@ -364,10 +376,10 @@ impl IOState {
     /// This method panics if the state is not `IOState::Fsynced`
     fn written(&mut self) {
         assert!(
-            matches!(self, IOState::Written | IOState::Fsynced),
+            matches!(*self, IOState::Written | IOState::Fsynced),
             "current state is {self:?}"
         );
-        *self = IOState::Written
+        *self = IOState::Written;
     }
 
     /// Mutate the state to `IOState::Flushed`
@@ -376,8 +388,11 @@ impl IOState {
     ///
     /// This method panics if the state is not `IOState::Written`
     fn flushed(&mut self) {
-        assert!(matches!(self, IOState::Flushed | IOState::Written));
-        *self = IOState::Flushed
+        assert!(
+            matches!(*self, IOState::Flushed | IOState::Written),
+            "current state is {self:?}"
+        );
+        *self = IOState::Flushed;
     }
 
     /// Mutate the state to `IOState::Written`
@@ -386,17 +401,20 @@ impl IOState {
     ///
     /// This method panics if the state is not `IOState::Flushed`
     fn fsynced(&mut self) {
-        assert!(matches!(self, IOState::Fsynced | IOState::Flushed));
-        *self = IOState::Fsynced
+        assert!(
+            matches!(*self, IOState::Fsynced | IOState::Flushed),
+            "current state is {self:?}"
+        );
+        *self = IOState::Fsynced;
     }
 
     /// Mutate the state to `IOState::Errored`
     fn errored(&mut self) {
-        *self = IOState::Errored
+        *self = IOState::Errored;
     }
 
     /// Mutate the state to `IOState::Shutdowned`
     fn shutdowned(&mut self) {
-        *self = IOState::Shutdowned
+        *self = IOState::Shutdowned;
     }
 }

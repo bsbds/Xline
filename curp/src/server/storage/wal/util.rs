@@ -60,10 +60,12 @@ impl LockedFile {
         })
     }
 
+    /// Convert self to std file
     pub(super) fn into_std(self) -> StdFile {
         self.file
     }
 
+    /// Convert self to tokio file
     pub(super) fn into_async(self) -> TokioFile {
         TokioFile::from_std(self.file)
     }
@@ -98,12 +100,14 @@ pub(super) fn validate_data(data: &[u8], checksum: &[u8]) -> bool {
     get_checksum(data) == checksum
 }
 
+/// Checks whether the file exist
 pub(super) fn is_exist(path: impl AsRef<Path>) -> bool {
     std::fs::metadata(path).is_ok()
 }
 
+/// Parse a u64 from u8 slice
 pub(super) fn parse_u64(bytes_le: &[u8]) -> u64 {
-    assert_eq!(bytes_le.len(), 8);
+    assert_eq!(bytes_le.len(), 8, "The slice passed should be 8 bytes long");
     u64::from_le_bytes(
         bytes_le
             .try_into()

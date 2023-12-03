@@ -6,6 +6,7 @@ mod codec;
 /// File pipeline
 mod file_pipeline;
 
+/// File utils
 mod util;
 
 /// WAL segment
@@ -14,7 +15,7 @@ mod segment;
 /// Remover of the segment file
 mod remover;
 
-/// The config for WALStorage
+/// The config for `WALStorage`
 mod config;
 
 /// WAL tests
@@ -46,7 +47,7 @@ use tracing::warn;
 use crate::log_entry::LogEntry;
 
 use self::{
-    codec::{CodecError, DataFrame, WAL},
+    codec::{CodecError, DataFrame, Wal},
     config::WALConfig,
     file_pipeline::FilePipeline,
     remover::SegmentRemover,
@@ -54,23 +55,30 @@ use self::{
     util::LockedFile,
 };
 
-const WAL_MAGIC: u32 = 0xd86e0be2;
+/// The magic of the WAL file
+const WAL_MAGIC: u32 = 0xd86e_0be2;
 
+/// The current WAL version
 const WAL_VERSION: u8 = 0x00;
 
-const WAL_FILE_EXT: &'static str = ".wal";
+/// The wal file extension
+const WAL_FILE_EXT: &str = ".wal";
 
+/// Errors of the `WALStorage`
 #[derive(Debug, Error)]
 pub(crate) enum WALStorageError {
+    /// The WAL corrupt error
     #[error("WAL corrupted")]
     Corrupted,
+    /// The codec error
     #[error("Codec error: {0}")]
     Codec(#[from] CodecError),
     #[error("IO error: {0}")]
+    /// The IO error
     IO(#[from] io::Error),
 }
 
-/// The log storage
+/// The WAL storage
 struct WALStorage<C> {
     /// The directory to store the log files
     config: WALConfig,
@@ -92,7 +100,7 @@ where
 {
     /// Recover from the given directory if there's any segments
     /// Otherwise, creates a new `LogStorage`
-    async fn new_or_recover(
+    pub(super) async fn new_or_recover(
         config: WALConfig,
     ) -> Result<(Self, Vec<LogEntry<C>>), WALStorageError> {
         // We try to recover the removal first
@@ -102,7 +110,7 @@ where
         let file_paths = util::get_file_paths_with_ext(&config.dir, WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
             .into_iter()
-            .map(|p| LockedFile::open_rw(p))
+            .map(LockedFile::open_rw)
             .collect::<io::Result<_>>()?;
 
         let segment_futs = lfiles
@@ -116,7 +124,7 @@ where
 
         let logs_fut: Vec<_> = segments
             .iter_mut()
-            .map(|s| s.recover_segment_logs())
+            .map(WALSegment::recover_segment_logs)
             .collect();
         let logs: Vec<_> = join_all(logs_fut)
             .await
@@ -136,11 +144,8 @@ where
                 .ok_or(io::Error::from(io::ErrorKind::BrokenPipe))??;
             segments.push(WALSegment::create(lfile, 1, 0, config.max_segment_size).await?);
         }
-        let next_segment_id = segments.last().map(|s| s.id().overflow_add(1)).unwrap_or(0);
-        let next_log_index = logs_flattened
-            .last()
-            .map(|l| l.index.overflow_add(1))
-            .unwrap_or(1);
+        let next_segment_id = segments.last().map_or(0, |s| s.id().overflow_add(1));
+        let next_log_index = logs_flattened.last().map_or(1, |l| l.index.overflow_add(1));
 
         Ok((
             Self {
@@ -156,13 +161,14 @@ where
     }
 
     /// Send frames with fsync
-    async fn send_sync(&mut self, item: Vec<DataFrame<C>>) -> io::Result<()> {
+    #[allow(clippy::pattern_type_mismatch)] // Cannot satisfiy both clippy
+    pub(super) async fn send_sync(&mut self, item: Vec<DataFrame<C>>) -> io::Result<()> {
         let last_segment = self
             .segments
             .last_mut()
             .unwrap_or_else(|| unreachable!("there should be at least on segment"));
-        let mut framed = Framed::new(last_segment, WAL::<C>::new());
-        if let Some(&DataFrame::Entry(ref entry)) = item.last() {
+        let mut framed = Framed::new(last_segment, Wal::<C>::new());
+        if let Some(DataFrame::Entry(entry)) = item.last() {
             self.next_log_index = entry.index.overflow_add(1);
         }
         framed.send(item).await?;
@@ -179,7 +185,7 @@ where
     /// Tuncate all the logs whose index is less than or equal to `compact_index`
     ///
     /// `compact_index` should be the smallest index required in CURP
-    async fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
+    pub(super) async fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
         if compact_index >= self.next_log_index {
             warn!(
                 "head truncation: compact index too large, compact index: {}, storage next index: {}",
@@ -206,12 +212,11 @@ where
     }
 
     /// Tuncate all the logs whose index is greater than `max_index`
-    async fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
+    pub(super) async fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
         // segments to truncate
         let segments = self
             .segments
-            .as_mut_slice()
-            .into_iter()
+            .iter_mut()
             .rev()
             .take_while_inclusive::<_>(|s| s.base_index() > max_index);
 
@@ -219,7 +224,7 @@ where
             segment.seal::<C>(max_index).await;
         }
 
-        let to_remove = self.update_segments().await;
+        let to_remove = self.update_segments();
         SegmentRemover::new_removal(&self.config.dir, to_remove.iter()).await?;
 
         self.next_log_index = max_index.overflow_add(1);
@@ -228,7 +233,7 @@ where
         Ok(())
     }
 
-    /// Open a new WAL segment
+    /// Opens a new WAL segment
     async fn open_new_segment(&mut self) -> io::Result<()> {
         let lfile = self
             .pipeline
@@ -250,9 +255,10 @@ where
         Ok(())
     }
 
-    /// Remove segments that is no long needed
-    async fn update_segments(&mut self) -> Vec<WALSegment> {
-        let flags: Vec<_> = self.segments.iter().map(|s| s.is_redundant()).collect();
+    /// Removes segments that is no long needed
+    #[allow(clippy::pattern_type_mismatch)] // Cannot satisfiy both clippy
+    fn update_segments(&mut self) -> Vec<WALSegment> {
+        let flags: Vec<_> = self.segments.iter().map(WALSegment::is_redundant).collect();
         let (to_remove, remaining): (Vec<_>, Vec<_>) = self
             .segments
             .drain(..)
@@ -264,13 +270,12 @@ where
         to_remove.into_iter().map(|(s, _)| s).collect()
     }
 
-    /// Sync all flushed segments
+    /// Syncs all flushed segments
     async fn sync_segments(&mut self) -> io::Result<()> {
         let to_sync = self
             .segments
-            .as_mut_slice()
-            .into_iter()
-            .filter(|s| matches!(s.state(), IOState::Flushed));
+            .iter_mut()
+            .filter(|s| matches!(s.io_state(), IOState::Flushed));
         for segment in to_sync {
             segment.sync_all().await?;
         }
@@ -278,7 +283,7 @@ where
         Ok(())
     }
 
-    /// Check if the log index are continuous
+    /// Checks if the log index are continuous
     #[allow(single_use_lifetimes)] // the lifetime is required here
     fn check_log_continuity<'a>(entries: impl Iterator<Item = &'a LogEntry<C>> + Clone) -> bool {
         entries

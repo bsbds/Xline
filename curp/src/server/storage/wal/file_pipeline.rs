@@ -1,4 +1,8 @@
-use std::{io, path::PathBuf, task::Poll};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    task::Poll,
+};
 
 use clippy_utilities::OverflowArithmetic;
 use event_listener::Event;
@@ -11,18 +15,26 @@ use tracing::error;
 
 use super::util::LockedFile;
 
-const TEMP_FILE_EXT: &'static str = ".tmp";
+/// The temp file extension
+const TEMP_FILE_EXT: &str = ".tmp";
 
+/// The file pipeline, used for pipelining the creation of temp file
 pub(super) struct FilePipeline {
+    /// The directory where the temp files are created
     dir: PathBuf,
+    /// The size of the temp file
     file_size: u64,
+    /// The file receive stream
     file_stream: RecvStream<'static, LockedFile>,
+    /// The stop event listener
     stop_event: Event,
+    /// The handle of the background file creation task
     handle: JoinHandle<io::Result<()>>,
 }
 
 impl FilePipeline {
     /// Creates a new `FilePipeline`
+    #[allow(clippy::integer_arithmetic)] // Introduced by tokio::select! macro
     pub(super) fn new(dir: PathBuf, file_size: u64) -> Self {
         let (file_tx, file_rx) = flume::bounded(1);
         let stop_event = Event::new();
@@ -57,18 +69,25 @@ impl FilePipeline {
         }
     }
 
+    /// Stops the pipeline
     pub(super) fn stop(&self) {
         self.stop_event.notify(1);
     }
 
-    fn alloc(dir: &PathBuf, file_size: u64, file_count: &mut usize) -> io::Result<LockedFile> {
-        let fpath = dir.join(format!("{}{TEMP_FILE_EXT}", *file_count));
+    /// Allocates a a new tempfile
+    fn alloc(
+        dir: impl AsRef<Path>,
+        file_size: u64,
+        file_count: &mut usize,
+    ) -> io::Result<LockedFile> {
+        let fpath = PathBuf::from(dir.as_ref()).join(format!("{}{TEMP_FILE_EXT}", *file_count));
         let mut locked_file = LockedFile::open_rw(fpath)?;
         locked_file.preallocate(file_size)?;
         *file_count = file_count.overflow_add(1);
         Ok(locked_file)
     }
 
+    /// Cleans up all unused tempfiles
     fn clean_up(dir: &PathBuf) -> io::Result<()> {
         for result in std::fs::read_dir(dir)? {
             let file = result?;
@@ -104,9 +123,7 @@ impl Stream for FilePipeline {
             return Poll::Ready(None);
         }
 
-        self.file_stream
-            .poll_next_unpin(cx)
-            .map(|opt| opt.map(|f| Ok(f)))
+        self.file_stream.poll_next_unpin(cx).map(|opt| opt.map(Ok))
     }
 }
 
