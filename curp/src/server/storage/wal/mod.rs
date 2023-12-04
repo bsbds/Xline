@@ -1,5 +1,8 @@
 #![allow(unused)]
 
+/// WAL errors
+mod error;
+
 /// The WAL codec
 mod codec;
 
@@ -47,8 +50,9 @@ use tracing::warn;
 use crate::log_entry::LogEntry;
 
 use self::{
-    codec::{CodecError, DataFrame, Wal},
+    codec::{DataFrame, Wal},
     config::WALConfig,
+    error::{CorruptType, WALError},
     file_pipeline::FilePipeline,
     remover::SegmentRemover,
     segment::{IOState, WALSegment},
@@ -63,20 +67,6 @@ const WAL_VERSION: u8 = 0x00;
 
 /// The wal file extension
 const WAL_FILE_EXT: &str = ".wal";
-
-/// Errors of the `WALStorage`
-#[derive(Debug, Error)]
-pub(crate) enum WALStorageError {
-    /// The WAL corrupt error
-    #[error("WAL corrupted")]
-    Corrupted,
-    /// The codec error
-    #[error("Codec error: {0}")]
-    Codec(#[from] CodecError),
-    #[error("IO error: {0}")]
-    /// The IO error
-    IO(#[from] io::Error),
-}
 
 /// The WAL storage
 struct WALStorage<C> {
@@ -102,7 +92,7 @@ where
     /// Otherwise, creates a new `LogStorage`
     pub(super) async fn new_or_recover(
         config: WALConfig,
-    ) -> Result<(Self, Vec<LogEntry<C>>), WALStorageError> {
+    ) -> Result<(Self, Vec<LogEntry<C>>), WALError> {
         // We try to recover the removal first
         SegmentRemover::recover(&config.dir).await?;
 
@@ -119,7 +109,7 @@ where
         let mut segments: Vec<_> = join_all(segment_futs)
             .await
             .into_iter()
-            .collect::<io::Result<_>>()?;
+            .collect::<Result<_, _>>()?;
         segments.sort_unstable();
 
         let logs_fut: Vec<_> = segments
@@ -133,7 +123,7 @@ where
         let logs_flattened: Vec<_> = logs.into_iter().flatten().collect();
 
         if !Self::check_log_continuity(logs_flattened.iter()) {
-            return Err(WALStorageError::Corrupted);
+            return Err(WALError::Corrupted(CorruptType::LogNotContinue));
         }
 
         /// If there's no segments to recover, create a new segment

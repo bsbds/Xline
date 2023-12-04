@@ -15,9 +15,10 @@ use tokio_util::codec::Framed;
 use crate::{log_entry::LogEntry, server::storage::wal::WAL_FILE_EXT};
 
 use super::{
-    codec::{CodecError, DataFrame, Wal},
+    codec::{DataFrame, Wal},
+    error::{CorruptType, WALError},
     util::{get_checksum, parse_u64, validate_data, LockedFile},
-    WALStorageError, WAL_MAGIC, WAL_VERSION,
+    WAL_MAGIC, WAL_VERSION,
 };
 
 /// The size of wal file header in bytes
@@ -60,7 +61,7 @@ pub(super) enum IOState {
 
 impl WALSegment {
     /// Open an existing WAL segment file
-    pub(super) async fn open(lfile: LockedFile, size_limit: u64) -> io::Result<Self> {
+    pub(super) async fn open(lfile: LockedFile, size_limit: u64) -> Result<Self, WALError> {
         let mut tokio_file = lfile.into_async();
         let size = tokio_file.metadata().await?.len();
         let mut buf = vec![0; WAL_HEADER_SIZE];
@@ -110,7 +111,7 @@ impl WALSegment {
     /// Recover log entries from a `WALSegment`
     pub(super) async fn recover_segment_logs<C>(
         &mut self,
-    ) -> Result<impl Iterator<Item = LogEntry<C>>, WALStorageError>
+    ) -> Result<impl Iterator<Item = LogEntry<C>>, WALError>
     where
         C: Serialize + DeserializeOwned + 'static,
     {
@@ -121,17 +122,16 @@ impl WALSegment {
                 Ok(f) => frame_batches.push(f),
                 Err(e) => {
                     /// If the segment file reaches on end, stop reading
-                    if matches!(e, CodecError::EndOrCorrupted) {
+                    if matches!(e, WALError::MaybeEnded) {
                         break;
                     }
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
         }
         // The highest_index of this segment
         let mut highest_index = u64::MAX;
         // We get the last frame batch to check it's type
-        // TODO: The segment does not contains any frame, only a file header
         if let Some(frames) = frame_batches.last() {
             let frame = frames
                 .last()
@@ -141,7 +141,6 @@ impl WALSegment {
             }
         }
 
-        // TODO: reset on drop might be better
         self_framed.get_mut().reset_offset().await?;
 
         // Update seal index
@@ -257,13 +256,15 @@ impl WALSegment {
     )] // * unwrap is used to convert slice to const length and is safe
        // * index arithmetic cannot overflow
        // * index slicing is checked
-    fn parse_header(src: &[u8]) -> io::Result<(LogIndex, u64)> {
+    fn parse_header(src: &[u8]) -> Result<(LogIndex, u64), WALError> {
         let mut offset = 0;
         let mut next_field = |len: usize| {
             offset += len;
             &src[(offset - len)..offset]
         };
-        let parse_error = Err(io::Error::from(io::ErrorKind::InvalidData));
+        let parse_error = Err(WALError::Corrupted(CorruptType::Codec(
+            "Segment file header parsing has failed".to_string(),
+        )));
         if src.len() < 56 {
             return parse_error;
         }
@@ -416,5 +417,46 @@ impl IOState {
     /// Mutate the state to `IOState::Shutdowned`
     fn shutdowned(&mut self) {
         *self = IOState::Shutdowned;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn segment_state_transition_is_correct() {
+        let expect_state = |segment: &WALSegment, state: IOState| {
+            assert!(
+                matches!(segment.io_state(), state),
+                "expect {state:?}, current state: {:?}",
+                segment.io_state()
+            );
+        };
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut file_path = PathBuf::from(temp_dir.path());
+        file_path.push("0.tmp");
+        let lfile = LockedFile::open_rw(&file_path).unwrap();
+        let mut segment = WALSegment::create(lfile, 1, 0, 512).await.unwrap();
+
+        expect_state(&segment, IOState::Fsynced);
+
+        segment.write_u64(1).await.unwrap();
+        expect_state(&segment, IOState::Written);
+        segment.write_u64(2).await.unwrap();
+        expect_state(&segment, IOState::Written);
+
+        segment.flush().await;
+        expect_state(&segment, IOState::Flushed);
+        segment.flush().await;
+        expect_state(&segment, IOState::Flushed);
+
+        segment.sync_all().await;
+        expect_state(&segment, IOState::Fsynced);
+        segment.sync_all().await;
+        expect_state(&segment, IOState::Fsynced);
     }
 }

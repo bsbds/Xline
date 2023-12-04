@@ -1,0 +1,31 @@
+use std::io;
+
+use thiserror::Error;
+
+/// Errors of the `WALStorage`
+#[derive(Debug, Error)]
+pub(crate) enum WALError {
+    /// The WAL segment might reach on end
+    ///
+    /// NOTE: This exists because we cannot tell the difference between a corrupted WAL
+    /// and a normally ended WAL, as the segment files are all preallocated with zeros
+    #[error("WAL ended")]
+    MaybeEnded,
+    /// The WAL corrupt error
+    #[error("WAL corrupted: {0}")]
+    Corrupted(CorruptType),
+    /// The IO error
+    #[error("IO erorr: {0}")]
+    IO(#[from] io::Error),
+}
+
+/// The type of the `Corrupted` error
+#[derive(Debug, Error)]
+pub(crate) enum CorruptType {
+    #[error("Error occured when decoding WAL: {0}")]
+    Codec(String),
+    #[error("Checksuming for the file has failed")]
+    Checksum,
+    #[error("The recovered logs are not continue")]
+    LogNotContinue,
+}

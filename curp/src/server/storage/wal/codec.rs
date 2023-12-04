@@ -9,6 +9,8 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::log_entry::LogEntry;
 
+use super::error::{CorruptType, WALError};
+
 /// Getting the frame type
 trait FrameType {
     /// Returns the type of this frame
@@ -19,22 +21,6 @@ trait FrameType {
 trait FrameEncoder {
     /// Encodes the current frame
     fn encode(&self) -> Vec<u8>;
-}
-
-/// Errors of the codec
-#[derive(Debug, Error)]
-pub(crate) enum CodecError {
-    /// The WAL segment reach on end or has corrupted
-    /// This is considered a success state, as we will safely discard
-    /// all the following data.
-    #[error("The WAL segment reach on end or has corrupted")]
-    EndOrCorrupted,
-    /// The WAL segment has corrupted
-    #[error("The WAL segment has corrupted")]
-    Corrupted,
-    /// An IO error occured
-    #[error("IO error: {0}")]
-    IO(#[from] io::Error),
 }
 
 /// Union type of WAL frames
@@ -53,7 +39,7 @@ where
     /// Decode a frame from the buffer
     #[allow(clippy::indexing_slicing, clippy::integer_arithmetic)] // The indexing is safe, and
                                                                    // arithmetic are checked
-    fn decode(src: &[u8]) -> Result<Option<(Self, usize)>, CodecError> {
+    fn decode(src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
         if src.len() < 8 {
             return Ok(None);
         }
@@ -63,7 +49,7 @@ where
         let frame_type = header[0];
         Ok(Some(match frame_type {
             0x00 => {
-                return Err(CodecError::EndOrCorrupted);
+                return Err(WALError::MaybeEnded);
             }
             0x01 => {
                 let len: usize = Self::get_u64(header).numeric_cast();
@@ -71,8 +57,8 @@ where
                     return Ok(None);
                 }
                 let payload = &src[8..8 + len];
-                let entry: LogEntry<C> =
-                    bincode::deserialize(payload).map_err(|_ignore| CodecError::Corrupted)?;
+                let entry: LogEntry<C> = bincode::deserialize(payload)
+                    .map_err(|e| WALError::Corrupted(CorruptType::Codec(e.to_string())))?;
                 (Self::Data(DataFrame::Entry(entry)), 8 + len)
             }
             0x02 => {
@@ -87,7 +73,9 @@ where
                 (Self::Commit(CommitFrame { checksum }), 8 + 32)
             }
             _ => {
-                return Err(CodecError::Corrupted);
+                return Err(WALError::Corrupted(CorruptType::Codec(
+                    "Unexpected frame type".to_string(),
+                )));
             }
         }))
     }
@@ -226,7 +214,7 @@ where
 {
     type Item = Vec<DataFrame<C>>;
 
-    type Error = CodecError;
+    type Error = WALError;
 
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let mut frames = vec![];
@@ -244,7 +232,7 @@ where
                             if commit.validate(&frames_bytes) {
                                 return Ok(Some(frames));
                             }
-                            return Err(CodecError::Corrupted);
+                            return Err(WALError::Corrupted(CorruptType::Checksum));
                         }
                     }
                 }
@@ -342,10 +330,7 @@ mod tests {
         let mut framed = Framed::new(file, Wal::<TestCommand>::new());
 
         let err = framed.next().await.unwrap().unwrap_err();
-        assert!(
-            matches!(err, CodecError::EndOrCorrupted),
-            "error {err} not match"
-        );
+        assert!(matches!(err, WALError::MaybeEnded), "error {err} not match");
     }
 
     #[tokio::test]
@@ -368,7 +353,7 @@ mod tests {
 
         let err = framed.next().await.unwrap().unwrap_err();
         assert!(
-            matches!(err, CodecError::Corrupted),
+            matches!(err, WALError::Corrupted(_)),
             "error {err} not match"
         );
     }
