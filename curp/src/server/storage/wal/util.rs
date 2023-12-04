@@ -51,6 +51,7 @@ impl LockedFile {
     /// Rename the current file
     ///
     /// We will discard this file if the rename has failed
+    ///
     /// TODO: GC the orignal file
     pub(super) fn rename(self, new_name: impl AsRef<Path>) -> io::Result<Self> {
         let mut new_path = parent_dir(&self.path)?;

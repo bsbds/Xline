@@ -17,9 +17,12 @@ use super::{
 const REMOVER_WAL_FILE_NAME: &str = "segments.rwal";
 
 /// Atomic remover of segment files
+///
+/// The remover will firstly creates a write ahead log that stores
+/// the removal information, then it will remove it after the segment
+/// removal has completed.
 pub(super) struct SegmentRemover {
     /// The WAL path for storing the remove infomation
-    /// Let's call it RWAL
     rwal_path: PathBuf,
 }
 
@@ -27,20 +30,20 @@ impl SegmentRemover {
     #[allow(clippy::doc_markdown)] // False positive for ASCII graph
     /// Recover from existing RWAL
     ///
-    /// RWAL layout:
+    /// * RWAL layout
     ///
     ///  |----------+----------+-----+----------+-------------------|
     ///  | record 0 | record 1 | ... | record n | checksum (sha256) |
     ///  |----------+----------+-----+----------+-------------------|
     ///
-    ///  The layout of each record:
+    /// * The layout of each record
     ///
     ///  0      1      2      3      4      5      6      7      8
-    ///  +------+------+------+------+------+------+------+------+
+    ///  |------+------+------+------+------+------+------+------|
     ///  | BaseIndex                                             |
-    ///  +------+------+------+------+------+------+------+------+
+    ///  |------+------+------+------+------+------+------+------|
     ///  | SegmentID                                             |
-    ///  +------+------+------+------+------+------+------+------+
+    ///  |------+------+------+------+------+------+------+------|
     #[allow(clippy::integer_arithmetic)] // won't overflow
     pub(super) async fn recover(dir: impl AsRef<Path>) -> io::Result<()> {
         let wal_path = Self::rwal_path(&dir);

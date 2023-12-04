@@ -15,7 +15,7 @@ use tokio_util::codec::Framed;
 use crate::{log_entry::LogEntry, server::storage::wal::WAL_FILE_EXT};
 
 use super::{
-    codec::{DataFrame, Wal},
+    codec::{DataFrame, WAL},
     error::{CorruptType, WALError},
     util::{get_checksum, parse_u64, validate_data, LockedFile},
     WAL_MAGIC, WAL_VERSION,
@@ -60,26 +60,6 @@ pub(super) enum IOState {
 }
 
 impl WALSegment {
-    /// Open an existing WAL segment file
-    pub(super) async fn open(lfile: LockedFile, size_limit: u64) -> Result<Self, WALError> {
-        let mut tokio_file = lfile.into_async();
-        let size = tokio_file.metadata().await?.len();
-        let mut buf = vec![0; WAL_HEADER_SIZE];
-        let _ignore = tokio_file.read_exact(&mut buf).await?;
-        let (base_index, segment_id) = Self::parse_header(&buf)?;
-
-        Ok(Self {
-            base_index,
-            segment_id,
-            size_limit,
-            file: tokio_file,
-            size,
-            // Index 0 means the seal_index hasn't been read yet
-            seal_index: 0,
-            io_state: IOState::default(),
-        })
-    }
-
     /// Creates a new `WALSegment`
     pub(super) async fn create(
         tmp_file: LockedFile,
@@ -108,6 +88,26 @@ impl WALSegment {
         })
     }
 
+    /// Open an existing WAL segment file
+    pub(super) async fn open(lfile: LockedFile, size_limit: u64) -> Result<Self, WALError> {
+        let mut tokio_file = lfile.into_async();
+        let size = tokio_file.metadata().await?.len();
+        let mut buf = vec![0; WAL_HEADER_SIZE];
+        let _ignore = tokio_file.read_exact(&mut buf).await?;
+        let (base_index, segment_id) = Self::parse_header(&buf)?;
+
+        Ok(Self {
+            base_index,
+            segment_id,
+            size_limit,
+            file: tokio_file,
+            size,
+            // Index 0 means the seal_index hasn't been read yet
+            seal_index: 0,
+            io_state: IOState::default(),
+        })
+    }
+
     /// Recover log entries from a `WALSegment`
     pub(super) async fn recover_segment_logs<C>(
         &mut self,
@@ -115,7 +115,7 @@ impl WALSegment {
     where
         C: Serialize + DeserializeOwned + 'static,
     {
-        let mut self_framed = Framed::new(self, Wal::<C>::new());
+        let mut self_framed = Framed::new(self, WAL::<C>::new());
         let mut frame_batches = vec![];
         while let Some(result) = self_framed.next().await {
             match result {
@@ -160,26 +160,11 @@ impl WALSegment {
     ///
     /// After the seal, the log index in this segment should be less than `next_index`
     pub(super) async fn seal<C: Serialize>(&mut self, next_index: LogIndex) {
-        let mut framed = Framed::new(self, Wal::<C>::new());
+        let mut framed = Framed::new(self, WAL::<C>::new());
         framed.send(vec![DataFrame::SealIndex(next_index)]).await;
         framed.flush().await;
         framed.get_mut().sync_all().await;
         framed.get_mut().update_seal_index(next_index);
-    }
-
-    /// Get the size of the segment
-    pub(super) fn size(&self) -> u64 {
-        self.size
-    }
-
-    /// Checks if the segment is full
-    pub(super) fn is_full(&self) -> bool {
-        self.size >= self.size_limit
-    }
-
-    /// Updates the seal index
-    pub(super) fn update_seal_index(&mut self, index: LogIndex) {
-        self.seal_index = self.seal_index.max(index);
     }
 
     /// Syncs the file of this segment
@@ -193,6 +178,21 @@ impl WALSegment {
     /// Resets the file offset
     pub(super) async fn reset_offset(&mut self) -> io::Result<()> {
         self.file.seek(io::SeekFrom::Start(0)).await.map(|_| ())
+    }
+
+    /// Updates the seal index
+    pub(super) fn update_seal_index(&mut self, index: LogIndex) {
+        self.seal_index = self.seal_index.max(index);
+    }
+
+    /// Get the size of the segment
+    pub(super) fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Checks if the segment is full
+    pub(super) fn is_full(&self) -> bool {
+        self.size >= self.size_limit
     }
 
     /// Gets the id of this segment
@@ -228,15 +228,15 @@ impl WALSegment {
     /// The header layout:
     ///
     /// 0      1      2      3      4      5      6      7      8
-    /// +------+------+------+------+------+------+------+------+
+    /// |------+------+------+------+------+------+------+------|
     /// | Magic                     | Reserved           | Vsn  |
-    /// +------+------+------+------+------+------+------+------+
+    /// |------+------+------+------+------+------+------+------|
     /// | BaseIndex                                             |
-    /// +------+------+------+------+------+------+------+------+
+    /// |------+------+------+------+------+------+------+------|
     /// | SegmentID                                             |
-    /// +------+------+------+------+------+------+------+------+
+    /// |------+------+------+------+------+------+------+------|
     /// | Checksum (32bytes) ...                                |
-    /// +------+------+------+------+------+------+------+------+
+    /// |------+------+------+------+------+------+------+------|
     fn gen_header(base_index: LogIndex, segment_id: u64) -> Vec<u8> {
         let mut buf = vec![];
         buf.extend(WAL_MAGIC.to_le_bytes());
@@ -278,7 +278,6 @@ impl WALSegment {
         let segment_id = parse_u64(next_field(8));
         let checksum = next_field(32);
 
-        // TODO: better return custom error
         if !validate_data(&src[0..24], checksum) {
             return parse_error;
         }
@@ -374,7 +373,7 @@ impl IOState {
     ///
     /// # Panics
     ///
-    /// This method panics if the state is not `IOState::Fsynced`
+    /// This method panics if the state is not `IOState::Written` or `IOState::Fsynced`
     fn written(&mut self) {
         assert!(
             matches!(*self, IOState::Written | IOState::Fsynced),
@@ -387,7 +386,7 @@ impl IOState {
     ///
     /// # Panics
     ///
-    /// This method panics if the state is not `IOState::Written`
+    /// This method panics if the state is not `IOState::Flushed` or `IOState::Written`
     fn flushed(&mut self) {
         assert!(
             matches!(*self, IOState::Flushed | IOState::Written),
@@ -400,7 +399,7 @@ impl IOState {
     ///
     /// # Panics
     ///
-    /// This method panics if the state is not `IOState::Flushed`
+    /// This method panics if the state is not `IOState::Fsynced` or `IOState::Flushed`
     fn fsynced(&mut self) {
         assert!(
             matches!(*self, IOState::Fsynced | IOState::Flushed),

@@ -50,7 +50,7 @@ use tracing::warn;
 use crate::log_entry::LogEntry;
 
 use self::{
-    codec::{DataFrame, Wal},
+    codec::{DataFrame, WAL},
     config::WALConfig,
     error::{CorruptType, WALError},
     file_pipeline::FilePipeline,
@@ -157,7 +157,7 @@ where
             .segments
             .last_mut()
             .unwrap_or_else(|| unreachable!("there should be at least on segment"));
-        let mut framed = Framed::new(last_segment, Wal::<C>::new());
+        let mut framed = Framed::new(last_segment, WAL::<C>::new());
         if let Some(DataFrame::Entry(entry)) = item.last() {
             self.next_log_index = entry.index.overflow_add(1);
         }

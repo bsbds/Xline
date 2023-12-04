@@ -23,6 +23,13 @@ trait FrameEncoder {
     fn encode(&self) -> Vec<u8>;
 }
 
+/// The WAL codec
+#[derive(Debug)]
+pub(crate) struct WAL<C> {
+    /// The phantom data
+    _phantom: PhantomData<C>,
+}
+
 /// Union type of WAL frames
 #[derive(Debug)]
 enum WALFrame<C> {
@@ -30,62 +37,6 @@ enum WALFrame<C> {
     Data(DataFrame<C>),
     /// Commit frame type
     Commit(CommitFrame),
-}
-
-impl<C> WALFrame<C>
-where
-    C: for<'a> Deserialize<'a>,
-{
-    /// Decode a frame from the buffer
-    #[allow(clippy::indexing_slicing, clippy::integer_arithmetic)] // The indexing is safe, and
-                                                                   // arithmetic are checked
-    fn decode(src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
-        if src.len() < 8 {
-            return Ok(None);
-        }
-        let header: [u8; 8] = src[0..8]
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("this conversion will always succeed"));
-        let frame_type = header[0];
-        Ok(Some(match frame_type {
-            0x00 => {
-                return Err(WALError::MaybeEnded);
-            }
-            0x01 => {
-                let len: usize = Self::get_u64(header).numeric_cast();
-                if src.len() < 8 + len {
-                    return Ok(None);
-                }
-                let payload = &src[8..8 + len];
-                let entry: LogEntry<C> = bincode::deserialize(payload)
-                    .map_err(|e| WALError::Corrupted(CorruptType::Codec(e.to_string())))?;
-                (Self::Data(DataFrame::Entry(entry)), 8 + len)
-            }
-            0x02 => {
-                let index = Self::get_u64(header);
-                (Self::Data(DataFrame::SealIndex(index)), 8)
-            }
-            0x03 => {
-                if src.len() < 8 + 32 {
-                    return Ok(None);
-                }
-                let checksum = src[8..8 + 32].to_vec();
-                (Self::Commit(CommitFrame { checksum }), 8 + 32)
-            }
-            _ => {
-                return Err(WALError::Corrupted(CorruptType::Codec(
-                    "Unexpected frame type".to_string(),
-                )));
-            }
-        }))
-    }
-
-    /// Gets log index or length encoded using 7 bytes
-    fn get_u64(mut header: [u8; 8]) -> u64 {
-        header.rotate_left(1);
-        header[7] = 0;
-        u64::from_le_bytes(header)
-    }
 }
 
 /// The data frame
@@ -98,6 +49,177 @@ pub(crate) enum DataFrame<C> {
     Entry(LogEntry<C>),
     /// A Frame containing the sealed index
     SealIndex(LogIndex),
+}
+
+/// The commit frame
+///
+/// This frames contains a SHA256 checksum of all previous frames since last commit
+#[derive(Debug)]
+struct CommitFrame {
+    /// The SHA256 checksum
+    checksum: Vec<u8>,
+}
+
+impl<C> WAL<C> {
+    /// Creates a new WAL codec
+    pub(super) fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Get encoded length and padding length
+    ///
+    /// This is used to prevent torn write by forcing 8-bit alignment
+    #[allow(unused, clippy::integer_arithmetic)] // TODO: 8bit alignment
+    fn encode_frame_size(data_len: usize) -> (usize, usize) {
+        let mut encoded_len = data_len;
+        let pad_len = (8 - data_len % 8) % 8;
+        if pad_len != 0 {
+            // encode padding info
+            encoded_len |= (0x80 | pad_len) << 56;
+        }
+        (encoded_len, pad_len)
+    }
+}
+
+impl<C> Encoder<Vec<DataFrame<C>>> for WAL<C>
+where
+    C: Serialize,
+{
+    type Error = io::Error;
+
+    fn encode(
+        &mut self,
+        frames: Vec<DataFrame<C>>,
+        dst: &mut bytes::BytesMut,
+    ) -> Result<(), Self::Error> {
+        let frames_bytes: Vec<_> = frames.into_iter().flat_map(|f| f.encode()).collect();
+        let commit_frame = CommitFrame::new_from_data(&frames_bytes);
+
+        dst.extend(frames_bytes);
+        dst.extend(commit_frame.encode());
+
+        Ok(())
+    }
+}
+
+impl<C> Decoder for WAL<C>
+where
+    C: Serialize + for<'a> Deserialize<'a>,
+{
+    type Item = Vec<DataFrame<C>>;
+
+    type Error = WALError;
+
+    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        let mut frames = vec![];
+        loop {
+            match WALFrame::<C>::decode(src)? {
+                Some((frame, len)) => {
+                    let _ignore = src.split_to(len);
+                    match frame {
+                        WALFrame::Data(data) => {
+                            frames.push(data);
+                        }
+                        WALFrame::Commit(commit) => {
+                            let frames_bytes: Vec<_> =
+                                frames.iter().flat_map(DataFrame::encode).collect();
+                            if commit.validate(&frames_bytes) {
+                                return Ok(Some(frames));
+                            }
+                            return Err(WALError::Corrupted(CorruptType::Checksum));
+                        }
+                    }
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+}
+
+#[allow(clippy::indexing_slicing, clippy::integer_arithmetic)] // The indexing is safe, and
+                                                               // arithmetic are checked
+impl<C> WALFrame<C>
+where
+    C: for<'a> Deserialize<'a>,
+{
+    /// Decodes a frame from the buffer
+    ///
+    /// * The frame header memory layout
+    ///
+    /// 0      1      2      3      4      5      6      7      8
+    /// |------+------+------+------+------+------+------+------|
+    /// | Type | Length / Index / Reserved                      |
+    /// |------+------+------+------+------+------+------+------|
+    ///
+    /// * The frame types
+    ///
+    /// |------------+-------+-------------------------------------------------------|
+    /// | Type       | Value | Desc                                                  |
+    /// |------------+-------+-------------------------------------------------------|
+    /// | Invalid    |  0x00 | Invalid type                                          |
+    /// | Entry      |  0x01 | Stores record of CURP log entry                       |
+    /// | Seal Index |  0x02 | Stores the highest index of this current sealed frame |
+    /// | Commit     |  0x03 | Stores the checksum                                   |
+    /// |------------+-------+-------------------------------------------------------|
+    fn decode(src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
+        if src.len() < 8 {
+            return Ok(None);
+        }
+        let header: [u8; 8] = src[0..8]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("this conversion will always succeed"));
+        let frame_type = header[0];
+        match frame_type {
+            0x00 => return Err(WALError::MaybeEnded),
+            0x01 => Self::decode_entry(header, &src[8..]),
+            0x02 => Self::decode_seal_index(header),
+            0x03 => Self::decode_commit(&src[8..]),
+            _ => {
+                return Err(WALError::Corrupted(CorruptType::Codec(
+                    "Unexpected frame type".to_string(),
+                )));
+            }
+        }
+    }
+
+    /// Decodes an entry frame from source
+    fn decode_entry(header: [u8; 8], src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
+        let len: usize = Self::get_u64(header).numeric_cast();
+        if src.len() < len {
+            return Ok(None);
+        }
+        let payload = &src[..len];
+        let entry: LogEntry<C> = bincode::deserialize(payload)
+            .map_err(|e| WALError::Corrupted(CorruptType::Codec(e.to_string())))?;
+
+        Ok(Some((Self::Data(DataFrame::Entry(entry)), 8 + len)))
+    }
+
+    /// Decodes an seal index frame from source
+    fn decode_seal_index(header: [u8; 8]) -> Result<Option<(Self, usize)>, WALError> {
+        let index = Self::get_u64(header);
+
+        Ok(Some((Self::Data(DataFrame::SealIndex(index)), 8)))
+    }
+
+    /// Decodes an commmit frame from source
+    fn decode_commit(src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
+        if src.len() < 32 {
+            return Ok(None);
+        }
+        let checksum = src[..32].to_vec();
+
+        Ok(Some((Self::Commit(CommitFrame { checksum }), 8 + 32)))
+    }
+
+    /// Gets log index or length encoded using 7 bytes
+    fn get_u64(mut header: [u8; 8]) -> u64 {
+        header.rotate_left(1);
+        header[7] = 0;
+        u64::from_le_bytes(header)
+    }
 }
 
 impl<C> FrameType for DataFrame<C> {
@@ -137,15 +259,6 @@ where
     }
 }
 
-/// The commit frame
-///
-/// This frames contains a SHA256 checksum of all previous frames since last commit
-#[derive(Debug)]
-struct CommitFrame {
-    /// The SHA256 checksum
-    checksum: Vec<u8>,
-}
-
 impl CommitFrame {
     /// Creates a commit frame of data
     fn new_from_data(data: &[u8]) -> Self {
@@ -180,91 +293,6 @@ impl FrameEncoder for CommitFrame {
     }
 }
 
-/// The WAL codec
-#[derive(Debug)]
-pub(crate) struct Wal<C> {
-    /// The phantom data
-    _phantom: PhantomData<C>,
-}
-
-impl<C> Encoder<Vec<DataFrame<C>>> for Wal<C>
-where
-    C: Serialize,
-{
-    type Error = io::Error;
-
-    fn encode(
-        &mut self,
-        frames: Vec<DataFrame<C>>,
-        dst: &mut bytes::BytesMut,
-    ) -> Result<(), Self::Error> {
-        let frames_bytes: Vec<_> = frames.into_iter().flat_map(|f| f.encode()).collect();
-        let commit_frame = CommitFrame::new_from_data(&frames_bytes);
-
-        dst.extend(frames_bytes);
-        dst.extend(commit_frame.encode());
-
-        Ok(())
-    }
-}
-
-impl<C> Decoder for Wal<C>
-where
-    C: Serialize + for<'a> Deserialize<'a>,
-{
-    type Item = Vec<DataFrame<C>>;
-
-    type Error = WALError;
-
-    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        let mut frames = vec![];
-        loop {
-            match WALFrame::<C>::decode(src)? {
-                Some((frame, len)) => {
-                    let _ignore = src.split_to(len);
-                    match frame {
-                        WALFrame::Data(data) => {
-                            frames.push(data);
-                        }
-                        WALFrame::Commit(commit) => {
-                            let frames_bytes: Vec<_> =
-                                frames.iter().flat_map(DataFrame::encode).collect();
-                            if commit.validate(&frames_bytes) {
-                                return Ok(Some(frames));
-                            }
-                            return Err(WALError::Corrupted(CorruptType::Checksum));
-                        }
-                    }
-                }
-                None => return Ok(None),
-            }
-        }
-    }
-}
-
-impl<C> Wal<C> {
-    /// Creates a new WAL codec
-    pub(super) fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Get encoded length and padding length
-    ///
-    /// This is used to prevent torn write by forcing 8-bit alignment
-    #[allow(unused, clippy::integer_arithmetic)] // TODO: 8bit alignment
-    fn encode_frame_size(data_len: usize) -> (usize, usize) {
-        let mut encoded_len = data_len;
-        let pad_len = (8 - data_len % 8) % 8;
-        if pad_len != 0 {
-            // encode padding info
-            encoded_len |= (0x80 | pad_len) << 56;
-        }
-        (encoded_len, pad_len)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use curp_external_api::cmd::ProposeId;
@@ -285,7 +313,7 @@ mod tests {
     #[tokio::test]
     async fn frame_encode_decode_is_ok() {
         let file = TokioFile::from(tempfile().unwrap());
-        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
         let entry = LogEntry::<TestCommand>::new(1, 1, EntryData::Empty(ProposeId(1, 2)));
         let data_frame = DataFrame::Entry(entry.clone());
         let seal_frame = DataFrame::<TestCommand>::SealIndex(1);
@@ -295,7 +323,7 @@ mod tests {
 
         let mut file = framed.into_inner();
         file.seek(io::SeekFrom::Start(0)).await.unwrap();
-        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
 
         let data_frame_get = &framed.next().await.unwrap().unwrap()[0];
         let seal_frame_get = &framed.next().await.unwrap().unwrap()[0];
@@ -313,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn frame_zero_write_will_be_detected() {
         let file = TokioFile::from(tempfile().unwrap());
-        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
         let entry = LogEntry::<TestCommand>::new(1, 1, EntryData::Empty(ProposeId(1, 2)));
         let data_frame = DataFrame::Entry(entry.clone());
         framed.send(vec![data_frame]).await.unwrap();
@@ -327,7 +355,7 @@ mod tests {
 
         file.seek(io::SeekFrom::Start(0)).await.unwrap();
 
-        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
 
         let err = framed.next().await.unwrap().unwrap_err();
         assert!(matches!(err, WALError::MaybeEnded), "error {err} not match");
@@ -336,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn frame_corrupt_will_be_detected() {
         let file = TokioFile::from(tempfile().unwrap());
-        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
         let entry = LogEntry::<TestCommand>::new(1, 1, EntryData::Empty(ProposeId(1, 2)));
         let data_frame = DataFrame::Entry(entry.clone());
         framed.send(vec![data_frame]).await.unwrap();
@@ -349,7 +377,7 @@ mod tests {
 
         file.seek(io::SeekFrom::Start(0)).await.unwrap();
 
-        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
 
         let err = framed.next().await.unwrap().unwrap_err();
         assert!(
