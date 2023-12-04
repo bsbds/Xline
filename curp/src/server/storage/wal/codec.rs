@@ -10,7 +10,7 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::log_entry::LogEntry;
 
 use super::{
-    error::{CorruptType, WALError},
+    error::{CorruptError, WALError},
     util::{get_checksum, validate_data},
 };
 
@@ -40,7 +40,7 @@ trait FrameEncoder {
 #[derive(Debug)]
 pub(super) struct WAL<C, H = Sha256> {
     /// Frames stored in decoding
-    frames: Vec<DataFrame<C>>,
+    frames: Vec<DataFrameOwned<C>>,
     /// The hasher state for decoding
     hasher: H,
 }
@@ -49,7 +49,7 @@ pub(super) struct WAL<C, H = Sha256> {
 #[derive(Debug)]
 enum WALFrame<C> {
     /// Data frame type
-    Data(DataFrame<C>),
+    Data(DataFrameOwned<C>),
     /// Commit frame type
     Commit(CommitFrame),
 }
@@ -59,9 +59,21 @@ enum WALFrame<C> {
 /// Contains either a log entry or a seal index
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
-pub(crate) enum DataFrame<C> {
+pub(super) enum DataFrameOwned<C> {
     /// A Frame containing a log entry
     Entry(LogEntry<C>),
+    /// A Frame containing the sealed index
+    SealIndex(LogIndex),
+}
+
+/// The data frame
+///
+/// Contains either a log entry or a seal index
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub(super) enum DataFrame<'a, C> {
+    /// A Frame containing a log entry
+    Entry(&'a LogEntry<C>),
     /// A Frame containing the sealed index
     SealIndex(LogIndex),
 }
@@ -99,7 +111,7 @@ impl<C> WAL<C> {
     }
 }
 
-impl<C> Encoder<Vec<DataFrame<C>>> for WAL<C>
+impl<C> Encoder<Vec<DataFrame<'_, C>>> for WAL<C>
 where
     C: Serialize,
 {
@@ -107,7 +119,7 @@ where
 
     fn encode(
         &mut self,
-        frames: Vec<DataFrame<C>>,
+        frames: Vec<DataFrame<'_, C>>,
         dst: &mut bytes::BytesMut,
     ) -> Result<(), Self::Error> {
         let frames_bytes: Vec<_> = frames.into_iter().flat_map(|f| f.encode()).collect();
@@ -124,7 +136,7 @@ impl<C> Decoder for WAL<C>
 where
     C: Serialize + DeserializeOwned,
 {
-    type Item = Vec<DataFrame<C>>;
+    type Item = Vec<DataFrameOwned<C>>;
 
     type Error = WALError;
 
@@ -138,14 +150,12 @@ where
                         self.hasher.update(decoded_bytes);
                     }
                     WALFrame::Commit(commit) => {
-                        let frames_bytes: Vec<_> =
-                            self.frames.iter().flat_map(DataFrame::encode).collect();
                         let checksum = self.hasher.clone().finalize();
                         self.hasher.reset();
                         if commit.validate(&checksum) {
                             return Ok(Some(self.frames.drain(..).collect()));
                         }
-                        return Err(WALError::Corrupted(CorruptType::Checksum));
+                        return Err(WALError::Corrupted(CorruptError::Checksum));
                     }
                 }
             } else {
@@ -195,8 +205,8 @@ where
             INVALID => Err(WALError::MaybeEnded),
             ENTRY => Self::decode_entry(header, &src[8..]),
             SEAL => Self::decode_seal_index(header),
-            COMMIT => Self::decode_commit(&src[8..]),
-            _ => Err(WALError::Corrupted(CorruptType::Codec(
+            COMMIT => Self::decode_commit(header, &src[8..]),
+            _ => Err(WALError::Corrupted(CorruptError::Codec(
                 "Unexpected frame type".to_owned(),
             ))),
         }
@@ -210,23 +220,29 @@ where
         }
         let payload = &src[..len];
         let entry: LogEntry<C> = bincode::deserialize(payload)
-            .map_err(|e| WALError::Corrupted(CorruptType::Codec(e.to_string())))?;
+            .map_err(|e| WALError::Corrupted(CorruptError::Codec(e.to_string())))?;
 
-        Ok(Some((Self::Data(DataFrame::Entry(entry)), 8 + len)))
+        Ok(Some((Self::Data(DataFrameOwned::Entry(entry)), 8 + len)))
     }
 
     /// Decodes an seal index frame from source
     fn decode_seal_index(header: [u8; 8]) -> Result<Option<(Self, usize)>, WALError> {
         let index = Self::decode_u64_from_header(header);
 
-        Ok(Some((Self::Data(DataFrame::SealIndex(index)), 8)))
+        Ok(Some((Self::Data(DataFrameOwned::SealIndex(index)), 8)))
     }
 
-    /// Decodes a commit frame from source
-    fn decode_commit(src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
+    /// Decodes an commit frame from source
+    fn decode_commit(header: [u8; 8], src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
         if src.len() < 32 {
             return Ok(None);
         }
+        if !header.iter().skip(1).all(|b| *b == 0) {
+            return Err(WALError::Corrupted(CorruptError::Codec(
+                "Bitflip detected in commit frame header".to_owned(),
+            )));
+        }
+
         let checksum = src[..32].to_vec();
 
         Ok(Some((Self::Commit(CommitFrame { checksum }), 8 + 32)))
@@ -243,7 +259,23 @@ where
     }
 }
 
-impl<C> FrameType for DataFrame<C> {
+impl<C> DataFrameOwned<C> {
+    /// Converts `DataFrameOwned` to `DataFrame`
+    pub(super) fn to_ref(&self) -> DataFrame<'_, C> {
+        match *self {
+            DataFrameOwned::Entry(ref entry) => DataFrame::Entry(entry),
+            DataFrameOwned::SealIndex(index) => DataFrame::SealIndex(index),
+        }
+    }
+}
+
+impl<C> FrameType for DataFrameOwned<C> {
+    fn frame_type(&self) -> u8 {
+        self.to_ref().frame_type()
+    }
+}
+
+impl<C> FrameType for DataFrame<'_, C> {
     fn frame_type(&self) -> u8 {
         match *self {
             DataFrame::Entry(_) => ENTRY,
@@ -252,14 +284,14 @@ impl<C> FrameType for DataFrame<C> {
     }
 }
 
-impl<C> FrameEncoder for DataFrame<C>
+impl<C> FrameEncoder for DataFrame<'_, C>
 where
     C: Serialize,
 {
     #[allow(clippy::integer_arithmetic)] // The integer shift is safe
     fn encode(&self) -> Vec<u8> {
         match *self {
-            DataFrame::Entry(ref entry) => {
+            DataFrame::Entry(entry) => {
                 let entry_bytes = bincode::serialize(entry)
                     .unwrap_or_else(|_| unreachable!("serialization should never fail"));
                 let len = entry_bytes.len();
@@ -310,92 +342,274 @@ impl FrameEncoder for CommitFrame {
 #[cfg(test)]
 mod tests {
     use curp_test_utils::test_cmd::TestCommand;
-    use futures::SinkExt;
+    use futures::{future::join_all, FutureExt, SinkExt};
     use tempfile::tempfile;
     use tokio::{
         fs::File as TokioFile,
-        io::{AsyncSeekExt, AsyncWriteExt, DuplexStream},
+        io::{AsyncSeekExt, AsyncWrite, AsyncWriteExt, DuplexStream},
     };
     use tokio_stream::StreamExt;
     use tokio_util::codec::Framed;
 
-    use crate::{log_entry::EntryData, rpc::ProposeId};
+    use crate::{log_entry::EntryData, server::storage::wal::test_util::EntryGenerator};
 
     use super::*;
 
     #[tokio::test]
     async fn frame_encode_decode_is_ok() {
-        let file = TokioFile::from(tempfile().unwrap());
-        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
-        let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
-        let data_frame = DataFrame::Entry(entry.clone());
-        let seal_frame = DataFrame::<TestCommand>::SealIndex(1);
-        framed.send(vec![data_frame]).await.unwrap();
-        framed.send(vec![seal_frame]).await.unwrap();
-        framed.get_mut().flush().await;
+        let mut buffer = IOBuffer::new_empty();
+        let mut framed = Framed::new(buffer.new_cursor(), WAL::<TestCommand>::new());
+        let mut entry_gen = EntryGenerator::new(0);
+        let num_entry_frames = 100;
+        let num_seal_frames = 100;
 
-        let mut file = framed.into_inner();
-        file.seek(io::SeekFrom::Start(0)).await.unwrap();
-        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
+        let entry_frames = send_entry_frames(&mut framed, &mut entry_gen, num_entry_frames).await;
+        let seal_frames = send_seal_frames(&mut framed, num_entry_frames).await;
 
-        let data_frame_get = &framed.next().await.unwrap().unwrap()[0];
-        let seal_frame_get = &framed.next().await.unwrap().unwrap()[0];
-        let DataFrame::Entry(ref entry_get) = *data_frame_get else {
-            panic!("frame should be type: DataFrame::Entry");
-        };
-        let DataFrame::SealIndex(ref index) = *seal_frame_get else {
-            panic!("frame should be type: DataFrame::Entry");
-        };
+        let mut framed = Framed::new(buffer.new_cursor(), WAL::<TestCommand>::new());
 
-        assert_eq!(*entry_get, entry);
-        assert_eq!(*index, 1);
+        let frames: Vec<_> = framed
+            .collect::<Result<Vec<_>, _>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let (entry_frames_decoded, seal_frames_decoded) = frames.split_at(num_entry_frames);
+        assert_eq!(entry_frames, entry_frames_decoded);
+        assert_eq!(seal_frames, seal_frames_decoded);
+    }
+
+    #[tokio::test]
+    async fn wal_will_end_at_read_zero() {
+        let mut buffer = IOBuffer::alloc(1024);
+        let mut framed = Framed::new(buffer.new_cursor(), WAL::<TestCommand>::new());
+        let mut entry_gen = EntryGenerator::new(0);
+
+        let _e = send_entry_frames(&mut framed, &mut entry_gen, 1).await;
+
+        let mut framed = Framed::new(buffer.new_cursor(), WAL::<TestCommand>::new());
+
+        assert!(framed.next().await.unwrap().is_ok());
+        let err = framed.next().await.unwrap().unwrap_err();
+        assert!(matches!(err, WALError::MaybeEnded), "error {err} not match");
     }
 
     #[tokio::test]
     async fn frame_zero_write_will_be_detected() {
-        let file = TokioFile::from(tempfile().unwrap());
-        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
-        let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
-        let data_frame = DataFrame::Entry(entry.clone());
-        framed.send(vec![data_frame]).await.unwrap();
-        framed.get_mut().flush().await;
+        let mut buffer = IOBuffer::new_empty();
+        let mut framed = Framed::new(buffer.new_cursor(), WAL::<TestCommand>::new());
+        let mut entry_gen = EntryGenerator::new(0);
 
-        let mut file = framed.into_inner();
+        let _e = send_entry_frames(&mut framed, &mut entry_gen, 1).await;
+
         /// zero the first byte, it will reach a success state,
         /// all following data will be truncated
-        file.seek(io::SeekFrom::Start(0)).await.unwrap();
-        file.write_u8(0).await;
-
-        file.seek(io::SeekFrom::Start(0)).await.unwrap();
-
-        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
+        let mut framed = Framed::new(
+            buffer.new_cursor_with(IOBuffer::zero_offset(0, 1)),
+            WAL::<TestCommand>::new(),
+        );
 
         let err = framed.next().await.unwrap().unwrap_err();
         assert!(matches!(err, WALError::MaybeEnded), "error {err} not match");
     }
 
     #[tokio::test]
-    async fn frame_corrupt_will_be_detected() {
-        let file = TokioFile::from(tempfile().unwrap());
-        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
-        let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
-        let data_frame = DataFrame::Entry(entry.clone());
-        framed.send(vec![data_frame]).await.unwrap();
+    async fn single_byte_corruption_will_be_detected() {
+        let mut buffer = IOBuffer::new_empty();
+        let mut framed = Framed::new(buffer.new_cursor(), WAL::<TestCommand>::new());
+        let mut entry_gen = EntryGenerator::new(0);
+        let num_entry_frames = 10;
+        let num_seal_frames = 10;
+
+        let _e = send_entry_frames(&mut framed, &mut entry_gen, num_entry_frames).await;
+        let _s = send_seal_frames(&mut framed, num_entry_frames).await;
+
+        for i in 0..buffer.len() {
+            let mut framed = Framed::new(
+                buffer.new_cursor_with(IOBuffer::corrupt_offset(i, 1)),
+                WAL::<TestCommand>::new(),
+            );
+
+            assert!(framed
+                .take(num_entry_frames + num_seal_frames)
+                .collect::<Result<Vec<_>, _>>()
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn spray_corruption_will_be_detected() {
+        let mut buffer = IOBuffer::new_empty();
+        let mut framed = Framed::new(buffer.new_cursor(), WAL::<TestCommand>::new());
+        let mut entry_gen = EntryGenerator::new(0);
+        let num_entry_frames = 100;
+        let num_seal_frames = 100;
+
+        let _e = send_entry_frames(&mut framed, &mut entry_gen, num_entry_frames).await;
+        let _s = send_seal_frames(&mut framed, num_entry_frames).await;
+
+        // Range from 0.01% to 100% with step 0.01%
+        for percentage in (1..=100 * 100).map(|x| x as f64 * 0.01) {
+            let mut framed = Framed::new(
+                buffer.new_cursor_with(IOBuffer::corrupt_spray(percentage)),
+                WAL::<TestCommand>::new(),
+            );
+            assert!(framed
+                .take(num_entry_frames + num_seal_frames)
+                .collect::<Result<Vec<_>, _>>()
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn unsynced_data_will_be_truncate() {
+        let mut buffer = IOBuffer::new_empty();
+        let mut framed = Framed::new(buffer.new_cursor(), WAL::<TestCommand>::new());
+        let mut entry_gen = EntryGenerator::new(0);
+        let num_entry_frames = 10;
+        let num_seal_frames = 10;
+
+        let mut all_frames = vec![];
+        all_frames.extend(send_entry_frames(&mut framed, &mut entry_gen, num_entry_frames).await);
+        all_frames.extend(send_seal_frames(&mut framed, num_entry_frames).await);
+
+        let mut frame_nums = vec![];
+        // simulate drop of unsynced data
+        let len = buffer.len();
+        for unsynced_data_len in 1..=len {
+            let mut framed = Framed::new(
+                buffer.new_cursor_with(IOBuffer::zero_offset(
+                    len - unsynced_data_len,
+                    unsynced_data_len,
+                )),
+                WAL::<TestCommand>::new(),
+            );
+
+            let frames: Vec<_> = framed
+                .take_while(|res| res.is_ok())
+                .collect::<Result<Vec<_>, _>>()
+                .await
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .collect();
+
+            assert!(all_frames.iter().zip(frames.iter()).all(|(x, y)| x == y));
+            frame_nums.push(frames.len());
+        }
+
+        // frames num recoverd is non ascending
+        assert!(frame_nums
+            .iter()
+            .zip(frame_nums.iter().skip(1))
+            .all(|(x, y)| *x >= *y));
+    }
+
+    async fn send_entry_frames<T: AsyncWrite + Unpin>(
+        framed: &mut Framed<T, WAL<TestCommand>>,
+        entry_gen: &mut EntryGenerator,
+        num: usize,
+    ) -> Vec<DataFrameOwned<TestCommand>> {
+        let entry_frames: Vec<_> = entry_gen
+            .take(num)
+            .into_iter()
+            .map(|e| DataFrameOwned::Entry(e))
+            .collect();
+        framed
+            .send(entry_frames.iter().map(DataFrameOwned::to_ref).collect())
+            .await
+            .unwrap();
         framed.get_mut().flush().await;
+        entry_frames
+    }
 
-        let mut file = framed.into_inner();
-        /// This will cause a failure state
-        file.seek(io::SeekFrom::Start(1)).await.unwrap();
-        file.write_u8(0).await;
+    async fn send_seal_frames<T: AsyncWrite + Unpin>(
+        framed: &mut Framed<T, WAL<TestCommand>>,
+        num: usize,
+    ) -> Vec<DataFrameOwned<TestCommand>> {
+        let seal_frames: Vec<_> = (1..=num)
+            .map(|i| DataFrameOwned::<TestCommand>::SealIndex(i as u64))
+            .collect();
+        framed
+            .send(seal_frames.iter().map(DataFrameOwned::to_ref).collect())
+            .await
+            .unwrap();
+        framed.get_mut().flush().await;
+        seal_frames
+    }
 
-        file.seek(io::SeekFrom::Start(0)).await.unwrap();
+    type CorruptFn = Box<dyn Fn(Vec<u8>) -> Vec<u8>>;
 
-        let mut framed = Framed::new(file, WAL::<TestCommand>::new());
+    struct IOBuffer {
+        inner: Vec<u8>,
+    }
 
-        let err = framed.next().await.unwrap().unwrap_err();
-        assert!(
-            matches!(err, WALError::Corrupted(_)),
-            "error {err} not match"
-        );
+    impl IOBuffer {
+        fn new_empty() -> Self {
+            Self { inner: vec![] }
+        }
+
+        fn alloc(size: usize) -> Self {
+            Self {
+                inner: vec![0; size],
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+
+        fn new_cursor(&mut self) -> io::Cursor<&mut Vec<u8>> {
+            io::Cursor::new(&mut self.inner)
+        }
+
+        fn new_cursor_with(&self, corrupt_fn: CorruptFn) -> io::Cursor<Vec<u8>> {
+            io::Cursor::new(corrupt_fn(self.inner.clone()))
+        }
+
+        fn zero_offset(offset: usize, len: usize) -> CorruptFn {
+            Box::new(move |mut buf: Vec<u8>| {
+                buf[offset..offset + len].fill(0);
+                buf
+            })
+        }
+
+        fn corrupt_offset(offset: usize, len: usize) -> CorruptFn {
+            Box::new(move |mut buf: Vec<u8>| {
+                for byte in &mut buf[offset..offset + len] {
+                    *byte = !*byte;
+                }
+                buf
+            })
+        }
+
+        fn zero_spray(percentage: f64) -> CorruptFn {
+            Box::new(move |mut buf: Vec<u8>| {
+                let total = buf.len();
+                let zero_num = (total as f64 * percentage) as usize;
+                for chunk in buf.chunks_mut(zero_num) {
+                    chunk.fill(0);
+                }
+                buf
+            })
+        }
+
+        fn corrupt_spray(percentage: f64) -> CorruptFn {
+            Box::new(move |mut buf: Vec<u8>| {
+                let total = buf.len();
+                let corrupt_num = (total as f64 * percentage) as usize;
+                for (i, chunk) in buf.chunks_mut(corrupt_num).enumerate() {
+                    // make it more evenly distributed while keepping test deteminisim
+                    let pos = i % chunk.len();
+                    let flip_pos = i % 8;
+                    chunk[pos] = chunk[pos] ^ (1 << flip_pos);
+                }
+                buf
+            })
+        }
     }
 }
