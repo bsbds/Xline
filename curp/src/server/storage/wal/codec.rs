@@ -9,7 +9,10 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::log_entry::LogEntry;
 
-use super::error::{CorruptType, WALError};
+use super::{
+    error::{CorruptType, WALError},
+    util::{get_checksum, validate_data},
+};
 
 /// Getting the frame type
 trait FrameType {
@@ -115,24 +118,23 @@ where
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let mut frames = vec![];
         loop {
-            match WALFrame::<C>::decode(src)? {
-                Some((frame, len)) => {
-                    let _ignore = src.split_to(len);
-                    match frame {
-                        WALFrame::Data(data) => {
-                            frames.push(data);
+            if let Some((frame, len)) = WALFrame::<C>::decode(src)? {
+                let _ignore = src.split_to(len);
+                match frame {
+                    WALFrame::Data(data) => {
+                        frames.push(data);
+                    }
+                    WALFrame::Commit(commit) => {
+                        let frames_bytes: Vec<_> =
+                            frames.iter().flat_map(DataFrame::encode).collect();
+                        if commit.validate(&frames_bytes) {
+                            return Ok(Some(frames));
                         }
-                        WALFrame::Commit(commit) => {
-                            let frames_bytes: Vec<_> =
-                                frames.iter().flat_map(DataFrame::encode).collect();
-                            if commit.validate(&frames_bytes) {
-                                return Ok(Some(frames));
-                            }
-                            return Err(WALError::Corrupted(CorruptType::Checksum));
-                        }
+                        return Err(WALError::Corrupted(CorruptType::Checksum));
                     }
                 }
-                None => return Ok(None),
+            } else {
+                return Ok(None);
             }
         }
     }
@@ -263,20 +265,13 @@ impl CommitFrame {
     /// Creates a commit frame of data
     fn new_from_data(data: &[u8]) -> Self {
         Self {
-            checksum: Self::get_checksum(data),
+            checksum: get_checksum(data),
         }
-    }
-
-    /// Gets the checksum of the slice, we use Sha256 as the hash function
-    fn get_checksum(data: &[u8]) -> Vec<u8> {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        hasher.finalize().into_iter().collect()
     }
 
     /// Validate the checksum
     fn validate(&self, data: &[u8]) -> bool {
-        self.checksum == Self::get_checksum(data)
+        validate_data(data, &self.checksum)
     }
 }
 
