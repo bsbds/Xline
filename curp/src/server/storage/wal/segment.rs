@@ -68,7 +68,7 @@ impl WALSegment {
         size_limit: u64,
     ) -> io::Result<Self> {
         let segment_name = Self::segment_name(segment_id, base_index);
-        let lfile = tmp_file.rename(segment_name)?;
+        let mut lfile = tmp_file.rename(segment_name)?;
         let mut tokio_file = lfile.into_async();
         tokio_file
             .write_all(&Self::gen_header(base_index, segment_id))
@@ -89,7 +89,7 @@ impl WALSegment {
     }
 
     /// Open an existing WAL segment file
-    pub(super) async fn open(lfile: LockedFile, size_limit: u64) -> Result<Self, WALError> {
+    pub(super) async fn open(mut lfile: LockedFile, size_limit: u64) -> Result<Self, WALError> {
         let mut tokio_file = lfile.into_async();
         let size = tokio_file.metadata().await?.len();
         let mut buf = vec![0; WAL_HEADER_SIZE];

@@ -148,7 +148,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut pipline = FilePipeline::new(dir.as_ref().into(), file_size);
 
-        let check_size = |file: LockedFile| {
+        let check_size = |mut file: LockedFile| {
             let file = file.into_std();
             assert_eq!(file.metadata().unwrap().len(), file_size,);
         };

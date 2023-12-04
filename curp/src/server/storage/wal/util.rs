@@ -9,11 +9,10 @@ use sha2::{Digest, Sha256};
 use tokio::fs::File as TokioFile;
 
 /// File that is exclusively locked
-// TODO: when the locked file is dropped, we should make sure that the file is properly deleted
 #[derive(Debug)]
 pub(super) struct LockedFile {
     /// The inner std file
-    file: StdFile,
+    file: Option<StdFile>,
     /// The path of the file
     path: PathBuf,
 }
@@ -29,7 +28,7 @@ impl LockedFile {
         file.try_lock_exclusive()?;
 
         Ok(Self {
-            file,
+            file: Some(file),
             path: path.as_ref().into(),
         })
     }
@@ -40,7 +39,7 @@ impl LockedFile {
             return Ok(());
         }
 
-        self.file.allocate(size)
+        self.file().allocate(size)
     }
 
     /// Get the path of this file
@@ -51,28 +50,43 @@ impl LockedFile {
     /// Rename the current file
     ///
     /// We will discard this file if the rename has failed
-    ///
-    /// TODO: GC the orignal file
-    pub(super) fn rename(self, new_name: impl AsRef<Path>) -> io::Result<Self> {
+    pub(super) fn rename(mut self, new_name: impl AsRef<Path>) -> io::Result<Self> {
         let mut new_path = parent_dir(&self.path)?;
         new_path.push(new_name.as_ref());
         std::fs::rename(&self.path, &new_path)?;
         sync_parent_dir(&new_path)?;
 
         Ok(Self {
-            file: self.file,
+            file: self.file.take(),
             path: PathBuf::from(new_name.as_ref()),
         })
     }
 
     /// Convert self to std file
-    pub(super) fn into_std(self) -> StdFile {
+    pub(super) fn into_std(&mut self) -> StdFile {
         self.file
+            .take()
+            .unwrap_or_else(|| unreachable!("File should always exist after creation"))
     }
 
     /// Convert self to tokio file
-    pub(super) fn into_async(self) -> TokioFile {
-        TokioFile::from_std(self.file)
+    pub(super) fn into_async(&mut self) -> TokioFile {
+        TokioFile::from_std(self.into_std())
+    }
+
+    /// Get's the file wrapped inside an `Option`
+    fn file(&mut self) -> &mut StdFile {
+        self.file
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("File should always exist after creation"))
+    }
+}
+
+impl Drop for LockedFile {
+    fn drop(&mut self) {
+        if self.file.is_some() && is_exist(self.path()) {
+            let _ignore = std::fs::remove_file(self.path());
+        }
     }
 }
 
@@ -144,7 +158,8 @@ mod tests {
 
     #[test]
     fn file_rename_is_ok() {
-        let path = temp_file_path();
+        let mut path = tempfile::tempdir().unwrap().into_path();
+        path.push("file.test");
         let lfile = LockedFile::open_rw(&path).unwrap();
         let new_name = "new_name.test";
         let mut new_path = parent_dir(&path).unwrap();
@@ -156,8 +171,9 @@ mod tests {
 
     #[test]
     fn file_open_is_exclusive() {
-        let path = temp_file_path();
-        let lfile = LockedFile::open_rw(&path).unwrap();
+        let mut path = tempfile::tempdir().unwrap().into_path();
+        path.push("file.test");
+        let mut lfile = LockedFile::open_rw(&path).unwrap();
         let path_str = path.to_str().unwrap();
 
         let mut try_flock_output = Command::new("sh")
@@ -194,11 +210,5 @@ mod tests {
             .into_iter()
             .zip(paths_create.into_iter())
             .all(|(x, y)| x.as_path() == y.as_path()));
-    }
-
-    fn temp_file_path() -> PathBuf {
-        let mut path = tempfile::tempdir().unwrap().into_path();
-        path.push("file.test");
-        path
     }
 }
