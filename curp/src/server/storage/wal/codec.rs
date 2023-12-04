@@ -25,6 +25,8 @@ trait FrameEncoder {
 #[derive(Debug, Error)]
 pub(crate) enum CodecError {
     /// The WAL segment reach on end or has corrupted
+    /// This is considered a success state, as we will safely discard
+    /// all the following data.
     #[error("The WAL segment reach on end or has corrupted")]
     EndOrCorrupted,
     /// The WAL segment has corrupted
@@ -271,5 +273,102 @@ impl<C> Wal<C> {
             encoded_len |= (0x80 | pad_len) << 56;
         }
         (encoded_len, pad_len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use curp_external_api::cmd::ProposeId;
+    use curp_test_utils::test_cmd::TestCommand;
+    use futures::SinkExt;
+    use tempfile::tempfile;
+    use tokio::{
+        fs::File as TokioFile,
+        io::{AsyncSeekExt, AsyncWriteExt, DuplexStream},
+    };
+    use tokio_stream::StreamExt;
+    use tokio_util::codec::Framed;
+
+    use crate::log_entry::EntryData;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn frame_encode_decode_is_ok() {
+        let file = TokioFile::from(tempfile().unwrap());
+        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+        let entry = LogEntry::<TestCommand>::new(1, 1, EntryData::Empty(ProposeId(1, 2)));
+        let data_frame = DataFrame::Entry(entry.clone());
+        let seal_frame = DataFrame::<TestCommand>::SealIndex(1);
+        framed.send(vec![data_frame]).await.unwrap();
+        framed.send(vec![seal_frame]).await.unwrap();
+        framed.get_mut().flush().await;
+
+        let mut file = framed.into_inner();
+        file.seek(io::SeekFrom::Start(0)).await.unwrap();
+        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+
+        let data_frame_get = &framed.next().await.unwrap().unwrap()[0];
+        let seal_frame_get = &framed.next().await.unwrap().unwrap()[0];
+        let DataFrame::Entry(entry_get) = data_frame_get else {
+            panic!("frame should be type: DataFrame::Entry");
+        };
+        let DataFrame::SealIndex(index) = seal_frame_get else {
+            panic!("frame should be type: DataFrame::Entry");
+        };
+
+        assert_eq!(*entry_get, entry);
+        assert_eq!(*index, 1);
+    }
+
+    #[tokio::test]
+    async fn frame_zero_write_will_be_detected() {
+        let file = TokioFile::from(tempfile().unwrap());
+        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+        let entry = LogEntry::<TestCommand>::new(1, 1, EntryData::Empty(ProposeId(1, 2)));
+        let data_frame = DataFrame::Entry(entry.clone());
+        framed.send(vec![data_frame]).await.unwrap();
+        framed.get_mut().flush().await;
+
+        let mut file = framed.into_inner();
+        /// zero the first byte, it will reach a success state,
+        /// all following data will be truncated
+        file.seek(io::SeekFrom::Start(0)).await.unwrap();
+        file.write_u8(0).await;
+
+        file.seek(io::SeekFrom::Start(0)).await.unwrap();
+
+        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+
+        let err = framed.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(err, CodecError::EndOrCorrupted),
+            "error {err} not match"
+        );
+    }
+
+    #[tokio::test]
+    async fn frame_corrupt_will_be_detected() {
+        let file = TokioFile::from(tempfile().unwrap());
+        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+        let entry = LogEntry::<TestCommand>::new(1, 1, EntryData::Empty(ProposeId(1, 2)));
+        let data_frame = DataFrame::Entry(entry.clone());
+        framed.send(vec![data_frame]).await.unwrap();
+        framed.get_mut().flush().await;
+
+        let mut file = framed.into_inner();
+        /// This will cause a failure state
+        file.seek(io::SeekFrom::Start(1)).await.unwrap();
+        file.write_u8(0).await;
+
+        file.seek(io::SeekFrom::Start(0)).await.unwrap();
+
+        let mut framed = Framed::new(file, Wal::<TestCommand>::new());
+
+        let err = framed.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(err, CodecError::Corrupted),
+            "error {err} not match"
+        );
     }
 }
