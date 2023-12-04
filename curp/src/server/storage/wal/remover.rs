@@ -146,3 +146,33 @@ impl SegmentRemover {
         wal_path
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use futures::future::join_all;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn wal_removal_is_ok() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir_path = PathBuf::from(temp_dir.path());
+
+        let mut segments = vec![];
+        let mut file_paths = vec![];
+        for i in 0..10 {
+            let mut file_path = dir_path.clone();
+            file_path.push(format!("{i}.tmp"));
+            let lfile = LockedFile::open_rw(&file_path).unwrap();
+            segments.push(WALSegment::create(lfile, i + 1, i, 0).await.unwrap());
+            file_paths.push(file_path);
+        }
+
+        SegmentRemover::new_removal(&dir_path, segments.iter()).await;
+
+        assert!(
+            file_paths.into_iter().all(|p| !is_exist(p)),
+            "wal segment files partially removed"
+        );
+    }
+}

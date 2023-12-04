@@ -53,10 +53,11 @@ impl LockedFile {
     /// We will discard this file if the rename has failed
     /// TODO: GC the orignal file
     pub(super) fn rename(self, new_name: impl AsRef<Path>) -> io::Result<Self> {
-        let mut new_path = self.path.clone();
-        let _ignore = new_path.pop();
+        let mut new_path = parent_dir(&self.path)?;
         new_path.push(new_name.as_ref());
-        std::fs::rename(&self.path, new_path)?;
+        std::fs::rename(&self.path, &new_path)?;
+        sync_parent_dir(&new_path)?;
+
         Ok(Self {
             file: self.file,
             path: PathBuf::from(new_name.as_ref()),
@@ -89,6 +90,22 @@ pub(super) fn get_file_paths_with_ext(
         }
     }
     Ok(files)
+}
+
+/// Gets the parent dir
+pub(super) fn parent_dir(dir: impl AsRef<Path>) -> io::Result<PathBuf> {
+    let mut parent = PathBuf::from(dir.as_ref());
+    let _ignore = parent.pop();
+    Ok(parent)
+}
+
+/// Fsyncs the parent directory
+pub(super) fn sync_parent_dir(dir: impl AsRef<Path>) -> io::Result<()> {
+    let parent_dir = parent_dir(&dir)?;
+    let parent = std::fs::File::open(dir)?;
+    parent.sync_all()?;
+
+    Ok(())
 }
 
 /// Get the checksum of the slice, we use Sha256 as the hash function
@@ -125,9 +142,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn file_rename_is_ok() {
+        let path = temp_file_path();
+        let lfile = LockedFile::open_rw(&path).unwrap();
+        let new_name = "new_name.test";
+        let mut new_path = parent_dir(&path).unwrap();
+        new_path.push(new_name);
+        lfile.rename(new_name);
+        assert!(!is_exist(path));
+        assert!(is_exist(new_path));
+    }
+
+    #[test]
     fn file_open_is_exclusive() {
-        let mut path = tempfile::tempdir().unwrap().into_path();
-        path.push("file_open.test");
+        let path = temp_file_path();
         let lfile = LockedFile::open_rw(&path).unwrap();
         let path_str = path.to_str().unwrap();
 
@@ -165,5 +193,11 @@ mod tests {
             .into_iter()
             .zip(paths_create.into_iter())
             .all(|(x, y)| x.as_path() == y.as_path()));
+    }
+
+    fn temp_file_path() -> PathBuf {
+        let mut path = tempfile::tempdir().unwrap().into_path();
+        path.push("file.test");
+        path
     }
 }
