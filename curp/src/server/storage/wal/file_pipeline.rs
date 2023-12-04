@@ -81,7 +81,7 @@ impl FilePipeline {
         file_count: &mut usize,
     ) -> io::Result<LockedFile> {
         let fpath = PathBuf::from(dir.as_ref()).join(format!("{}{TEMP_FILE_EXT}", *file_count));
-        let mut locked_file = LockedFile::open_rw(&fpath)?;
+        let mut locked_file = LockedFile::open_rw(fpath)?;
         locked_file.preallocate(file_size)?;
         *file_count = file_count.overflow_add(1);
         Ok(locked_file)

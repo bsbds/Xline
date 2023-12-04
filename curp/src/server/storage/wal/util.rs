@@ -51,7 +51,7 @@ impl LockedFile {
     ///
     /// We will discard this file if the rename has failed
     pub(super) fn rename(mut self, new_name: impl AsRef<Path>) -> io::Result<Self> {
-        let mut new_path = parent_dir(&self.path)?;
+        let mut new_path = parent_dir(&self.path);
         new_path.push(new_name.as_ref());
         std::fs::rename(&self.path, &new_path)?;
         sync_parent_dir(&new_path)?;
@@ -63,14 +63,15 @@ impl LockedFile {
     }
 
     /// Convert self to std file
-    pub(super) fn into_std(&mut self) -> StdFile {
-        self.file
+    pub(super) fn into_std(self) -> StdFile {
+        let mut this = std::mem::ManuallyDrop::new(self);
+        this.file
             .take()
             .unwrap_or_else(|| unreachable!("File should always exist after creation"))
     }
 
     /// Convert self to tokio file
-    pub(super) fn into_async(&mut self) -> TokioFile {
+    pub(super) fn into_async(self) -> TokioFile {
         TokioFile::from_std(self.into_std())
     }
 
@@ -108,15 +109,15 @@ pub(super) fn get_file_paths_with_ext(
 }
 
 /// Gets the parent dir
-pub(super) fn parent_dir(dir: impl AsRef<Path>) -> io::Result<PathBuf> {
+pub(super) fn parent_dir(dir: impl AsRef<Path>) -> PathBuf {
     let mut parent = PathBuf::from(dir.as_ref());
     let _ignore = parent.pop();
-    Ok(parent)
+    parent
 }
 
 /// Fsyncs the parent directory
 pub(super) fn sync_parent_dir(dir: impl AsRef<Path>) -> io::Result<()> {
-    let parent_dir = parent_dir(&dir)?;
+    let parent_dir = parent_dir(&dir);
     let parent = std::fs::File::open(dir)?;
     parent.sync_all()?;
 
@@ -158,11 +159,12 @@ mod tests {
 
     #[test]
     fn file_rename_is_ok() {
-        let mut path = tempfile::tempdir().unwrap().into_path();
+        let mut tempdir = tempfile::tempdir().unwrap();
+        let mut path = PathBuf::from(tempdir.path());
         path.push("file.test");
         let lfile = LockedFile::open_rw(&path).unwrap();
         let new_name = "new_name.test";
-        let mut new_path = parent_dir(&path).unwrap();
+        let mut new_path = parent_dir(&path);
         new_path.push(new_name);
         lfile.rename(new_name);
         assert!(!is_exist(path));
@@ -170,8 +172,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::verbose_file_reads)] // false positive
     fn file_open_is_exclusive() {
-        let mut path = tempfile::tempdir().unwrap().into_path();
+        let mut tempdir = tempfile::tempdir().unwrap();
+        let mut path = PathBuf::from(tempdir.path());
         path.push("file.test");
         let mut lfile = LockedFile::open_rw(&path).unwrap();
         let path_str = path.to_str().unwrap();
@@ -185,9 +189,9 @@ mod tests {
             .unwrap();
         assert_ne!(try_flock_output.status.code().unwrap(), 0);
 
-        let mut file = lfile.into_std();
+        let mut std_file = lfile.into_std();
         let mut buf = String::new();
-        file.read_to_string(&mut buf);
+        std_file.read_to_string(&mut buf);
         assert_eq!(buf.len(), 0);
     }
 

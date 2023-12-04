@@ -27,6 +27,7 @@ trait FrameEncoder {
 }
 
 /// The WAL codec
+#[allow(clippy::upper_case_acronyms)] // The WAL needs to be all upper cases
 #[derive(Debug)]
 pub(crate) struct WAL<C> {
     /// The phantom data
@@ -140,8 +141,11 @@ where
     }
 }
 
-#[allow(clippy::indexing_slicing, clippy::integer_arithmetic)] // The indexing is safe, and
-                                                               // arithmetic are checked
+#[allow(
+    clippy::indexing_slicing, // Index slicings are checked
+    clippy::integer_arithmetic, //  Arithmetics are checked
+    clippy::unnecessary_wraps // Use the wraps to make code more consistenct
+)]
 impl<C> WALFrame<C>
 where
     C: for<'a> Deserialize<'a>,
@@ -174,15 +178,13 @@ where
             .unwrap_or_else(|_| unreachable!("this conversion will always succeed"));
         let frame_type = header[0];
         match frame_type {
-            0x00 => return Err(WALError::MaybeEnded),
+            0x00 => Err(WALError::MaybeEnded),
             0x01 => Self::decode_entry(header, &src[8..]),
             0x02 => Self::decode_seal_index(header),
             0x03 => Self::decode_commit(&src[8..]),
-            _ => {
-                return Err(WALError::Corrupted(CorruptType::Codec(
-                    "Unexpected frame type".to_string(),
-                )));
-            }
+            _ => Err(WALError::Corrupted(CorruptType::Codec(
+                "Unexpected frame type".to_owned(),
+            ))),
         }
     }
 
@@ -322,10 +324,10 @@ mod tests {
 
         let data_frame_get = &framed.next().await.unwrap().unwrap()[0];
         let seal_frame_get = &framed.next().await.unwrap().unwrap()[0];
-        let DataFrame::Entry(entry_get) = data_frame_get else {
+        let DataFrame::Entry(ref entry_get) = *data_frame_get else {
             panic!("frame should be type: DataFrame::Entry");
         };
-        let DataFrame::SealIndex(index) = seal_frame_get else {
+        let DataFrame::SealIndex(ref index) = *seal_frame_get else {
             panic!("frame should be type: DataFrame::Entry");
         };
 

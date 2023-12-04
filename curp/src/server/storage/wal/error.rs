@@ -22,10 +22,13 @@ pub(crate) enum WALError {
 /// The type of the `Corrupted` error
 #[derive(Debug, Error)]
 pub(crate) enum CorruptType {
+    /// Corrupt because of decode failure
     #[error("Error occured when decoding WAL: {0}")]
     Codec(String),
+    /// Corrupt because of checksum failure
     #[error("Checksuming for the file has failed")]
     Checksum,
+    /// Corrupt because of some logs is missing
     #[error("The recovered logs are not continue")]
     LogNotContinue,
 }

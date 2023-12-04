@@ -250,12 +250,10 @@ impl WALSegment {
 
     /// Parse the header from the given buffer
     #[allow(
-        clippy::unwrap_used,
-        clippy::integer_arithmetic,
-        clippy::indexing_slicing
-    )] // * unwrap is used to convert slice to const length and is safe
-       // * index arithmetic cannot overflow
-       // * index slicing is checked
+        clippy::unwrap_used, // Unwraps are used to convert slice to const length and is safe
+        clippy::integer_arithmetic,// Arithmetics cannot overflow
+        clippy::indexing_slicing // Index slicings are checked
+    )]
     fn parse_header(src: &[u8]) -> Result<(LogIndex, u64), WALError> {
         let mut offset = 0;
         let mut next_field = |len: usize| {
@@ -263,7 +261,7 @@ impl WALSegment {
             &src[(offset - len)..offset]
         };
         let parse_error = Err(WALError::Corrupted(CorruptType::Codec(
-            "Segment file header parsing has failed".to_string(),
+            "Segment file header parsing has failed".to_owned(),
         )));
         if src.len() < 56 {
             return parse_error;
