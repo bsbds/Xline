@@ -1,29 +1,29 @@
 #![allow(unused)]
 
-/// WAL errors
-mod error;
-
 /// The WAL codec
 mod codec;
-
-/// File pipeline
-mod file_pipeline;
-
-/// File utils
-mod util;
-
-/// WAL segment
-mod segment;
-
-/// Remover of the segment file
-mod remover;
 
 /// The config for `WALStorage`
 mod config;
 
+/// WAL errors
+mod error;
+
+/// File pipeline
+mod file_pipeline;
+
+/// Remover of the segment file
+mod remover;
+
+/// WAL segment
+mod segment;
+
 /// WAL tests
 #[cfg(test)]
 mod tests;
+
+/// File utils
+mod util;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
