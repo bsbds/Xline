@@ -20,15 +20,18 @@ pub(super) struct LockedFile {
 
 impl LockedFile {
     /// Open the file in read and append mode
-    pub(super) fn open_rw(path: PathBuf) -> io::Result<Self> {
+    pub(super) fn open_rw(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open(path.as_path())?;
+            .open(path.as_ref())?;
         file.try_lock_exclusive()?;
 
-        Ok(Self { file, path })
+        Ok(Self {
+            file,
+            path: path.as_ref().into(),
+        })
     }
 
     /// Pre-allocates the file
@@ -117,7 +120,31 @@ pub(super) fn parse_u64(bytes_le: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::{io::Read, process::Command};
+
     use super::*;
+
+    #[test]
+    fn file_open_is_exclusive() {
+        let mut path = tempfile::tempdir().unwrap().into_path();
+        path.push("file_open.test");
+        let lfile = LockedFile::open_rw(&path).unwrap();
+        let path_str = path.to_str().unwrap();
+
+        let mut try_flock_output = Command::new("sh")
+            .args(&[
+                "-c",
+                &format!("flock --nonblock {path_str} echo some_data >> {path_str}"),
+            ])
+            .output()
+            .unwrap();
+        assert_ne!(try_flock_output.status.code().unwrap(), 0);
+
+        let mut file = lfile.into_std();
+        let mut buf = String::new();
+        file.read_to_string(&mut buf);
+        assert_eq!(buf.len(), 0);
+    }
 
     #[test]
     fn get_file_paths_with_ext_is_ok() {

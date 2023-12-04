@@ -97,7 +97,7 @@ impl SegmentRemover {
             .collect();
         wal_data.append(&mut get_checksum(&wal_data));
 
-        let mut wal = LockedFile::open_rw(wal_path.clone())?.into_async();
+        let mut wal = LockedFile::open_rw(&wal_path)?.into_async();
         wal.write_all(&wal_data).await?;
 
         let to_remove_paths = segments.map(|s| {
