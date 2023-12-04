@@ -176,17 +176,17 @@ mod tests {
 
     #[test]
     fn get_file_paths_with_ext_is_ok() {
-        let dir = "/tmp/wal-test/";
+        let dir = tempfile::tempdir().unwrap();
         let num_paths = 10;
         let paths_create: Vec<_> = (0..num_paths)
             .map(|i| {
-                let mut path = PathBuf::from(dir);
+                let mut path = PathBuf::from(dir.path());
                 path.push(format!("{i}.test"));
                 std::fs::File::create(&path).unwrap();
                 path
             })
             .collect();
-        let mut paths = get_file_paths_with_ext(dir, ".test").unwrap();
+        let mut paths = get_file_paths_with_ext(dir.path(), ".test").unwrap();
         paths.sort();
         assert_eq!(paths.len(), num_paths);
         assert!(paths

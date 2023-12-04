@@ -103,7 +103,8 @@ where
 /// The data frame
 ///
 /// Contains either a log entry or a seal index
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub(crate) enum DataFrame<C> {
     /// A Frame containing a log entry
     Entry(LogEntry<C>),
