@@ -22,6 +22,10 @@ mod segment;
 #[cfg(test)]
 mod sim_tests;
 
+/// WAL test utils
+#[cfg(test)]
+mod test_util;
+
 /// WAL storage tests
 #[cfg(test)]
 mod tests;
