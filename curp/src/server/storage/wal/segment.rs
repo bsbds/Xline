@@ -190,7 +190,7 @@ impl WALSegment {
 
     /// Updates the seal index
     pub(super) fn update_seal_index(&mut self, index: LogIndex) {
-        self.seal_index = self.seal_index.max(index);
+        self.seal_index = self.seal_index.min(index);
     }
 
     /// Get the size of the segment
