@@ -79,8 +79,9 @@ impl SegmentRemover {
     /// Creates a new removal
     pub(super) async fn new_removal(
         dir: impl AsRef<Path>,
-        segments: impl Iterator<Item = &WALSegment> + Clone,
+        segments: Vec<WALSegment>,
     ) -> io::Result<()> {
+        tracing::debug!("removing segments: {segments:?}",);
         let wal_path = Self::rwal_path(&dir);
 
         // We ignore the existing RWAL file if we proceed a new removal
@@ -90,7 +91,7 @@ impl SegmentRemover {
 
         //let file_name = WALSegment::segment_name(segment_id, base_index);
         let mut wal_data: Vec<_> = segments
-            .clone()
+            .iter()
             .flat_map(|s| {
                 s.base_index()
                     .to_le_bytes()
@@ -103,7 +104,7 @@ impl SegmentRemover {
         let mut wal = LockedFile::open_rw(&wal_path)?.into_async();
         wal.write_all(&wal_data).await?;
 
-        let to_remove_paths = segments.map(|s| {
+        let to_remove_paths = segments.iter().map(|s| {
             let mut path = PathBuf::from(dir.as_ref());
             path.push(WALSegment::segment_name(s.id(), s.base_index()));
             path
@@ -171,7 +172,7 @@ mod tests {
             file_paths.push(file_path);
         }
 
-        SegmentRemover::new_removal(&dir_path, segments.iter()).await;
+        SegmentRemover::new_removal(&dir_path, segments).await;
 
         assert!(
             file_paths.into_iter().all(|p| !is_exist(p)),

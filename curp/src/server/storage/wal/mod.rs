@@ -175,18 +175,22 @@ where
             return Ok(());
         }
 
-        let segments: Vec<_> = self
+        debug!("performing head truncation on index: {compact_index}");
+
+        let mut to_remove_num = self
             .segments
             .iter()
             .take_while(|s| s.base_index() <= compact_index)
-            .collect();
+            .count()
+            .checked_sub(1)
+            .unwrap_or(0);
 
-        if segments.is_empty() {
+        if to_remove_num == 0 {
             return Ok(());
         }
 
         // The last segment does not need to be removed
-        let to_remove = segments.into_iter().rev().skip(1);
+        let to_remove: Vec<_> = self.segments.drain(0..to_remove_num).collect();
         SegmentRemover::new_removal(&self.config.dir, to_remove).await?;
 
         Ok(())
@@ -206,7 +210,7 @@ where
         }
 
         let to_remove = self.update_segments();
-        SegmentRemover::new_removal(&self.config.dir, to_remove.iter()).await?;
+        SegmentRemover::new_removal(&self.config.dir, to_remove).await?;
 
         self.next_log_index = max_index.overflow_add(1);
         self.open_new_segment().await?;
