@@ -37,7 +37,7 @@ use futures::{future::join_all, Future, SinkExt, StreamExt};
 use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::codec::Framed;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::log_entry::LogEntry;
 
@@ -78,7 +78,7 @@ struct WALStorage<C> {
 
 impl<C> WALStorage<C>
 where
-    C: Serialize + DeserializeOwned + Unpin + 'static,
+    C: Serialize + DeserializeOwned + Unpin + 'static + std::fmt::Debug,
 {
     /// Recover from the given directory if there's any segments
     /// Otherwise, creates a new `LogStorage`
@@ -111,38 +111,34 @@ where
 
         let pos = Self::highest_valid_pos(&logs[..]);
         if pos != logs.len() {
+            let debug_logs: Vec<_> = logs
+                .iter()
+                .skip(pos.overflow_sub(pos.min(3)))
+                .take(6)
+                .collect();
             warn!(
-                "WAL corrupted: {}, truncated at pos: {pos}",
+                "WAL corrupted: {}, truncated at position: {pos}, logs around this position: {debug_logs:?}",
                 CorruptError::LogNotContinue
             );
             logs.truncate(pos);
         }
 
-        // If there's no segments to recover, create a new segment
-        if segments.is_empty() {
-            let lfile = pipeline
-                .next()
-                .await
-                .ok_or(io::Error::from(io::ErrorKind::BrokenPipe))??;
-            segments.push(WALSegment::create(lfile, 1, 0, config.max_segment_size).await?);
-        }
         let next_segment_id = segments.last().map_or(0, |s| s.id().overflow_add(1));
         let next_log_index = logs.last().map_or(1, |l| l.index.overflow_add(1));
-        debug!(
-            "WAL successfully recovered, next_segment_id: {next_segment_id}, next_log_index: {next_log_index}"
-        );
 
-        Ok((
-            Self {
-                config,
-                pipeline,
-                segments,
-                next_segment_id,
-                next_log_index,
-                _phantom: PhantomData,
-            },
-            logs,
-        ))
+        let mut storage = Self {
+            config,
+            pipeline,
+            segments,
+            next_segment_id,
+            next_log_index,
+            _phantom: PhantomData,
+        };
+
+        storage.open_new_segment().await?;
+        info!("WAL successfully recovered");
+
+        Ok((storage, logs))
     }
 
     /// Send frames with fsync
