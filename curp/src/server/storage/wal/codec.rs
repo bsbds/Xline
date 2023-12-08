@@ -186,7 +186,7 @@ where
             0x00 => Err(WALError::MaybeEnded),
             0x01 => Self::decode_entry(header, &src[8..]),
             0x02 => Self::decode_seal_index(header),
-            0x03 => Self::decode_commit(&src[8..]),
+            0x03 => Self::decode_commit(header, &src[8..]),
             _ => Err(WALError::Corrupted(CorruptError::Codec(
                 "Unexpected frame type".to_owned(),
             ))),
@@ -214,10 +214,16 @@ where
     }
 
     /// Decodes an commit frame from source
-    fn decode_commit(src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
+    fn decode_commit(header: [u8; 8], src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
         if src.len() < 32 {
             return Ok(None);
         }
+        if !header.iter().skip(1).all(|b| *b == 0) {
+            return Err(WALError::Corrupted(CorruptError::Codec(
+                "Bitflip detected in commit frame header".to_owned(),
+            )));
+        }
+
         let checksum = src[..32].to_vec();
 
         Ok(Some((Self::Commit(CommitFrame { checksum }), 8 + 32)))
