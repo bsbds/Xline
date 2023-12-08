@@ -37,7 +37,7 @@ use futures::{future::join_all, Future, SinkExt, StreamExt};
 use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::codec::Framed;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::log_entry::LogEntry;
 
@@ -116,7 +116,7 @@ where
                 .skip(pos.overflow_sub(pos.min(3)))
                 .take(6)
                 .collect();
-            warn!(
+            error!(
                 "WAL corrupted: {}, truncated at position: {pos}, logs around this position: {debug_logs:?}",
                 CorruptError::LogNotContinue
             );
@@ -292,7 +292,7 @@ where
                 Ok(t) => ts.push(t),
                 Err(e) => {
                     let e = e.io_or_corrupt()?;
-                    warn!("WAL corrupted: {e}");
+                    error!("WAL corrupted: {e}");
                 }
             }
         }
