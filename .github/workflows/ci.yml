@@ -3,6 +3,7 @@ name: CI
 on:
   schedule:
     - cron: "00 19 * * *" # run ci periodically at 3 am
+  workflow_dispatch: {}
   pull_request:
     branches: [ master ]
 
