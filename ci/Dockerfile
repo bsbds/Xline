@@ -6,7 +6,8 @@ RUN apt-get update -y --force-yes && \
     DEBIAN_FRONTEND=noninteractive \
     apt-get install -y --force-yes make build-essential cmake curl pkg-config expect \
     openssl libssl-dev lld wget unzip git bash zstd libzstd-dev clang \ 
-    etcd-client parallel && \
+    etcd-client parallel \
+    libfuse3-dev libfuse3-3 fuse3 && \
     rm -rf /var/lib/{apt,dpkg,cache,log}/
 
 # *RUN* commands on bash
@@ -48,6 +49,17 @@ RUN echo "=== Install rusty stuff 🦀️ ===" && \
     make install && \
     cd /xline && \
     rm -rf librocksdb-sys-$LIB_ROCKS_SYS_VER/
+
+# Install LazyFS
+RUN echo "=== Install LazyFS ===" && \
+    git clone --depth 1 --branch 0.2.0 https://github.com/dsrhaslab/lazyfs.git \
+    cd lazyfs/libs/libpcache && ./build.sh && cd - \
+    cd lazyfs/lazyfs && ./build.sh && cd - \
+    echo "user_allow_other" >> /etc/fuse.conf/
+
+# Install Bitflip
+RUN echo "=== Install Bitflip ===" && \
+     curl -L https://github.com/aybabtme/bitflip/releases/download/v0.2.0/bitflip_0.2.0_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin/ \
 
 # Set some environments that librocksdb-sys will use them to skip building rocksdb
 ENV ROCKSDB_STATIC=1
