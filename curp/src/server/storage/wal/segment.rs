@@ -145,8 +145,6 @@ impl WALSegment {
             }
         }
 
-        self_framed.get_mut().reset_offset().await?;
-
         // Update seal index
         self_framed.get_mut().update_seal_index(highest_index);
 
@@ -181,11 +179,6 @@ impl WALSegment {
         self.io_state.fsynced();
 
         Ok(())
-    }
-
-    /// Resets the file offset
-    pub(super) async fn reset_offset(&mut self) -> io::Result<()> {
-        self.file.seek(io::SeekFrom::Start(0)).await.map(|_| ())
     }
 
     /// Updates the seal index
