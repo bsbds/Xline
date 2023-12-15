@@ -585,7 +585,6 @@ mod test {
 
     use std::{collections::BTreeMap, time::Duration};
 
-    use clippy_utilities::Cast;
     use test_macros::abort_on_panic;
     use tokio::time::{sleep, timeout};
     use utils::config::EngineConfig;
@@ -600,7 +599,7 @@ mod test {
         },
     };
 
-    fn init_empty_store(rx: shutdown::Listener) -> (Arc<KvStore<DB>>, Arc<DB>, Arc<KvWatcher<DB>>) {
+    fn init_empty_store(rx: shutdown::Listener) -> (Arc<KvStore<DB>>, Arc<KvWatcher<DB>>) {
         let (compact_tx, _compact_rx) = mpsc::channel(COMPACT_CHANNEL_SIZE);
         let db = DB::open(&EngineConfig::Memory).unwrap();
         let header_gen = Arc::new(HeaderGenerator::new(0, 0));
@@ -618,14 +617,14 @@ mod test {
         let sync_victims_interval = Duration::from_millis(10);
         let kv_watcher =
             KvWatcher::new_arc(kv_store_inner, kv_update_rx, sync_victims_interval, rx);
-        (store, db, kv_watcher)
+        (store, kv_watcher)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     #[abort_on_panic]
     async fn watch_should_not_lost_events() {
         let (tx, rx) = shutdown::channel();
-        let (store, db, kv_watcher) = init_empty_store(rx);
+        let (store, kv_watcher) = init_empty_store(rx);
         let mut map = BTreeMap::new();
         let (event_tx, mut event_rx) = mpsc::channel(128);
         let stop_notify = Arc::new(event_listener::Event::new());
@@ -642,14 +641,7 @@ mod test {
             let store = Arc::clone(&store);
             async move {
                 for i in 0..100_u8 {
-                    put(
-                        store.as_ref(),
-                        db.as_ref(),
-                        "foo",
-                        vec![i],
-                        i.overflow_add(2).cast(),
-                    )
-                    .await;
+                    put(store.as_ref(), "foo", vec![i]).await;
                 }
             }
         });
@@ -682,7 +674,7 @@ mod test {
     #[abort_on_panic]
     async fn test_victim() {
         let (tx, rx) = shutdown::channel();
-        let (store, db, kv_watcher) = init_empty_store(rx);
+        let (store, kv_watcher) = init_empty_store(rx);
         // response channel with capacity 1, so it will be full easily, then we can trigger victim
         let (event_tx, mut event_rx) = mpsc::channel(1);
         let stop_notify = Arc::new(event_listener::Event::new());
@@ -711,7 +703,7 @@ mod test {
         });
 
         for i in 0..100_u8 {
-            put(store.as_ref(), db.as_ref(), "foo", vec![i], i.cast()).await;
+            put(store.as_ref(), "foo", vec![i]).await;
         }
         handle.await.unwrap();
         drop(store);
@@ -722,7 +714,7 @@ mod test {
     #[abort_on_panic]
     async fn test_cancel_watcher() {
         let (tx, rx) = shutdown::channel();
-        let (store, _db, kv_watcher) = init_empty_store(rx);
+        let (store, kv_watcher) = init_empty_store(rx);
         let (event_tx, _event_rx) = mpsc::channel(1);
         let stop_notify = Arc::new(event_listener::Event::new());
         kv_watcher.watch(
@@ -742,13 +734,7 @@ mod test {
         tx.self_shutdown_and_wait().await;
     }
 
-    async fn put(
-        store: &KvStore<DB>,
-        db: &DB,
-        key: impl Into<Vec<u8>>,
-        value: impl Into<Vec<u8>>,
-        revision: i64,
-    ) {
+    async fn put(store: &KvStore<DB>, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) {
         let req = RequestWithToken::new(
             PutRequest {
                 key: key.into(),
@@ -757,8 +743,6 @@ mod test {
             }
             .into(),
         );
-        let (_sync_res, ops) = store.after_sync(&req, revision).await.unwrap();
-        let key_revisions = db.flush_ops(ops).unwrap();
-        store.insert_index(key_revisions);
+        store.after_sync(&req).await.unwrap();
     }
 }

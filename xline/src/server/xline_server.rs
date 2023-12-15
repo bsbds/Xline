@@ -385,8 +385,6 @@ impl XlineServer {
             Arc::clone(&persistent),
             Arc::clone(&index_barrier),
             Arc::clone(&id_barrier),
-            header_gen.general_revision_arc(),
-            header_gen.auth_revision_arc(),
             Arc::clone(&compact_events),
             self.storage_cfg.quota,
             self.cluster_info.self_id(),

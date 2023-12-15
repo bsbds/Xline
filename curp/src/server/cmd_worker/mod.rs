@@ -69,9 +69,7 @@ async fn cmd_worker<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
             TaskType::SpecExe(entry, pre_err) => {
                 worker_exe(entry, pre_err, ce.as_ref(), curp.as_ref()).await
             }
-            TaskType::AS(entry, prepare) => {
-                worker_as(entry, prepare, ce.as_ref(), curp.as_ref()).await
-            }
+            TaskType::AS(entry) => worker_as(entry, ce.as_ref(), curp.as_ref()).await,
             TaskType::Reset(snapshot, finish_tx) => {
                 worker_reset(snapshot, finish_tx, ce.as_ref(), curp.as_ref()).await
             }
@@ -130,7 +128,6 @@ async fn worker_exe<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
 /// Cmd worker after sync handler
 async fn worker_as<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     entry: Arc<LogEntry<C>>,
-    prepare: Option<C::PR>,
     ce: &CE,
     curp: &RawCurp<C, RC>,
 ) -> bool {
@@ -138,10 +135,7 @@ async fn worker_as<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     let id = curp.id();
     let success = match entry.entry_data {
         EntryData::Command(ref cmd) => {
-            let Some(prepare) = prepare else {
-            unreachable!("prepare should always be Some(_) when entry is a command");
-        };
-            let asr = ce.after_sync(cmd.as_ref(), entry.index, prepare).await;
+            let asr = ce.after_sync(cmd.as_ref(), entry.index).await;
             let asr_ok = asr.is_ok();
             cb.write().insert_asr(entry.propose_id, asr);
             sp.lock().remove(&entry.propose_id);
@@ -388,8 +382,7 @@ mod tests {
             EngineConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -431,8 +424,7 @@ mod tests {
             EngineConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -479,8 +471,7 @@ mod tests {
             EngineConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -531,8 +522,7 @@ mod tests {
             EngineConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -573,8 +563,7 @@ mod tests {
             EngineConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -618,8 +607,7 @@ mod tests {
             EngineConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -680,8 +668,7 @@ mod tests {
             EngineConfig::Memory,
         ));
         let (t, l) = shutdown::channel();
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
             Arc::new(RawCurp::new_test(
@@ -745,8 +732,7 @@ mod tests {
             as_tx,
             EngineConfig::Memory,
         ));
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce1), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         let curp = RawCurp::new_test(3, ce_event_tx.clone(), mock_role_change());
         let s2_id = curp.cluster().get_id_by_name("S2").unwrap();
         curp.handle_append_entries(
@@ -797,8 +783,7 @@ mod tests {
             as_tx,
             EngineConfig::Memory,
         ));
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&ce2), t.clone());
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce2),
             Arc::new(RawCurp::new_test(

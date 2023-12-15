@@ -46,15 +46,6 @@ pub trait Command: pri::Serializable + ConflictCheck + PbCodec {
     /// Get keys of the command
     fn keys(&self) -> &[Self::K];
 
-    /// Prepare the command
-    #[inline]
-    fn prepare<E>(&self, e: &E) -> Result<Self::PR, Self::Error>
-    where
-        E: CommandExecutor<Self> + Send + Sync,
-    {
-        <E as CommandExecutor<Self>>::prepare(e, self)
-    }
-
     /// Execute the command according to the executor
     #[inline]
     async fn execute<E>(&self, e: &E) -> Result<Self::ER, Self::Error>
@@ -66,16 +57,11 @@ pub trait Command: pri::Serializable + ConflictCheck + PbCodec {
 
     /// Execute the command after_sync callback
     #[inline]
-    async fn after_sync<E>(
-        &self,
-        e: &E,
-        index: LogIndex,
-        prepare_res: Self::PR,
-    ) -> Result<Self::ASR, Self::Error>
+    async fn after_sync<E>(&self, e: &E, index: LogIndex) -> Result<Self::ASR, Self::Error>
     where
         E: CommandExecutor<Self> + Send + Sync,
     {
-        <E as CommandExecutor<Self>>::after_sync(e, self, index, prepare_res).await
+        <E as CommandExecutor<Self>>::after_sync(e, self, index).await
     }
 }
 
@@ -110,19 +96,11 @@ pub trait CommandExecutor<C>: pri::ThreadSafe
 where
     C: Command,
 {
-    /// Prepare the command
-    fn prepare(&self, cmd: &C) -> Result<C::PR, C::Error>;
-
     /// Execute the command
     async fn execute(&self, cmd: &C) -> Result<C::ER, C::Error>;
 
     /// Execute the after_sync callback
-    async fn after_sync(
-        &self,
-        cmd: &C,
-        index: LogIndex,
-        prepare_res: C::PR,
-    ) -> Result<C::ASR, C::Error>;
+    async fn after_sync(&self, cmd: &C, index: LogIndex) -> Result<C::ASR, C::Error>;
 
     /// Set the index of the last log entry that has been successfully applied to the command executor
     fn set_last_applied(&self, index: LogIndex) -> Result<(), C::Error>;

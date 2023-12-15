@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+use engine::TransactionApi;
 use log::debug;
 use parking_lot::RwLock;
 use prost::Message;
@@ -27,12 +28,13 @@ pub(crate) use self::{lease::Lease, lease_collection::LeaseCollection};
 use super::{db::WriteOp, index::Index, storage_api::StorageApi};
 use crate::{
     header_gen::HeaderGenerator,
+    revision_number::RevisionNumberGenerator,
     rpc::{
         Event, LeaseGrantRequest, LeaseGrantResponse, LeaseLeasesRequest, LeaseLeasesResponse,
         LeaseRevokeRequest, LeaseRevokeResponse, LeaseStatus, PbLease, RequestWithToken,
         RequestWrapper, ResponseHeader, ResponseWrapper,
     },
-    storage::KvStore,
+    storage::{index::IndexTransactionOperate, KvStore},
 };
 
 /// Lease table name
@@ -52,6 +54,8 @@ where
     db: Arc<DB>,
     /// Key to revision index
     index: Arc<Index>,
+    /// Revision
+    revision: Arc<RevisionNumberGenerator>,
     /// Header generator
     header_gen: Arc<HeaderGenerator>,
     /// KV update sender
@@ -81,6 +85,7 @@ where
             lease_collection,
             db,
             index,
+            revision: header_gen.general_revision_arc(),
             header_gen,
             kv_update_tx,
             is_primary: AtomicBool::new(is_leader),
@@ -102,8 +107,12 @@ where
     pub(crate) async fn after_sync(
         &self,
         request: &RequestWithToken,
-        revision: i64,
     ) -> Result<(SyncResponse, Vec<WriteOp>), ExecuteError> {
+        let revision = if request.request.skip_lease_revision() {
+            self.revision.get()
+        } else {
+            self.revision.next()
+        };
         self.sync_request(&request.request, revision)
             .await
             .map(|(rev, ops)| (SyncResponse::new(rev), ops))
@@ -139,7 +148,7 @@ where
 
     /// Generate `ResponseHeader`
     pub(crate) fn gen_header(&self) -> ResponseHeader {
-        self.header_gen.gen_header()
+        self.header_gen.gen_header(false)
     }
 
     /// Demote current node
@@ -243,7 +252,7 @@ where
         _ = self.unsynced_cache.write().insert(req.id);
 
         Ok(LeaseGrantResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_header(false)),
             id: req.id,
             ttl: req.ttl,
             error: String::new(),
@@ -259,7 +268,7 @@ where
             _ = self.unsynced_cache.write().insert(req.id);
 
             Ok(LeaseRevokeResponse {
-                header: Some(self.header_gen.gen_header()),
+                header: Some(self.header_gen.gen_header(false)),
             })
         } else {
             Err(ExecuteError::LeaseNotFound(req.id))
@@ -275,7 +284,7 @@ where
             .collect();
 
         LeaseLeasesResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_header(false)),
             leases,
         }
     }
@@ -347,18 +356,28 @@ where
             return Ok(Vec::new());
         }
 
-        for (key, sub_revision) in del_keys.iter().zip(0..) {
-            let (mut del_ops, mut del_event) = KvStore::<DB>::delete_keys(
-                &self.index,
-                &self.lease_collection,
+        let txn_db = self.db.transaction();
+        let txn_index = self.index.transaction();
+
+        for (key, mut sub_revision) in del_keys.iter().zip(0..) {
+            let deleted = KvStore::<DB>::delete_keys(
+                &txn_db,
+                &txn_index,
                 key,
                 &[],
                 revision,
-                sub_revision,
-            );
-            ops.append(&mut del_ops);
+                &mut sub_revision,
+            )?;
+            KvStore::<DB>::detach_leases(&deleted, &self.lease_collection);
+            let mut del_event = KvStore::<DB>::new_deletion_events(revision, deleted);
             updates.append(&mut del_event);
         }
+
+        txn_db
+            .commit()
+            .await
+            .map_err(|e| ExecuteError::DbError(e.to_string()))?;
+        txn_index.commit();
 
         let _ignore = self.lease_collection.revoke(req.id);
         assert!(
@@ -384,10 +403,9 @@ mod test {
     async fn test_lease_storage() -> Result<(), Box<dyn Error>> {
         let db = DB::open(&EngineConfig::Memory)?;
         let lease_store = init_store(db);
-        let revision_gen = lease_store.header_gen.general_revision_arc();
 
         let req1 = RequestWithToken::new(LeaseGrantRequest { ttl: 10, id: 1 }.into());
-        let _ignore1 = exe_and_sync_req(&lease_store, &req1, -1).await?;
+        let _ignore1 = exe_and_sync_req(&lease_store, &req1).await?;
 
         let lo = lease_store.look_up(1).unwrap();
         assert_eq!(lo.id(), 1);
@@ -401,7 +419,7 @@ mod test {
         lease_store.lease_collection.detach(1, "key".as_bytes())?;
 
         let req2 = RequestWithToken::new(LeaseRevokeRequest { id: 1 }.into());
-        let _ignore2 = exe_and_sync_req(&lease_store, &req2, revision_gen.next()).await?;
+        let _ignore2 = exe_and_sync_req(&lease_store, &req2).await?;
         assert!(lease_store.look_up(1).is_none());
         assert!(lease_store.leases().is_empty());
 
@@ -409,16 +427,16 @@ mod test {
         let req4 = RequestWithToken::new(LeaseGrantRequest { ttl: 10, id: 4 }.into());
         let req5 = RequestWithToken::new(LeaseRevokeRequest { id: 3 }.into());
         let req6 = RequestWithToken::new(LeaseLeasesRequest {}.into());
-        let _ignore3 = exe_and_sync_req(&lease_store, &req3, -1).await?;
-        let _ignore4 = exe_and_sync_req(&lease_store, &req4, -1).await?;
-        let resp_1 = exe_and_sync_req(&lease_store, &req6, -1).await?;
+        let _ignore3 = exe_and_sync_req(&lease_store, &req3).await?;
+        let _ignore4 = exe_and_sync_req(&lease_store, &req4).await?;
+        let resp_1 = exe_and_sync_req(&lease_store, &req6).await?;
 
         let ResponseWrapper::LeaseLeasesResponse(leases_1) = resp_1 else { panic!("wrong response type: {resp_1:?}"); };
         assert_eq!(leases_1.leases[0].id, 3);
         assert_eq!(leases_1.leases[1].id, 4);
 
-        let _ignore5 = exe_and_sync_req(&lease_store, &req5, -1).await?;
-        let resp_2 = exe_and_sync_req(&lease_store, &req6, -1).await?;
+        let _ignore5 = exe_and_sync_req(&lease_store, &req5).await?;
+        let resp_2 = exe_and_sync_req(&lease_store, &req6).await?;
         let ResponseWrapper::LeaseLeasesResponse(leases_2) = resp_2 else { panic!("wrong response type: {resp_2:?}"); };
         assert_eq!(leases_2.leases[0].id, 4);
 
@@ -441,8 +459,8 @@ mod test {
             "the future should block until the lease is synced"
         );
 
-        let (_ignore, ops) = lease_store.after_sync(&req1, -1).await?;
-        _ = lease_store.db.flush_ops(ops)?;
+        let (_ignore, ops) = lease_store.after_sync(&req1).await?;
+        lease_store.db.flush_ops(ops)?;
         lease_store.mark_lease_synced(&req1.request);
 
         assert!(
@@ -462,8 +480,8 @@ mod test {
             "the future should block until the lease is synced"
         );
 
-        let (_ignore, ops) = lease_store.after_sync(&req2, -1).await?;
-        _ = lease_store.db.flush_ops(ops)?;
+        let (_ignore, ops) = lease_store.after_sync(&req2).await?;
+        lease_store.db.flush_ops(ops)?;
         lease_store.mark_lease_synced(&req2.request);
 
         assert!(
@@ -483,7 +501,7 @@ mod test {
         let store = init_store(Arc::clone(&db));
 
         let req1 = RequestWithToken::new(LeaseGrantRequest { ttl: 10, id: 1 }.into());
-        let _ignore1 = exe_and_sync_req(&store, &req1, -1).await?;
+        let _ignore1 = exe_and_sync_req(&store, &req1).await?;
         store.lease_collection.attach(1, "key".into())?;
 
         let new_store = init_store(db);
@@ -512,11 +530,10 @@ mod test {
     async fn exe_and_sync_req(
         ls: &LeaseStore<DB>,
         req: &RequestWithToken,
-        revision: i64,
     ) -> Result<ResponseWrapper, ExecuteError> {
         let cmd_res = ls.execute(req)?;
-        let (_ignore, ops) = ls.after_sync(req, revision).await?;
-        _ = ls.db.flush_ops(ops)?;
+        let (_ignore, ops) = ls.after_sync(req).await?;
+        ls.db.flush_ops(ops)?;
         Ok(cmd_res.into_inner())
     }
 }

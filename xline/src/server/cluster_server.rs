@@ -76,7 +76,7 @@ impl Cluster for ClusterServer {
             }])
             .await?;
         let resp = MemberAddResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_header(false)),
             member: members.iter().find(|m| m.id == node_id).cloned(),
             members,
         };
@@ -96,7 +96,7 @@ impl Cluster for ClusterServer {
             }])
             .await?;
         let resp = MemberRemoveResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_header(false)),
             members,
         };
         Ok(Response::new(resp))
@@ -115,7 +115,7 @@ impl Cluster for ClusterServer {
             }])
             .await?;
         let resp = MemberUpdateResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_header(false)),
             members,
         };
         Ok(Response::new(resp))
@@ -126,7 +126,7 @@ impl Cluster for ClusterServer {
         request: Request<MemberListRequest>,
     ) -> Result<Response<MemberListResponse>, Status> {
         let req = request.into_inner();
-        let header = self.header_gen.gen_header();
+        let header = self.header_gen.gen_header(false);
         let members = self
             .client
             .get_cluster_from_curp(req.linearizable)
@@ -162,7 +162,7 @@ impl Cluster for ClusterServer {
             }])
             .await?;
         let resp = MemberPromoteResponse {
-            header: Some(self.header_gen.gen_header()),
+            header: Some(self.header_gen.gen_header(false)),
             members,
         };
         Ok(Response::new(resp))
