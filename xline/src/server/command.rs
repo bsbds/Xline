@@ -310,6 +310,12 @@ where
         }
     }
 
+    // TODO: implement this
+    #[allow(clippy::unimplemented)] // unused
+    fn pre_after_sync(&self, _cmd: &Command) {
+        unimplemented!()
+    }
+
     async fn after_sync(
         &self,
         cmd: &Command,
@@ -359,6 +365,16 @@ where
             });
         }
         Ok(res)
+    }
+
+    // TODO: implement this
+    #[allow(clippy::unimplemented)] // unused
+    async fn after_sync_new(
+        &self,
+        _cmd: &Command,
+        _index: LogIndex,
+    ) -> Result<<Command as CurpCommand>::ASR, <Command as CurpCommand>::Error> {
+        unimplemented!()
     }
 
     async fn reset(
