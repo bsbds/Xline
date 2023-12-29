@@ -66,6 +66,7 @@ pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
 }
 
 /// The after sync task type
+#[derive(Debug)]
 pub(super) enum TaskType<C: Command> {
     /// After sync an entry
     Entry(Arc<LogEntry<C>>),
@@ -620,6 +621,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         as_rx: flume::Receiver<TaskType<C>>,
     ) {
         while let Ok(task) = as_rx.recv_async().await {
+            debug!("after sync: {task:?}");
             match task {
                 TaskType::Entry(entry) => {
                     after_sync(entry, cmd_executor.as_ref(), curp.as_ref()).await;
