@@ -44,7 +44,6 @@ async fn test_kv_put() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[ignore] // TODO: enable this after cmd worker refactor
 #[tokio::test(flavor = "multi_thread")]
 #[abort_on_panic]
 async fn test_kv_get() -> Result<(), Box<dyn Error>> {
@@ -185,7 +184,6 @@ async fn test_range_redirect() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[ignore] // TODO: enable this after cmd worker refactor
 #[tokio::test(flavor = "multi_thread")]
 #[abort_on_panic]
 async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
@@ -259,7 +257,6 @@ async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[ignore] // TODO: enable this after cmd worker refactor
 #[tokio::test(flavor = "multi_thread")]
 #[abort_on_panic]
 async fn test_txn() -> Result<(), Box<dyn Error>> {
