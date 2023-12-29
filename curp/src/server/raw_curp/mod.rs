@@ -416,7 +416,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let prev_commit_index = log_w.commit_index;
         log_w.commit_index = min(leader_commit, log_w.last_log_index());
         if prev_commit_index < log_w.commit_index {
-            self.apply(&mut *log_w, |_entry| {});
+            self.apply(&mut *log_w);
         }
         Ok(term)
     }
@@ -467,7 +467,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             if last_sent_index > log_w.commit_index {
                 log_w.commit_to(last_sent_index);
                 debug!("{} updates commit index to {last_sent_index}", self.id());
-                self.apply(&mut *log_w, |_entry| {});
+                self.apply(&mut *log_w);
             }
         }
 
@@ -1449,19 +1449,8 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         }
     }
 
-    /// Applies new logs on follower
-    #[allow(unused)] // TODO: merge this with apply
-    fn apply_new(&self, log: &mut Log<C>) {
-        self.apply(log, |entry| {
-            let task = TaskType::Entry(Arc::clone(entry));
-            if let Err(e) = self.ctx.as_tx.send(task) {
-                error!("send after sync error: {e}");
-            }
-        });
-    }
-
     /// Applies new logs
-    fn apply(&self, log: &mut Log<C>, entry_process_fn: impl Fn(&Arc<LogEntry<C>>)) {
+    fn apply(&self, log: &mut Log<C>) {
         for i in (log.last_as + 1)..=log.commit_index {
             let entry = log.get(i).unwrap_or_else(|| {
                 unreachable!(
@@ -1469,7 +1458,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                     log.last_log_index()
                 )
             });
-            entry_process_fn(entry);
+            let task = TaskType::Entry(Arc::clone(entry));
+            if let Err(e) = self.ctx.as_tx.send(task) {
+                error!("send after sync error: {e}");
+            }
             log.last_as = i;
             if log.last_exe < log.last_as {
                 log.last_exe = log.last_as;
