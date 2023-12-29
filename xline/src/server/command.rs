@@ -361,16 +361,6 @@ where
         Ok(res)
     }
 
-    // TODO: implement this
-    #[allow(clippy::unimplemented)] // unused
-    async fn after_sync_new(
-        &self,
-        _cmd: &Command,
-        _index: LogIndex,
-    ) -> Result<<Command as CurpCommand>::ASR, <Command as CurpCommand>::Error> {
-        unimplemented!()
-    }
-
     async fn reset(
         &self,
         snapshot: Option<(Snapshot, LogIndex)>,

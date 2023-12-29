@@ -228,7 +228,7 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
     let id = curp.id();
     match entry.entry_data {
         EntryData::Command(ref cmd) => {
-            let asr = ce.after_sync_new(cmd.as_ref(), entry.index).await;
+            let asr = ce.after_sync(cmd.as_ref(), entry.index).await;
             cb.write().insert_asr(entry.propose_id, asr);
             sp.lock().remove(&entry.propose_id);
             let _ig = ucp.lock().remove(&entry.propose_id);

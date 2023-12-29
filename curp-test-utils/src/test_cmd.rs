@@ -324,15 +324,6 @@ impl CommandExecutor<TestCommand> for TestCE {
         Ok(index.into())
     }
 
-    // TODO: implement this
-    async fn after_sync_new(
-        &self,
-        _cmd: &TestCommand,
-        _index: LogIndex,
-    ) -> Result<<TestCommand as Command>::ASR, <TestCommand as Command>::Error> {
-        unimplemented!()
-    }
-
     fn set_last_applied(&self, index: LogIndex) -> Result<(), <TestCommand as Command>::Error> {
         let ops = vec![WriteOperation::new_put(
             META_TABLE,
