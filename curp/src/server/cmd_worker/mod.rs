@@ -474,11 +474,7 @@ mod tests {
         let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
-            Arc::new(RawCurp::new_test(
-                3,
-                ce_event_tx.clone(),
-                mock_role_change(),
-            )),
+            Arc::new(RawCurp::new_test(3, mock_role_change())),
             task_rx,
             done_tx,
             l,
@@ -516,11 +512,7 @@ mod tests {
         let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
-            Arc::new(RawCurp::new_test(
-                3,
-                ce_event_tx.clone(),
-                mock_role_change(),
-            )),
+            Arc::new(RawCurp::new_test(3, mock_role_change())),
             task_rx,
             done_tx,
             l,
@@ -563,11 +555,7 @@ mod tests {
         let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
-            Arc::new(RawCurp::new_test(
-                3,
-                ce_event_tx.clone(),
-                mock_role_change(),
-            )),
+            Arc::new(RawCurp::new_test(3, mock_role_change())),
             task_rx,
             done_tx,
             l,
@@ -614,11 +602,7 @@ mod tests {
         let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
-            Arc::new(RawCurp::new_test(
-                3,
-                ce_event_tx.clone(),
-                mock_role_change(),
-            )),
+            Arc::new(RawCurp::new_test(3, mock_role_change())),
             task_rx,
             done_tx,
             l,
@@ -655,11 +639,7 @@ mod tests {
         let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
-            Arc::new(RawCurp::new_test(
-                3,
-                ce_event_tx.clone(),
-                mock_role_change(),
-            )),
+            Arc::new(RawCurp::new_test(3, mock_role_change())),
             task_rx,
             done_tx,
             l,
@@ -699,11 +679,7 @@ mod tests {
         let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
-            Arc::new(RawCurp::new_test(
-                3,
-                ce_event_tx.clone(),
-                mock_role_change(),
-            )),
+            Arc::new(RawCurp::new_test(3, mock_role_change())),
             task_rx,
             done_tx,
             l,
@@ -760,11 +736,7 @@ mod tests {
         let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce),
-            Arc::new(RawCurp::new_test(
-                3,
-                ce_event_tx.clone(),
-                mock_role_change(),
-            )),
+            Arc::new(RawCurp::new_test(3, mock_role_change())),
             task_rx,
             done_tx,
             l,
@@ -822,7 +794,7 @@ mod tests {
             EngineConfig::Memory,
         ));
         let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
-        let curp = RawCurp::new_test(3, ce_event_tx.clone(), mock_role_change());
+        let curp = RawCurp::new_test(3, mock_role_change());
         let s2_id = curp.cluster().get_id_by_name("S2").unwrap();
         curp.handle_append_entries(
             1,
@@ -875,11 +847,7 @@ mod tests {
         let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel(t.clone());
         start_cmd_workers(
             Arc::clone(&ce2),
-            Arc::new(RawCurp::new_test(
-                3,
-                ce_event_tx.clone(),
-                mock_role_change(),
-            )),
+            Arc::new(RawCurp::new_test(3, mock_role_change())),
             task_rx,
             done_tx,
             l,

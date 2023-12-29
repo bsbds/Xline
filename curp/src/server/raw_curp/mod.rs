@@ -41,7 +41,7 @@ use self::{
     log::Log,
     state::{CandidateState, LeaderState, State},
 };
-use super::{cmd_worker::CEEventTxApi, curp_node::TaskType};
+use super::curp_node::TaskType;
 use crate::{
     cmd::Command,
     log_entry::{EntryData, LogEntry},
@@ -167,8 +167,6 @@ struct Context<C: Command, RC: RoleChange> {
     leader_tx: broadcast::Sender<Option<ServerId>>,
     /// Election tick
     election_tick: AtomicU8,
-    /// Tx to send cmds to execute and do after sync
-    cmd_tx: Arc<dyn CEEventTxApi<C>>,
     /// Followers sync event trigger
     sync_events: DashMap<ServerId, Arc<Event>>,
     /// Become leader event
@@ -782,7 +780,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         spec_pool: SpecPoolRef<C>,
         uncommitted_pool: UncommittedPoolRef<C>,
         cfg: Arc<CurpConfig>,
-        cmd_tx: Arc<dyn CEEventTxApi<C>>,
         sync_events: DashMap<ServerId, Arc<Event>>,
         log_tx: mpsc::UnboundedSender<Arc<LogEntry<C>>>,
         role_change: RC,
@@ -811,7 +808,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 leader_tx: broadcast::channel(1).0,
                 cfg,
                 election_tick: AtomicU8::new(0),
-                cmd_tx,
                 sync_events,
                 leader_event: Arc::new(Event::new()),
                 role_change,
@@ -841,7 +837,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         spec_pool: SpecPoolRef<C>,
         uncommitted_pool: UncommittedPoolRef<C>,
         cfg: &Arc<CurpConfig>,
-        cmd_tx: Arc<dyn CEEventTxApi<C>>,
         sync_event: DashMap<ServerId, Arc<Event>>,
         log_tx: mpsc::UnboundedSender<Arc<LogEntry<C>>>,
         voted_for: Option<(u64, ServerId)>,
@@ -859,7 +854,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             spec_pool,
             uncommitted_pool,
             Arc::clone(cfg),
-            cmd_tx,
             sync_event,
             log_tx,
             role_change,
@@ -928,61 +922,14 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                     log_r.last_as
                 )
             });
-            // TODO: buffer a local snapshot: if a follower is down for a long time,
-            // the leader will take a snapshot itself every time `sync` is called in effort to
-            // calibrate it. Since taking a snapshot will block the leader's execute workers, we should
-            // not take snapshot so often. A better solution would be to keep a snapshot cache.
-            Some(SyncAction::Snapshot(self.ctx.cmd_tx.send_snapshot(
-                SnapshotMeta {
-                    last_included_index: entry.index,
-                    last_included_term: entry.term,
-                },
-            )))
-        } else {
-            let (prev_log_index, prev_log_term) = log_r.get_prev_entry_info(next_index);
-            let entries = log_r.get_from(next_index);
-            let ae = AppendEntries {
-                term,
-                leader_id: self.id(),
-                prev_log_index,
-                prev_log_term,
-                leader_commit: log_r.commit_index,
-                entries,
-            };
-            Some(SyncAction::AppendEntries(ae))
-        }
-    }
-
-    #[allow(unused)]
-    /// Get `append_entries` request for `follower_id` that contains the latest log entries
-    pub(super) fn sync_new(&self, follower_id: ServerId) -> Option<SyncAction<C>> {
-        let term = {
-            let lst_r = self.st.read();
-            if lst_r.role != Role::Leader {
-                return None;
-            }
-            lst_r.term
-        };
-
-        let Some(next_index) = self.lst.get_next_index(follower_id) else {
-            warn!("follower {} is not found, it maybe has been removed", follower_id);
-            return None;
-        };
-        let log_r = self.log.read();
-        if next_index <= log_r.base_index {
-            // the log has already been compacted
-            let entry = log_r.get(log_r.last_exe).unwrap_or_else(|| {
-                unreachable!(
-                    "log entry {} should not have been compacted yet, needed for snapshot",
-                    log_r.last_as
-                )
-            });
             let meta = SnapshotMeta {
                 last_included_index: entry.index,
                 last_included_term: entry.term,
             };
             let (tx, rx) = oneshot::channel();
-            self.ctx.as_tx.send(TaskType::Snapshot(meta, tx));
+            if let Err(e) = self.ctx.as_tx.send(TaskType::Snapshot(meta, tx)) {
+                error!("failed to send task to after sync: {e}");
+            }
             Some(SyncAction::Snapshot(rx))
         } else {
             let (prev_log_index, prev_log_term) = log_r.get_prev_entry_info(next_index);
@@ -1523,8 +1470,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 )
             });
             entry_process_fn(entry);
-            // TODO: remove this in the following refactor
-            self.ctx.cmd_tx.send_after_sync(Arc::clone(entry));
             log.last_as = i;
             if log.last_exe < log.last_as {
                 log.last_exe = log.last_as;
@@ -1632,7 +1577,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let index = entry.index;
         if !conflict {
             log_w.last_exe = index;
-            self.ctx.cmd_tx.send_sp_exe(entry);
         }
         self.ctx.sync_events.iter().for_each(|e| {
             if let Some(next) = self.lst.get_next_index(*e.key()) {

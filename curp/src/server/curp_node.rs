@@ -87,30 +87,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let id = req.propose_id();
         self.check_cluster_version(req.cluster_version)?;
         let cmd: Arc<C> = Arc::new(req.cmd()?);
-        // handle proposal
-        let sp_exec = self.curp.handle_propose(id, Arc::clone(&cmd))?;
-
-        // if speculatively executed, wait for the result and return
-        if sp_exec.is_some() {
-            let er_res = CommandBoard::wait_for_er(&self.cmd_board, id).await;
-            return Ok(ProposeResponse::new_result::<C>(&er_res));
-        }
-
-        Ok(ProposeResponse::new_empty())
-    }
-
-    #[allow(dead_code)] // TODO: replace `propose` with this
-    /// Handle `Propose` requests
-    pub(super) async fn propose_new(
-        &self,
-        req: ProposeRequest,
-    ) -> Result<ProposeResponse, CurpError> {
-        if self.curp.is_shutdown() {
-            return Err(CurpError::shutting_down());
-        }
-        let id = req.propose_id();
-        self.check_cluster_version(req.cluster_version)?;
-        let cmd: Arc<C> = Arc::new(req.cmd()?);
 
         // handle proposal
         let sp_exec = self.curp.handle_propose(id, Arc::clone(&cmd))?;
@@ -775,7 +751,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 Arc::clone(&spec_pool),
                 uncommitted_pool,
                 Arc::clone(&curp_cfg),
-                Arc::clone(&ce_event_tx),
                 sync_events,
                 log_tx,
                 role_change,
@@ -797,7 +772,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 Arc::clone(&spec_pool),
                 uncommitted_pool,
                 &curp_cfg,
-                Arc::clone(&ce_event_tx),
                 sync_events,
                 log_tx,
                 voted_for,
@@ -1035,19 +1009,12 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::{
-        rpc::{connect::MockInnerConnectApi, ConfChange},
-        server::cmd_worker::MockCEEventTxApi,
-    };
+    use crate::rpc::{connect::MockInnerConnectApi, ConfChange};
 
     #[traced_test]
     #[tokio::test]
     async fn sync_task_will_send_hb() {
-        let curp = Arc::new(RawCurp::new_test(
-            3,
-            MockCEEventTxApi::<TestCommand>::default(),
-            mock_role_change(),
-        ));
+        let curp = Arc::new(RawCurp::new_test(3, mock_role_change()));
         let mut mock_connect1 = MockInnerConnectApi::default();
         mock_connect1
             .expect_append_entries()
@@ -1069,10 +1036,7 @@ mod tests {
     #[traced_test]
     #[tokio::test]
     async fn tick_task_will_bcast_votes() {
-        let curp = {
-            let exe_tx = MockCEEventTxApi::<TestCommand>::default();
-            Arc::new(RawCurp::new_test(3, exe_tx, mock_role_change()))
-        };
+        let curp = Arc::new(RawCurp::new_test(3, mock_role_change()));
         let s2_id = curp.cluster().get_id_by_name("S2").unwrap();
         curp.handle_append_entries(2, s2_id, 0, 0, vec![], 0)
             .unwrap();
@@ -1111,10 +1075,7 @@ mod tests {
     #[traced_test]
     #[tokio::test]
     async fn vote_will_not_send_to_learner_during_election() {
-        let curp = {
-            let exe_tx = MockCEEventTxApi::<TestCommand>::default();
-            Arc::new(RawCurp::new_test(3, exe_tx, mock_role_change()))
-        };
+        let curp = Arc::new(RawCurp::new_test(3, mock_role_change()));
 
         let learner_id = 123;
         let s1_id = curp.cluster().get_id_by_name("S1").unwrap();

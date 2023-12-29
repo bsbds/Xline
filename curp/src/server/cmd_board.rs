@@ -99,16 +99,6 @@ impl<C: Command> CommandBoard<C> {
         self.notify_conf(&id);
     }
 
-    /// Get a listener for execution result
-    fn er_listener(&mut self, id: ProposeId) -> EventListener {
-        let event = self.er_notifiers.entry(id).or_insert_with(Event::new);
-        let listener = event.listen();
-        if self.er_buffer.contains_key(&id) {
-            event.notify(usize::MAX);
-        }
-        listener
-    }
-
     /// Get a listener for shutdown
     fn shutdown_listener(&mut self) -> EventListener {
         self.shutdown_notifier.listen()
@@ -157,17 +147,6 @@ impl<C: Command> CommandBoard<C> {
     fn notify_conf(&mut self, id: &ProposeId) {
         if let Some(notifier) = self.conf_notifier.remove(id) {
             notifier.notify(usize::MAX);
-        }
-    }
-
-    /// Wait for an execution result
-    pub(super) async fn wait_for_er(cb: &CmdBoardRef<C>, id: ProposeId) -> Result<C::ER, C::Error> {
-        loop {
-            if let Some(er) = cb.map_read(|cb_r| cb_r.er_buffer.get(&id).cloned()) {
-                return er;
-            }
-            let listener = cb.write().er_listener(id);
-            listener.await;
         }
     }
 
