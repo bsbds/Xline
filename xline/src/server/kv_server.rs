@@ -253,7 +253,7 @@ where
         let put_req: &PutRequest = request.get_ref();
         put_req.validation()?;
         debug!("Receive grpc request: {:?}", put_req);
-        let is_fast_path = true;
+        let is_fast_path = false;
         let (cmd_res, sync_res) = self.propose(request, is_fast_path).await?;
 
         let mut res = Self::parse_response_op(cmd_res.into_inner().into());
@@ -280,7 +280,7 @@ where
         let delete_range_req = request.get_ref();
         delete_range_req.validation()?;
         debug!("Receive grpc request: {:?}", delete_range_req);
-        let is_fast_path = true;
+        let is_fast_path = false;
         let (cmd_res, sync_res) = self.propose(request, is_fast_path).await?;
 
         let mut res = Self::parse_response_op(cmd_res.into_inner().into());
@@ -324,7 +324,7 @@ where
             }
             self.do_serializable(cmd.request())?
         } else {
-            let is_fast_path = true;
+            let is_fast_path = false;
             let (cmd_res, sync_res) = self.propose(request, is_fast_path).await?;
 
             let mut res = Self::parse_response_op(cmd_res.into_inner().into());
