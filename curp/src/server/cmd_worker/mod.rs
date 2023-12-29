@@ -186,7 +186,6 @@ async fn worker_as<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     success
 }
 
-#[allow(dead_code)]
 /// Cmd worker execute handler
 pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     entry: Arc<LogEntry<C>>,
@@ -219,7 +218,6 @@ pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     }
 }
 
-#[allow(dead_code)] // TODO: replace `worker_as` with this
 /// Cmd worker after sync handler
 pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     entry: Arc<LogEntry<C>>,

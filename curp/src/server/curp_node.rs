@@ -43,7 +43,7 @@ use crate::{
         PublishResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
         TriggerShutdownResponse, VoteRequest, VoteResponse, WaitSyncedRequest, WaitSyncedResponse,
     },
-    server::{cmd_worker::CEEventTxApi, raw_curp::SyncAction, storage::db::DB},
+    server::{raw_curp::SyncAction, storage::db::DB},
     snapshot::{Snapshot, SnapshotMeta},
 };
 
@@ -55,8 +55,6 @@ pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
     spec_pool: SpecPoolRef<C>,
     /// Cmd watch board for tracking the cmd sync results
     cmd_board: CmdBoardRef<C>,
-    /// CE event tx,
-    ce_event_tx: Arc<dyn CEEventTxApi<C>>,
     /// Storage
     storage: Arc<dyn StorageApi<Command = C>>,
     /// Snapshot allocator
@@ -257,69 +255,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     /// Handle `InstallSnapshot` stream
     #[allow(clippy::integer_arithmetic)] // can't overflow
     pub(super) async fn install_snapshot<E: std::error::Error + 'static>(
-        &self,
-        req_stream: impl Stream<Item = Result<InstallSnapshotRequest, E>>,
-    ) -> Result<InstallSnapshotResponse, CurpError> {
-        pin_mut!(req_stream);
-        let mut snapshot = self
-            .snapshot_allocator
-            .allocate_new_snapshot()
-            .await
-            .map_err(|err| {
-                error!("failed to allocate a new snapshot, error: {err}");
-                CurpError::internal(format!("failed to allocate a new snapshot, error: {err}"))
-            })?;
-        while let Some(req) = req_stream.next().await {
-            let req = req?;
-            if !self.curp.verify_install_snapshot(
-                req.term,
-                req.leader_id,
-                req.last_included_index,
-                req.last_included_term,
-            ) {
-                return Ok(InstallSnapshotResponse::new(self.curp.term()));
-            }
-            let req_data_len = req.data.len().numeric_cast::<u64>();
-            snapshot.write_all(req.data).await.map_err(|err| {
-                error!("can't write snapshot data, {err:?}");
-                err
-            })?;
-            if req.done {
-                debug_assert_eq!(
-                    snapshot.size(),
-                    req.offset + req_data_len,
-                    "snapshot corrupted"
-                );
-                let meta = SnapshotMeta {
-                    last_included_index: req.last_included_index,
-                    last_included_term: req.last_included_term,
-                };
-                let snapshot = Snapshot::new(meta, snapshot);
-                info!(
-                    "{} successfully received a snapshot, {snapshot:?}",
-                    self.curp.id(),
-                );
-                self.ce_event_tx
-                    .send_reset(Some(snapshot))
-                    .await
-                    .map_err(|err| {
-                        error!("failed to reset the command executor by snapshot, {err}");
-                        CurpError::internal(format!(
-                            "failed to reset the command executor by snapshot, {err}"
-                        ))
-                    })?;
-                return Ok(InstallSnapshotResponse::new(self.curp.term()));
-            }
-        }
-        Err(CurpError::internal(
-            "failed to receive a complete snapshot".to_owned(),
-        ))
-    }
-
-    #[allow(dead_code)] // TODO: enable this
-    /// Handle `InstallSnapshot` stream
-    #[allow(clippy::integer_arithmetic)] // can't overflow
-    pub(super) async fn install_snapshot_new<E: std::error::Error + 'static>(
         &self,
         req_stream: impl Stream<Item = Result<InstallSnapshotRequest, E>>,
     ) -> Result<InstallSnapshotResponse, CurpError> {
@@ -732,14 +667,11 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let last_applied = cmd_executor
             .last_applied()
             .map_err(|e| CurpError::internal(format!("get applied index error, {e}")))?;
-        let (ce_event_tx, task_rx, done_tx) =
+        let (_ce_event_tx, task_rx, done_tx) =
             conflict_checked_mpmc::channel(shutdown_trigger.clone());
-        let ce_event_tx: Arc<dyn CEEventTxApi<C>> = Arc::new(ce_event_tx);
         let storage = Arc::new(DB::open(&curp_cfg.engine_cfg)?);
-        // TODO:
-        // * bounded might better
-        // * enable after sync task
-        let (as_tx, _as_rx) = flume::unbounded();
+        // TODO: bounded might better
+        let (as_tx, as_rx) = flume::unbounded();
 
         // create curp state machine
         let (voted_for, entries) = storage.recover().await?;
@@ -799,12 +731,12 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         );
 
         Self::run_bg_tasks(Arc::clone(&curp), Arc::clone(&storage), log_rx);
+        Self::run_as_tasks(Arc::clone(&curp), Arc::clone(&cmd_executor), as_rx);
 
         Ok(Self {
             curp,
             spec_pool,
             cmd_board,
-            ce_event_tx,
             storage,
             snapshot_allocator,
             cmd_executor,
@@ -825,7 +757,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             tokio::spawn(Self::log_persist_task(log_rx, storage, shutdown_listener));
     }
 
-    #[allow(unused)]
     /// Run after sync tasks
     fn run_as_tasks(
         curp: Arc<RawCurp<C, RC>>,
