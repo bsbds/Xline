@@ -93,7 +93,9 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         // if speculatively executed, wait for the result and return
         if let Some(entry) = sp_exec {
             let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref()).await;
-            return Ok(ProposeResponse::new_result::<C>(&er_res));
+            let resp = ProposeResponse::new_result::<C>(&er_res);
+            self.cmd_board.write().insert_er(id, er_res);
+            return Ok(resp);
         }
 
         Ok(ProposeResponse::new_empty())

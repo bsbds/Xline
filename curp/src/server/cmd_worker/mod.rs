@@ -9,7 +9,7 @@ use clippy_utilities::NumericCast;
 use mockall::automock;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info};
-use utils::shutdown;
+use utils::{parking_lot_lock::RwLockMap, shutdown};
 
 use self::conflict_checked_mpmc::Task;
 use super::raw_curp::RawCurp;
@@ -228,6 +228,20 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
     let id = curp.id();
     match entry.entry_data {
         EntryData::Command(ref cmd) => {
+            let er_err =
+                match cb.map_read(|c| c.er_buffer.get(&entry.propose_id).map(Result::is_err)) {
+                    Some(er_err) => er_err,
+                    None => {
+                        let er = ce.execute(cmd.as_ref()).await;
+                        let er_ok = er.is_err();
+                        cb.write().insert_er(entry.propose_id, er);
+                        er_ok
+                    }
+                };
+            if er_err {
+                ce.trigger(entry.inflight_id(), entry.index);
+                return;
+            }
             let asr = ce.after_sync(cmd.as_ref(), entry.index).await;
             cb.write().insert_asr(entry.propose_id, asr);
             sp.lock().remove(&entry.propose_id);
