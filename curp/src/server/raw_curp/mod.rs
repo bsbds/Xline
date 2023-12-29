@@ -41,7 +41,7 @@ use self::{
     log::Log,
     state::{CandidateState, LeaderState, State},
 };
-use super::{cmd_worker::CEEventTxApi, conflict_checker::ConflictChecker, curp_node::TaskType};
+use super::{cmd_worker::CEEventTxApi, curp_node::TaskType};
 use crate::{
     cmd::Command,
     log_entry::{EntryData, LogEntry},
@@ -53,7 +53,6 @@ use crate::{
     },
     server::{
         cmd_board::CmdBoardRef,
-        conflict_checker::VertexType,
         raw_curp::{log::FallbackContext, state::VoteResult},
         spec_pool::SpecPoolRef,
     },
@@ -184,8 +183,6 @@ struct Context<C: Command, RC: RoleChange> {
     connects: DashMap<ServerId, InnerConnectApiWrapper>,
     /// last conf change idx
     last_conf_change_idx: AtomicU64,
-    /// The conflict checker
-    conflict_checker: ConflictChecker<C>,
     /// Tx to send entries to after_sync
     as_tx: flume::Sender<TaskType<C>>,
 }
@@ -822,7 +819,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 change_rx,
                 connects,
                 last_conf_change_idx: AtomicU64::new(0),
-                conflict_checker: ConflictChecker::new(),
                 as_tx,
             },
             shutdown_trigger,
@@ -1636,10 +1632,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let index = entry.index;
         if !conflict {
             log_w.last_exe = index;
-            let _ignore = self
-                .ctx
-                .conflict_checker
-                .register(VertexType::Entry(Arc::clone(&entry)));
             self.ctx.cmd_tx.send_sp_exe(entry);
         }
         self.ctx.sync_events.iter().for_each(|e| {

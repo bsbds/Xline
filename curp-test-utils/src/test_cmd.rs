@@ -275,11 +275,6 @@ impl CommandExecutor<TestCommand> for TestCE {
         Ok(result)
     }
 
-    // TODO: implement this
-    fn pre_after_sync(&self, _cmd: &TestCommand) {
-        unimplemented!()
-    }
-
     async fn after_sync(
         &self,
         cmd: &TestCommand,

@@ -310,12 +310,6 @@ where
         }
     }
 
-    // TODO: implement this
-    #[allow(clippy::unimplemented)] // unused
-    fn pre_after_sync(&self, _cmd: &Command) {
-        unimplemented!()
-    }
-
     async fn after_sync(
         &self,
         cmd: &Command,
