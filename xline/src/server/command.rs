@@ -317,6 +317,7 @@ where
     ) -> Result<<Command as CurpCommand>::ASR, <Command as CurpCommand>::Error> {
         let quota_enough = self.quota_checker.check(cmd);
         let wrapper = cmd.request();
+        self.auth_storage.check_permission(wrapper)?;
         let txn_db = self.persistent.transaction();
         txn_db.write_op(WriteOp::PutAppliedIndex(index))?;
 
