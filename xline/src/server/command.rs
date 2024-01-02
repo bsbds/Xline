@@ -419,6 +419,7 @@ pub(super) fn client_err_to_status(err: ClientError<Command>) -> tonic::Status {
         ClientError::OutOfBound(status) => status,
         ClientError::EncodeDecode(msg) => tonic::Status::internal(msg),
         ClientError::Timeout => tonic::Status::unavailable("request timed out"),
+        ClientError::InternalError(e) => tonic::Status::internal(e),
 
         _ => unreachable!("curp client error {err:?}"),
     }
