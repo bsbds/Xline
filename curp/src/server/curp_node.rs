@@ -19,10 +19,7 @@ use utils::{
 
 use super::{
     cmd_board::{CmdBoardRef, CommandBoard},
-    cmd_worker::{
-        after_sync, conflict_checked_mpmc, execute, start_cmd_workers, worker_reset,
-        worker_snapshot,
-    },
+    cmd_worker::{after_sync, execute, worker_reset, worker_snapshot},
     gc::run_gc_tasks,
     raw_curp::{AppendEntries, RawCurp, UncommittedPool, Vote},
     spec_pool::{SpecPoolRef, SpeculativePool},
@@ -680,8 +677,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let last_applied = cmd_executor
             .last_applied()
             .map_err(|e| CurpError::internal(format!("get applied index error, {e}")))?;
-        let (_ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(shutdown_trigger.clone());
         let storage = Arc::new(DB::open(&curp_cfg.engine_cfg)?);
         // TODO: bounded might better
         let (as_tx, as_rx) = flume::unbounded();
@@ -729,13 +724,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             ))
         };
 
-        start_cmd_workers(
-            Arc::clone(&cmd_executor),
-            Arc::clone(&curp),
-            task_rx,
-            done_tx,
-            shutdown_listener.clone(),
-        );
         run_gc_tasks(
             Arc::clone(&cmd_board),
             Arc::clone(&spec_pool),
