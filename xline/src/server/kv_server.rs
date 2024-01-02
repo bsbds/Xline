@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::{
     fmt::Debug,
     sync::{
@@ -218,23 +219,15 @@ where
             self.kv_storage.compacted_revision(),
             self.kv_storage.revision(),
         )?;
-        let range_required_revision = range_req.revision;
-        let is_serializable = range_req.serializable;
-        let token = get_token(request.metadata());
-        let wrapper = RequestWithToken::new_with_token(request.into_inner().into(), token);
-        let cmd = command_from_request_wrapper(wrapper);
-        if !is_serializable {
-            self.wait_read_state(&cmd).await?;
-            // Double check whether the range request is compacted or not since the compaction request
-            // may be executed during the process of `wait_read_state` which results in the result of
-            // previous `check_range_request` outdated.
-            Self::check_range_compacted(
-                range_required_revision,
-                self.kv_storage.compacted_revision(),
-            )?;
-        }
+        let is_fast_path = false;
+        let (cmd_res, sync_res) = self.propose(request, is_fast_path).await?;
 
-        let res = self.do_serializable(cmd.request())?;
+        let mut res = Self::parse_response_op(cmd_res.into_inner().into());
+        if let Some(sync_res) = sync_res {
+            let revision = sync_res.revision();
+            debug!("Get revision {:?} for PutRequest", revision);
+            Self::update_header_revision(&mut res, revision);
+        }
         if let Response::ResponseRange(response) = res {
             Ok(tonic::Response::new(response))
         } else {
@@ -313,28 +306,15 @@ where
             self.kv_storage.revision(),
         )?;
 
-        let res = if txn_req.is_read_only() {
-            debug!("TxnRequest is read only");
-            let is_serializable = txn_req.is_serializable();
-            let token = get_token(request.metadata());
-            let wrapper = RequestWithToken::new_with_token(request.into_inner().into(), token);
-            let cmd = command_from_request_wrapper(wrapper);
-            if !is_serializable {
-                self.wait_read_state(&cmd).await?;
-            }
-            self.do_serializable(cmd.request())?
-        } else {
-            let is_fast_path = false;
-            let (cmd_res, sync_res) = self.propose(request, is_fast_path).await?;
+        let is_fast_path = false;
+        let (cmd_res, sync_res) = self.propose(request, is_fast_path).await?;
 
-            let mut res = Self::parse_response_op(cmd_res.into_inner().into());
-            if let Some(sync_res) = sync_res {
-                let revision = sync_res.revision();
-                debug!("Get revision {:?} for TxnRequest", revision);
-                Self::update_header_revision(&mut res, revision);
-            }
-            res
-        };
+        let mut res = Self::parse_response_op(cmd_res.into_inner().into());
+        if let Some(sync_res) = sync_res {
+            let revision = sync_res.revision();
+            debug!("Get revision {:?} for TxnRequest", revision);
+            Self::update_header_revision(&mut res, revision);
+        }
         if let Response::ResponseTxn(response) = res {
             Ok(tonic::Response::new(response))
         } else {
