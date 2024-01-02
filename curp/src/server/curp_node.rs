@@ -621,23 +621,32 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         curp: Arc<RawCurp<C, RC>>,
         cmd_executor: Arc<CE>,
         as_rx: flume::Receiver<TaskType<C>>,
+        mut shutdown_listener: shutdown::Listener,
     ) {
-        while let Ok(task) = as_rx.recv_async().await {
-            debug!("after sync: {task:?}");
-            match task {
-                TaskType::Entry((entry, should_execute)) => {
-                    after_sync(entry, should_execute, cmd_executor.as_ref(), curp.as_ref()).await;
+        loop {
+            tokio::select! {
+                _ = shutdown_listener.wait_self_shutdown() => {
+                    break;
                 }
-                TaskType::Reset(snap, tx) => {
-                    let _ignore =
-                        worker_reset(snap, tx, cmd_executor.as_ref(), curp.as_ref()).await;
-                }
-                TaskType::Snapshot(meta, tx) => {
-                    let _ignore =
-                        worker_snapshot(meta, tx, cmd_executor.as_ref(), curp.as_ref()).await;
+                Ok(task) = as_rx.recv_async() => {
+                    debug!("after sync: {task:?}");
+                    match task {
+                        TaskType::Entry((entry, should_execute)) => {
+                            after_sync(entry, should_execute, cmd_executor.as_ref(), curp.as_ref()).await;
+                        }
+                        TaskType::Reset(snap, tx) => {
+                            let _ignore =
+                                worker_reset(snap, tx, cmd_executor.as_ref(), curp.as_ref()).await;
+                        }
+                        TaskType::Snapshot(meta, tx) => {
+                            let _ignore =
+                                worker_snapshot(meta, tx, cmd_executor.as_ref(), curp.as_ref()).await;
+                        }
+                    }
                 }
             }
         }
+        debug!("after sync task exits");
     }
 }
 
@@ -767,7 +776,13 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         cmd_executor: Arc<CE>,
         as_rx: flume::Receiver<TaskType<C>>,
     ) {
-        let _as_task = tokio::spawn(Self::after_sync_task(curp, cmd_executor, as_rx));
+        let shutdown_listener = curp.shutdown_listener();
+        let _as_task = tokio::spawn(Self::after_sync_task(
+            curp,
+            cmd_executor,
+            as_rx,
+            shutdown_listener,
+        ));
     }
 
     /// Candidate or pre candidate broadcasts votes
