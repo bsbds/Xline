@@ -52,7 +52,7 @@ use crate::{
         CurpError, IdSet, Member, PoolEntry, PoolEntryInner, ProposeId, PublishRequest, ReadState,
     },
     server::{
-        cmd_board::CmdBoardRef,
+        cmd_board::{CmdBoardRef, ExecutionState},
         raw_curp::{log::FallbackContext, state::VoteResult},
         spec_pool::SpecPoolRef,
     },
@@ -259,6 +259,13 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
         // leader also needs to check if the cmd conflicts un-synced commands
         conflict |= self.insert_ucp(propose_id, Arc::clone(&cmd));
+
+        if !conflict {
+            self.ctx.cb.map_write(|mut cb_w| {
+                let _ignore = cb_w.er_buffer.insert(propose_id, ExecutionState::Executing);
+            })
+        }
+
         let mut log_w = self.log.write();
 
         let entry = log_w.push(st_r.term, propose_id, cmd)?;
@@ -416,7 +423,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let prev_commit_index = log_w.commit_index;
         log_w.commit_index = min(leader_commit, log_w.last_log_index());
         if prev_commit_index < log_w.commit_index {
-            self.apply(&mut *log_w);
+            self.apply(&mut *log_w, false);
         }
         Ok(term)
     }
@@ -467,7 +474,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             if last_sent_index > log_w.commit_index {
                 log_w.commit_to(last_sent_index);
                 debug!("{} updates commit index to {last_sent_index}", self.id());
-                self.apply(&mut *log_w);
+                self.apply(&mut *log_w, true);
             }
         }
 
@@ -1450,7 +1457,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     }
 
     /// Applies new logs
-    fn apply(&self, log: &mut Log<C>) {
+    fn apply(&self, log: &mut Log<C>, should_execute: bool) {
         for i in (log.last_as + 1)..=log.commit_index {
             let entry = log.get(i).unwrap_or_else(|| {
                 unreachable!(
@@ -1458,7 +1465,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                     log.last_log_index()
                 )
             });
-            let task = TaskType::Entry(Arc::clone(entry));
+            let task = TaskType::Entry((Arc::clone(entry), should_execute));
             if let Err(e) = self.ctx.as_tx.send(task) {
                 error!("send after sync error: {e}");
             }

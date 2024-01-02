@@ -69,7 +69,7 @@ pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
 #[derive(Debug)]
 pub(super) enum TaskType<C: Command> {
     /// After sync an entry
-    Entry(Arc<LogEntry<C>>),
+    Entry((Arc<LogEntry<C>>, bool)),
     /// Reset the CE
     Reset(Option<Snapshot>, oneshot::Sender<()>),
     /// Snapshot
@@ -625,8 +625,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         while let Ok(task) = as_rx.recv_async().await {
             debug!("after sync: {task:?}");
             match task {
-                TaskType::Entry(entry) => {
-                    after_sync(entry, cmd_executor.as_ref(), curp.as_ref()).await;
+                TaskType::Entry((entry, should_execute)) => {
+                    after_sync(entry, should_execute, cmd_executor.as_ref(), curp.as_ref()).await;
                 }
                 TaskType::Reset(snap, tx) => {
                     let _ignore =

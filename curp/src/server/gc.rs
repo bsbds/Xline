@@ -87,7 +87,7 @@ mod tests {
     use crate::{
         rpc::{PoolEntry, ProposeId},
         server::{
-            cmd_board::{CmdBoardRef, CommandBoard},
+            cmd_board::{CmdBoardRef, CommandBoard, ExecutionState},
             gc::gc_cmd_board,
             spec_pool::{SpecPoolRef, SpeculativePool},
         },
@@ -100,15 +100,15 @@ mod tests {
         tokio::spawn(gc_cmd_board(Arc::clone(&board), Duration::from_millis(500)));
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        board
-            .write()
-            .er_buffer
-            .insert(ProposeId(1, 1), Ok(TestCommandResult::default()));
+        board.write().er_buffer.insert(
+            ProposeId(1, 1),
+            ExecutionState::Executed(Ok(TestCommandResult::default())),
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
-        board
-            .write()
-            .er_buffer
-            .insert(ProposeId(2, 2), Ok(TestCommandResult::default()));
+        board.write().er_buffer.insert(
+            ProposeId(2, 2),
+            ExecutionState::Executed(Ok(TestCommandResult::default())),
+        );
         board
             .write()
             .asr_buffer
@@ -121,10 +121,10 @@ mod tests {
 
         // at 600ms
         tokio::time::sleep(Duration::from_millis(400)).await;
-        board
-            .write()
-            .er_buffer
-            .insert(ProposeId(3, 3), Ok(TestCommandResult::default()));
+        board.write().er_buffer.insert(
+            ProposeId(3, 3),
+            ExecutionState::Executed(Ok(TestCommandResult::default())),
+        );
         board
             .write()
             .asr_buffer

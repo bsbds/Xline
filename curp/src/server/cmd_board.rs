@@ -26,7 +26,7 @@ pub(super) struct CommandBoard<C: Command> {
     /// The cmd has been received before, this is used for dedup
     pub(super) sync: IndexSet<ProposeId>,
     /// Store all execution results
-    pub(super) er_buffer: IndexMap<ProposeId, Result<C::ER, C::Error>>,
+    pub(super) er_buffer: IndexMap<ProposeId, ExecutionState<C>>,
     /// Store all after sync results
     pub(super) asr_buffer: IndexMap<ProposeId, Result<C::ASR, C::Error>>,
 }
@@ -66,10 +66,7 @@ impl<C: Command> CommandBoard<C> {
     /// Insert er to internal buffer
     pub(super) fn insert_er(&mut self, id: ProposeId, er: Result<C::ER, C::Error>) {
         let er_ok = er.is_ok();
-        assert!(
-            self.er_buffer.insert(id, er).is_none(),
-            "er should not be inserted twice"
-        );
+        let _ignore = self.er_buffer.insert(id, ExecutionState::Executed(er));
 
         self.notify_er(&id);
 
@@ -97,6 +94,16 @@ impl<C: Command> CommandBoard<C> {
         );
 
         self.notify_conf(&id);
+    }
+
+    /// Get a listener for execution result
+    fn er_listener(&mut self, id: ProposeId) -> EventListener {
+        let event = self.er_notifiers.entry(id).or_insert_with(Event::new);
+        let listener = event.listen();
+        if self.er_buffer.contains_key(&id) {
+            event.notify(usize::MAX);
+        }
+        listener
     }
 
     /// Get a listener for shutdown
@@ -151,6 +158,28 @@ impl<C: Command> CommandBoard<C> {
     }
 
     /// Wait for an execution result
+    pub(super) async fn wait_for_er(
+        cb: &CmdBoardRef<C>,
+        id: ProposeId,
+    ) -> Option<Result<C::ER, C::Error>> {
+        loop {
+            let state = cb.map_read(|cb_r| cb_r.er_buffer.get(&id).cloned());
+            match state {
+                Some(ExecutionState::Executing) => {
+                    let listener = cb.write().er_listener(id);
+                    listener.await;
+                }
+                Some(ExecutionState::Executed(er)) => {
+                    return Some(er);
+                }
+                None => {
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Wait for an execution result
     pub(super) async fn wait_for_shutdown_synced(cb: &CmdBoardRef<C>) {
         let listener = cb.write().shutdown_listener();
         listener.await;
@@ -165,8 +194,12 @@ impl<C: Command> CommandBoard<C> {
             {
                 let cb_r = cb.read();
                 match (cb_r.er_buffer.get(&id), cb_r.asr_buffer.get(&id)) {
-                    (Some(er), None) if er.is_err() => return (er.clone(), None),
-                    (Some(er), Some(asr)) => return (er.clone(), Some(asr.clone())),
+                    (Some(ExecutionState::Executed(er)), None) if er.is_err() => {
+                        return (er.clone(), None);
+                    }
+                    (Some(ExecutionState::Executed(er)), Some(asr)) => {
+                        return (er.clone(), Some(asr.clone()));
+                    }
                     _ => {}
                 }
             }
@@ -185,4 +218,13 @@ impl<C: Command> CommandBoard<C> {
             listener.await;
         }
     }
+}
+
+/// The execution state
+#[derive(Clone, Debug)]
+pub(super) enum ExecutionState<C: Command> {
+    /// The command is being executing
+    Executing,
+    /// The command has been executed
+    Executed(Result<C::ER, C::Error>),
 }
