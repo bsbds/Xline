@@ -89,6 +89,9 @@ pub enum ClientError<C: Command> {
     /// Wrong cluster version
     #[error("wrong cluster version")]
     WrongClusterVersion,
+    /// The term is outdated during fast round
+    #[error("term outdated")]
+    TermOutdated,
 }
 
 impl<C: Command> From<PbSerializeError> for ClientError<C> {

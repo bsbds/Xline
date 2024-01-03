@@ -255,7 +255,12 @@ where
         cmd_arc: Arc<C>,
     ) -> Result<(Option<<C as Command>::ER>, bool), ClientError<C>> {
         debug!("fast round for cmd({}) started", propose_id);
-        let req = ProposeRequest::new(propose_id, cmd_arc.as_ref(), self.cluster_version());
+        let req = ProposeRequest::new(
+            propose_id,
+            cmd_arc.as_ref(),
+            self.cluster_version(),
+            self.state.read().term,
+        );
 
         let connects = self
             .connects
@@ -282,6 +287,9 @@ where
                         CurpError::ShuttingDown(_) => return Err(ClientError::ShuttingDown),
                         CurpError::WrongClusterVersion(_) => {
                             return Err(ClientError::WrongClusterVersion)
+                        }
+                        CurpError::Redirect(_) => {
+                            return Err(ClientError::TermOutdated);
                         }
                         _ => continue,
                     }
@@ -473,11 +481,12 @@ where
             };
             debug!("resend propose to {leader_id}");
 
+            let term = self.state.read().term;
             let resp = self
                 .get_connect(leader_id)
                 .unwrap_or_else(|| unreachable!("leader {leader_id} not found"))
                 .propose(
-                    ProposeRequest::new(propose_id, cmd.as_ref(), self.cluster_version()),
+                    ProposeRequest::new(propose_id, cmd.as_ref(), self.cluster_version(), term),
                     *self.config.propose_timeout(),
                 )
                 .await;
@@ -664,7 +673,7 @@ where
             futures::future::Either::Left((fast_result, slow_round)) => {
                 let (fast_er, success) = match fast_result {
                     Ok(resp) => resp,
-                    Err(ClientError::WrongClusterVersion) => {
+                    Err(ClientError::WrongClusterVersion | ClientError::TermOutdated) => {
                         return None;
                     }
                     Err(e) => return Some(Err(e)),
@@ -708,7 +717,7 @@ where
         let slow_round = self.slow_round(propose_id, cmd_arc);
         #[allow(clippy::integer_arithmetic)] // tokio framework triggers
         let (fast_result, slow_result) = tokio::join!(fast_round, slow_round);
-        if let Err(ClientError::WrongClusterVersion) = fast_result {
+        if let Err(ClientError::WrongClusterVersion | ClientError::TermOutdated) = fast_result {
             return None;
         }
         match slow_result {

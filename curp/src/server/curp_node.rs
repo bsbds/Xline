@@ -85,7 +85,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let cmd: Arc<C> = Arc::new(req.cmd()?);
 
         // handle proposal
-        let sp_exec = self.curp.handle_propose(id, Arc::clone(&cmd))?;
+        let sp_exec = self.curp.handle_propose(id, Arc::clone(&cmd), req.term)?;
 
         // if speculatively executed, wait for the result and return
         if let Some(entry) = sp_exec {

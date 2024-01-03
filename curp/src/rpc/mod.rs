@@ -119,11 +119,17 @@ impl FetchClusterResponse {
 
 impl ProposeRequest {
     /// Create a new `Propose` request
-    pub(crate) fn new<C: Command>(propose_id: ProposeId, cmd: &C, cluster_version: u64) -> Self {
+    pub(crate) fn new<C: Command>(
+        propose_id: ProposeId,
+        cmd: &C,
+        cluster_version: u64,
+        term: u64,
+    ) -> Self {
         Self {
             propose_id: Some(propose_id.into()),
             command: cmd.encode(),
             cluster_version,
+            term,
         }
     }
 
@@ -710,6 +716,7 @@ impl From<CurpError> for tonic::Status {
                 "Internal error: An internal error occurred.",
             ),
             CurpError::RpcTransport(_) => (tonic::Code::Cancelled, "Rpc error: Request cancelled"),
+            CurpError::Zombie(_) => (tonic::Code::Unavailable, "Zombie error: The node is currently unavailable")
         };
 
         let details = CurpErrorWrapper { err: Some(err) }.encode_to_vec();

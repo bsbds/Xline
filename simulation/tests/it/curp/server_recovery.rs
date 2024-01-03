@@ -182,6 +182,7 @@ async fn new_leader_will_recover_spec_cmds_cond1() {
         }),
         command: bincode::serialize(&cmd1).unwrap(),
         cluster_version: 0,
+        term: 1,
     };
     for id in group
         .all_members
@@ -290,6 +291,7 @@ async fn old_leader_will_keep_original_states() {
         }),
         command: bincode::serialize(&cmd1).unwrap(),
         cluster_version: 0,
+        term: 1,
     };
     let mut leader1_connect = group.get_connect(&leader1).await;
     leader1_connect.propose(req1).await.unwrap();
