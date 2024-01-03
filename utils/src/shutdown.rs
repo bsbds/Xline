@@ -30,8 +30,6 @@ pub struct Trigger {
 struct TriggerInner {
     /// Sender for shutdown signal.
     trigger: watch::Sender<Signal>,
-    /// State of mpsc channel.
-    mpmc_channel_shutdown: AtomicBool,
     /// State of sync follower daemon.
     sync_follower_daemon_shutdown: AtomicBool,
     /// Shutdown Applied
@@ -53,15 +51,6 @@ impl Trigger {
         if self.inner.trigger.send(Signal::SelfShutdown).is_err() {
             warn!("no listener waiting for shutdown");
         };
-    }
-
-    /// Mark mpsc channel shutdown.
-    #[inline]
-    pub fn mark_channel_shutdown(&self) {
-        info!("mark mpmc channel shutdown");
-        self.inner
-            .mpmc_channel_shutdown
-            .store(true, Ordering::Relaxed);
     }
 
     /// Mark sync daemon shutdown.
@@ -93,11 +82,10 @@ impl Trigger {
     /// and send the shutdown signal when both are shutdown.
     #[inline]
     pub fn check_and_shutdown(&self) {
-        if self.inner.mpmc_channel_shutdown.load(Ordering::Relaxed)
-            && self
-                .inner
-                .sync_follower_daemon_shutdown
-                .load(Ordering::Relaxed)
+        if self
+            .inner
+            .sync_follower_daemon_shutdown
+            .load(Ordering::Relaxed)
             && self.inner.leader_notified.load(Ordering::Relaxed)
         {
             self.self_shutdown();
@@ -196,7 +184,6 @@ pub fn channel() -> (Trigger, Listener) {
     let trigger = Trigger {
         inner: Arc::new(TriggerInner {
             trigger: tx,
-            mpmc_channel_shutdown: AtomicBool::new(false),
             sync_follower_daemon_shutdown: AtomicBool::new(false),
             leader_notified: AtomicBool::new(false),
         }),
