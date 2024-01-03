@@ -10,7 +10,7 @@
 #![allow(clippy::integer_arithmetic)] // u64 is large enough and won't overflow
 
 use std::{
-    cmp::min,
+    cmp::{self, min},
     collections::{HashMap, HashSet},
     fmt::Debug,
     sync::{
@@ -50,6 +50,7 @@ use crate::{
     rpc::{
         connect::InnerConnectApi, connect::InnerConnectApiWrapper, ConfChange, ConfChangeType,
         CurpError, IdSet, Member, PoolEntry, PoolEntryInner, ProposeId, PublishRequest, ReadState,
+        Redirect,
     },
     server::{
         cmd_board::{CmdBoardRef, ExecutionState},
@@ -238,10 +239,29 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         &self,
         propose_id: ProposeId,
         cmd: Arc<C>,
+        term: u64,
     ) -> Result<Option<Arc<LogEntry<C>>>, CurpError> {
         debug!("{} gets proposal for cmd({})", self.id(), propose_id);
-        let mut conflict = self.insert_sp(propose_id, Arc::clone(&cmd));
         let st_r = self.st.read();
+
+        // Rejects the request
+        // When `st_r.term > term`, the client is using an outdated leader
+        // When `st_r.term < term`, the current node is a zombie
+        match st_r.term.cmp(&term) {
+            // Current node is a zombie
+            cmp::Ordering::Less => {
+                return Err(CurpError::Zombie(()));
+            }
+            cmp::Ordering::Greater => {
+                return Err(CurpError::Redirect(Redirect {
+                    leader_id: st_r.leader_id,
+                    term: st_r.term,
+                }));
+            }
+            cmp::Ordering::Equal => {}
+        }
+
+        let mut conflict = self.insert_sp(propose_id, Arc::clone(&cmd));
         // Non-leader doesn't need to sync or execute
         if st_r.role != Role::Leader {
             if conflict {

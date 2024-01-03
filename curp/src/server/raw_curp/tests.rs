@@ -119,7 +119,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 fn leader_handle_propose_will_succeed() {
     let curp = RawCurp::new_test(3, mock_role_change());
     let cmd = Arc::new(TestCommand::default());
-    assert!(curp.handle_propose(ProposeId(0, 0), cmd).unwrap().is_some());
+    assert!(curp
+        .handle_propose(ProposeId(0, 0), cmd, 1)
+        .unwrap()
+        .is_some());
 }
 
 #[traced_test]
@@ -129,17 +132,17 @@ fn leader_handle_propose_will_reject_conflicted() {
 
     let cmd1 = Arc::new(TestCommand::new_put(vec![1], 0));
     assert!(curp
-        .handle_propose(ProposeId(0, 0), cmd1)
+        .handle_propose(ProposeId(0, 0), cmd1, 1)
         .unwrap()
         .is_some());
 
     let cmd2 = Arc::new(TestCommand::new_put(vec![1, 2], 1));
-    let res = curp.handle_propose(ProposeId(0, 1), cmd2);
+    let res = curp.handle_propose(ProposeId(0, 1), cmd2, 1);
     assert!(matches!(res, Err(CurpError::KeyConflict(_))));
 
     // leader will also reject cmds that conflict un-synced cmds
     let cmd3 = Arc::new(TestCommand::new_put(vec![2], 1));
-    let res = curp.handle_propose(ProposeId(0, 2), cmd3);
+    let res = curp.handle_propose(ProposeId(0, 2), cmd3, 1);
     assert!(matches!(res, Err(CurpError::KeyConflict(_))));
 }
 
@@ -149,11 +152,11 @@ fn leader_handle_propose_will_reject_duplicated() {
     let curp = RawCurp::new_test(3, mock_role_change());
     let cmd = Arc::new(TestCommand::default());
     assert!(curp
-        .handle_propose(ProposeId(0, 0), Arc::clone(&cmd))
+        .handle_propose(ProposeId(0, 0), Arc::clone(&cmd), 1)
         .unwrap()
         .is_some());
 
-    let res = curp.handle_propose(ProposeId(0, 0), cmd);
+    let res = curp.handle_propose(ProposeId(0, 0), cmd, 1);
     assert!(matches!(res, Err(CurpError::Duplicated(_))));
 }
 
@@ -163,7 +166,10 @@ fn follower_handle_propose_will_succeed() {
     let curp = Arc::new(RawCurp::new_test(3, mock_role_change()));
     curp.update_to_term_and_become_follower(&mut *curp.st.write(), 1);
     let cmd = Arc::new(TestCommand::new_get(vec![1]));
-    assert!(curp.handle_propose(ProposeId(0, 0), cmd).unwrap().is_none());
+    assert!(curp
+        .handle_propose(ProposeId(0, 0), cmd, 1)
+        .unwrap()
+        .is_none());
 }
 
 #[traced_test]
@@ -174,12 +180,12 @@ fn follower_handle_propose_will_reject_conflicted() {
 
     let cmd1 = Arc::new(TestCommand::new_get(vec![1]));
     assert!(curp
-        .handle_propose(ProposeId(0, 0), cmd1)
+        .handle_propose(ProposeId(0, 0), cmd1, 1)
         .unwrap()
         .is_none());
 
     let cmd2 = Arc::new(TestCommand::new_get(vec![1]));
-    let res = curp.handle_propose(ProposeId(0, 1), cmd2);
+    let res = curp.handle_propose(ProposeId(0, 1), cmd2, 1);
     assert!(matches!(res, Err(CurpError::KeyConflict(_))));
 }
 
@@ -551,8 +557,12 @@ fn leader_retires_after_log_compact_will_succeed() {
 fn leader_retires_should_cleanup() {
     let curp = RawCurp::new_test(3, mock_role_change());
 
-    let _ignore = curp.handle_propose(ProposeId(0, 0), Arc::new(TestCommand::new_put(vec![1], 0)));
-    let _ignore = curp.handle_propose(ProposeId(0, 1), Arc::new(TestCommand::new_get(vec![1])));
+    let _ignore = curp.handle_propose(
+        ProposeId(0, 0),
+        Arc::new(TestCommand::new_put(vec![1], 0)),
+        1,
+    );
+    let _ignore = curp.handle_propose(ProposeId(0, 1), Arc::new(TestCommand::new_get(vec![1])), 1);
 
     curp.leader_retires();
 

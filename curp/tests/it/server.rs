@@ -155,6 +155,7 @@ async fn fast_round_is_slower_than_slow_round() {
             }),
             command: bincode::serialize(&cmd).unwrap(),
             cluster_version: 0,
+            term: 1,
         }))
         .await
         .unwrap();
@@ -176,6 +177,7 @@ async fn fast_round_is_slower_than_slow_round() {
             }),
             command: bincode::serialize(&cmd).unwrap(),
             cluster_version: 0,
+            term: 1,
         }))
         .await
         .unwrap()
@@ -205,6 +207,7 @@ async fn concurrent_cmd_order() {
             }),
             command: bincode::serialize(&cmd0).unwrap(),
             cluster_version: 0,
+            term: 1,
         })
         .await
         .expect("propose failed");
@@ -219,6 +222,7 @@ async fn concurrent_cmd_order() {
             }),
             command: bincode::serialize(&cmd1).unwrap(),
             cluster_version: 0,
+            term: 1,
         })
         .await;
     assert!(response.is_err());
@@ -230,6 +234,7 @@ async fn concurrent_cmd_order() {
             }),
             command: bincode::serialize(&cmd2).unwrap(),
             cluster_version: 0,
+            term: 1,
         })
         .await;
     assert!(response.is_err());
