@@ -20,7 +20,6 @@ use utils::{
 use super::{
     cmd_board::{CmdBoardRef, CommandBoard},
     cmd_worker::{after_sync, execute, worker_reset, worker_snapshot},
-    gc::run_gc_tasks,
     raw_curp::{AppendEntries, RawCurp, UncommittedPool, Vote},
     spec_pool::{SpecPoolRef, SpeculativePool},
     storage::StorageApi,
@@ -660,7 +659,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         curp_cfg: Arc<CurpConfig>,
         shutdown_trigger: shutdown::Trigger,
     ) -> Result<Self, CurpError> {
-        let shutdown_listener = shutdown_trigger.subscribe();
+        let _shutdown_listener = shutdown_trigger.subscribe();
         let sync_events = cluster_info
             .peers_ids()
             .into_iter()
@@ -723,13 +722,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 as_tx.clone(),
             ))
         };
-
-        run_gc_tasks(
-            Arc::clone(&cmd_board),
-            Arc::clone(&spec_pool),
-            curp_cfg.gc_interval,
-            shutdown_listener.clone(),
-        );
 
         Self::run_bg_tasks(Arc::clone(&curp), Arc::clone(&storage), log_rx);
         Self::run_as_tasks(Arc::clone(&curp), Arc::clone(&cmd_executor), as_rx);

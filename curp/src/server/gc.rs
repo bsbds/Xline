@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::{collections::HashSet, time::Duration};
 
 use utils::{parking_lot_lock::MutexMap, shutdown};
