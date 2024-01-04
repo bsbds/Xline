@@ -261,6 +261,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             cmp::Ordering::Equal => {}
         }
 
+        // NOTE: The log lock determines the conflict order and must be acquired
+        // before inserting the command into sp/ucp
+        let mut log_w = self.log.write();
+
         let mut conflict = self.insert_sp(propose_id, Arc::clone(&cmd));
         // Non-leader doesn't need to sync or execute
         if st_r.role != Role::Leader {
@@ -285,8 +289,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 let _ignore = cb_w.er_buffer.insert(propose_id, ExecutionState::Executing);
             })
         }
-
-        let mut log_w = self.log.write();
 
         let entry = log_w.push(st_r.term, propose_id, cmd)?;
         debug!("{} gets new log[{}]", self.id(), entry.index);
