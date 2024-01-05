@@ -3,9 +3,6 @@
 /// The WAL codec
 mod codec;
 
-/// The config for `WALStorage`
-mod config;
-
 /// WAL errors
 mod error;
 
@@ -42,12 +39,12 @@ use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::codec::Framed;
 use tracing::{debug, error, info, warn};
+use utils::config::WALConfig;
 
 use crate::log_entry::LogEntry;
 
 use self::{
     codec::{DataFrame, DataFrameOwned, WAL},
-    config::WALConfig,
     error::{CorruptError, WALError},
     pipeline::FilePipeline,
     remover::SegmentRemover,

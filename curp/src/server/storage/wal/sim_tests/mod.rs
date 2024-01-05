@@ -159,7 +159,7 @@ fn init_wal_dir() -> PathBuf {
 async fn recover_wal_storage(
     wal_dir: impl AsRef<Path>,
 ) -> io::Result<(WALStorage<TestCommand>, Vec<LogEntry<TestCommand>>)> {
-    let config = WALConfig::new(wal_dir).with_max_segment_size(TEST_SEGMENT_SIZE);
+    let config = WALConfig::new(wal_dir, TEST_SEGMENT_SIZE);
     WALStorage::<TestCommand>::new_or_recover(config.clone()).await
 }
 

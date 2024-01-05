@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use derive_builder::Builder;
 use getset::Getters;
@@ -86,7 +90,6 @@ pub struct ClusterConfig {
     is_leader: bool,
     /// Curp server timeout settings
     #[getset(get = "pub")]
-    #[serde(default = "CurpConfig::default")]
     curp_config: CurpConfig,
     /// Curp client config settings
     #[getset(get = "pub")]
@@ -273,6 +276,9 @@ pub struct CurpConfig {
     #[serde(default = "EngineConfig::default")]
     pub engine_cfg: EngineConfig,
 
+    /// Curp WAL config
+    pub wal_cfg: WALConfig,
+
     /// Number of command execute workers
     #[builder(default = "default_cmd_workers()")]
     #[serde(default = "default_cmd_workers")]
@@ -436,26 +442,6 @@ pub const fn default_log_entries_cap() -> usize {
 #[inline]
 pub const fn default_watch_progress_notify_interval() -> Duration {
     Duration::from_secs(600)
-}
-
-impl Default for CurpConfig {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            heartbeat_interval: default_heartbeat_interval(),
-            wait_synced_timeout: default_server_wait_synced_timeout(),
-            retry_count: default_retry_count(),
-            rpc_timeout: default_rpc_timeout(),
-            batch_timeout: default_batch_timeout(),
-            batch_max_size: default_batch_max_size(),
-            follower_timeout_ticks: default_follower_timeout_ticks(),
-            candidate_timeout_ticks: default_candidate_timeout_ticks(),
-            engine_cfg: EngineConfig::default(),
-            cmd_workers: default_cmd_workers(),
-            gc_interval: default_gc_interval(),
-            log_entries_cap: default_log_entries_cap(),
-        }
-    }
 }
 
 /// Curp client settings
@@ -674,6 +660,39 @@ impl Default for StorageConfig {
 pub fn default_quota() -> u64 {
     // 8 * 1024 * 1024 * 1024
     0x0002_0000_0000
+}
+
+/// The config for WAL
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Getters, Builder)]
+pub struct WALConfig {
+    /// The path of this config
+    #[getset(get = "pub")]
+    pub dir: PathBuf,
+    /// The maximum size of this segment
+    ///
+    /// NOTE: This is a soft limit, the actual size may larger than this
+    #[getset(get = "pub")]
+    #[serde(default = "default_max_segment_size")]
+    pub max_segment_size: u64,
+}
+
+impl WALConfig {
+    /// Creates a new `WALConfig`
+    #[inline]
+    #[must_use]
+    pub fn new(dir: impl AsRef<Path>, max_segment_size: u64) -> Self {
+        Self {
+            dir: dir.as_ref().into(),
+            max_segment_size,
+        }
+    }
+}
+
+/// Default max segment size
+#[must_use]
+#[inline]
+pub const fn default_max_segment_size() -> u64 {
+    64 * 1024 * 1024
 }
 
 /// Log configuration object
@@ -921,6 +940,7 @@ mod tests {
             wait_synced_timeout = '100ms'
             rpc_timeout = '100ms'
             retry_timeout = '100ms'
+            wal_cfg = { dir = '/usr/local/xline/data-dir/wal' }
 
             [cluster.client_config]
             initial_retry_timeout = '5s'
@@ -957,6 +977,10 @@ mod tests {
             .heartbeat_interval(Duration::from_millis(200))
             .wait_synced_timeout(Duration::from_millis(100))
             .rpc_timeout(Duration::from_millis(100))
+            .wal_cfg(WALConfig::new(
+                PathBuf::from("/usr/local/xline/data-dir/wal"),
+                default_max_segment_size(),
+            ))
             .build()
             .unwrap();
 
@@ -1044,6 +1068,9 @@ mod tests {
                 node2 = ['127.0.0.1:2380']
                 node3 = ['127.0.0.1:2381']
 
+                [cluster.curp_config]
+                wal_cfg = { dir = '/usr/local/xline/data-dir/wal' }
+
                 [cluster.storage]
 
                 [log]
@@ -1076,7 +1103,13 @@ mod tests {
                     ("node3".to_owned(), vec!["127.0.0.1:2381".to_owned()]),
                 ]),
                 true,
-                CurpConfigBuilder::default().build().unwrap(),
+                CurpConfigBuilder::default()
+                    .wal_cfg(WALConfig::new(
+                        PathBuf::from("/usr/local/xline/data-dir/wal"),
+                        default_max_segment_size()
+                    ))
+                    .build()
+                    .unwrap(),
                 ClientConfig::default(),
                 ServerTimeout::default(),
                 InitialClusterState::default()
@@ -1121,6 +1154,9 @@ mod tests {
                 node1 = ['127.0.0.1:2379']
                 node2 = ['127.0.0.1:2380']
                 node3 = ['127.0.0.1:2381']
+
+                [cluster.curp_config]
+                wal_cfg = { dir = '/usr/local/xline/data-dir/wal' }
 
                 [cluster.storage]
 

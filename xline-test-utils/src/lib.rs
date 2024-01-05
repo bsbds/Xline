@@ -14,7 +14,8 @@ use tokio::{
     time::{self, Duration},
 };
 use utils::config::{
-    ClientConfig, CompactConfig, CurpConfig, EngineConfig, ServerTimeout, StorageConfig,
+    default_max_segment_size, ClientConfig, CompactConfig, CurpConfigBuilder, EngineConfig,
+    ServerTimeout, StorageConfig, WALConfig,
 };
 use xline::{server::XlineServer, storage::db::DB};
 pub use xline_client::{types, Client, ClientOptions};
@@ -90,11 +91,16 @@ impl Cluster {
             } else {
                 StorageConfig::default()
             };
+            let mut wal_dir = path.clone();
+            wal_dir.push("wal");
             tokio::spawn(async move {
                 let server = XlineServer::new(
                     cluster_info.into(),
                     is_leader,
-                    CurpConfig::default(),
+                    CurpConfigBuilder::default()
+                        .wal_cfg(WALConfig::new(wal_dir, default_max_segment_size()))
+                        .build()
+                        .unwrap(),
                     ClientConfig::default(),
                     ServerTimeout::default(),
                     storage_config,
@@ -140,14 +146,17 @@ impl Cluster {
         )
         .await
         .unwrap();
+        let mut wal_dir = path.clone();
+        wal_dir.push("wal");
         tokio::spawn(async move {
             let server = XlineServer::new(
                 cluster_info.into(),
                 false,
-                CurpConfig {
-                    engine_cfg: EngineConfig::RocksDB(path.join("curp")),
-                    ..Default::default()
-                },
+                CurpConfigBuilder::default()
+                    .engine_cfg(EngineConfig::RocksDB(path.join("curp")))
+                    .wal_cfg(WALConfig::new(wal_dir, default_max_segment_size()))
+                    .build()
+                    .unwrap(),
                 ClientConfig::default(),
                 ServerTimeout::default(),
                 StorageConfig::default(),
