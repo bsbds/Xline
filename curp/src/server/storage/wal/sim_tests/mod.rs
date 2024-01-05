@@ -202,7 +202,7 @@ async fn log_persistent_task(
                     let handle = tokio::spawn(LazyFS::clear_cache());
                     let start = tokio::time::Instant::now();
                     wal_storage
-                        .send_sync(entries.iter().map(DataFrame::Entry).collect())
+                        .send_sync(entries.iter().collect())
                         .await
                         .unwrap();
                     info!("Entries persistent completed in: {:?}", start.elapsed());
@@ -211,7 +211,7 @@ async fn log_persistent_task(
                 } else {
                     let last_index = entries.last().unwrap().index;
                     wal_storage
-                        .send_sync(entries.iter().map(DataFrame::Entry).collect())
+                        .send_sync(entries.iter().collect())
                         .await
                         .unwrap();
                     // Here's a checkpoint:

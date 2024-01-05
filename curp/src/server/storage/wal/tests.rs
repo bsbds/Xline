@@ -62,12 +62,8 @@ async fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
     let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     let num_entries_per_segment = entry_gen.num_entries_per_segment();
 
-    for frame in entry_gen
-        .take(num_entries)
-        .into_iter()
-        .map(DataFrameOwned::Entry)
-    {
-        storage.send_sync(vec![frame.to_ref()]).await.unwrap();
+    for entry in entry_gen.take(num_entries) {
+        storage.send_sync(vec![&entry]).await.unwrap();
     }
 
     let num_segments = (num_entries + num_entries_per_segment - 1) / num_entries_per_segment;
@@ -87,21 +83,14 @@ async fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
     let (mut storage, _logs) = WALStorage::new_or_recover(config.clone()).await.unwrap();
 
     let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
-    for frame in entry_gen
-        .take(num_entries)
-        .into_iter()
-        .map(DataFrameOwned::Entry)
-    {
-        storage.send_sync(vec![frame.to_ref()]).await.unwrap();
+    for entry in entry_gen.take(num_entries) {
+        storage.send_sync(vec![&entry]).await.unwrap();
     }
 
     storage.truncate_tail(truncate_at).await;
     let next_entry =
         LogEntry::<TestCommand>::new(truncate_at + 1, 1, ProposeId(1, 3), EntryData::Empty);
-    storage
-        .send_sync(vec![DataFrame::Entry(&next_entry)])
-        .await
-        .unwrap();
+    storage.send_sync(vec![&next_entry]).await.unwrap();
 
     drop(storage);
 
@@ -129,13 +118,10 @@ async fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) 
 
     let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     entry_gen.skip(logs_initial.len());
-    let frames = entry_gen
-        .take(to_append)
-        .into_iter()
-        .map(DataFrameOwned::Entry);
+    let entries = entry_gen.take(to_append);
 
-    for frame in frames.clone() {
-        storage.send_sync(vec![frame.to_ref()]).await.unwrap();
+    for entry in entries.clone() {
+        storage.send_sync(vec![&entry]).await.unwrap();
     }
 
     drop(storage);
@@ -153,8 +139,8 @@ async fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) 
     assert!(
         logs.into_iter()
             .skip(logs_initial.len())
-            .zip(frames)
-            .all(|(x, y)| DataFrameOwned::Entry(x) == y),
+            .zip(entries)
+            .all(|(x, y)| x == y),
         "log entries mismatched"
     );
 }

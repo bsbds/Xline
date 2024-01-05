@@ -144,16 +144,18 @@ where
 
     /// Send frames with fsync
     #[allow(clippy::pattern_type_mismatch)] // Cannot satisfy both clippy
-    pub(super) async fn send_sync(&mut self, item: Vec<DataFrame<'_, C>>) -> io::Result<()> {
+    pub(super) async fn send_sync(&mut self, item: Vec<&LogEntry<C>>) -> io::Result<()> {
         let last_segment = self
             .segments
             .last_mut()
             .unwrap_or_else(|| unreachable!("there should be at least on segment"));
         let mut framed = Framed::new(last_segment, WAL::<C>::new());
-        if let Some(DataFrame::Entry(entry)) = item.last() {
+        if let Some(entry) = item.last() {
             self.next_log_index = entry.index.overflow_add(1);
         }
-        framed.send(item).await?;
+        framed
+            .send(item.into_iter().map(|e| DataFrame::Entry(e)).collect())
+            .await?;
         framed.flush().await?;
         framed.get_mut().sync_all().await?;
 
