@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
 use clippy_utilities::NumericCast;
 use engine::{SnapshotAllocator, SnapshotApi};
 use event_listener::Event;
-use futures::{pin_mut, stream::FuturesUnordered, Stream, StreamExt};
+use futures::{future::join_all, pin_mut, stream::FuturesUnordered, Stream, StreamExt};
 use madsim::rand::{thread_rng, Rng};
 use parking_lot::{Mutex, RwLock};
 use tokio::{
@@ -84,10 +84,15 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let cmd: Arc<C> = Arc::new(req.cmd()?);
 
         // handle proposal
-        let sp_exec = self.curp.handle_propose(id, Arc::clone(&cmd), req.term)?;
+        let (result, log_persistent_listener) =
+            self.curp.handle_propose(id, Arc::clone(&cmd), req.term);
+
+        if let Some(listener) = log_persistent_listener {
+            listener.await;
+        };
 
         // if speculatively executed, wait for the result and return
-        if let Some(entry) = sp_exec {
+        if let Some(entry) = result? {
             let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref()).await;
             let resp = ProposeResponse::new_result::<C>(&er_res);
             self.cmd_board.write().insert_er(id, er_res);
@@ -103,7 +108,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         req: ShutdownRequest,
     ) -> Result<ShutdownResponse, CurpError> {
         self.check_cluster_version(req.cluster_version)?;
-        self.curp.handle_shutdown(req.propose_id())?;
+        let log_persistent_listener = self.curp.handle_shutdown(req.propose_id())?;
+        log_persistent_listener.await;
         CommandBoard::wait_for_shutdown_synced(&self.cmd_board).await;
         Ok(ShutdownResponse::default())
     }
@@ -115,7 +121,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     ) -> Result<ProposeConfChangeResponse, CurpError> {
         self.check_cluster_version(req.cluster_version)?;
         let id = req.propose_id();
-        self.curp.handle_propose_conf_change(id, req.changes)?;
+        let log_persistent_listener = self.curp.handle_propose_conf_change(id, req.changes)?;
+        log_persistent_listener.await;
         CommandBoard::wait_for_conf(&self.cmd_board, id).await;
         let members = self.curp.cluster().all_members_vec();
         Ok(ProposeConfChangeResponse { members })
@@ -177,8 +184,9 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     }
 
     /// Handle `Publish` requests
-    pub(super) fn publish(&self, req: PublishRequest) -> Result<PublishResponse, CurpError> {
-        self.curp.handle_publish(req)?;
+    pub(super) async fn publish(&self, req: PublishRequest) -> Result<PublishResponse, CurpError> {
+        let log_persistent_listener = self.curp.handle_publish(req)?;
+        log_persistent_listener.await;
         Ok(PublishResponse::default())
     }
 }
@@ -186,7 +194,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
 /// Handlers for peers
 impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     /// Handle `AppendEntries` requests
-    pub(super) fn append_entries(
+    pub(super) async fn append_entries(
         &self,
         req: &AppendEntriesRequest,
     ) -> Result<AppendEntriesResponse, CurpError> {
@@ -201,7 +209,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             req.leader_commit,
         );
         let resp = match result {
-            Ok(term) => AppendEntriesResponse::new_accept(term),
+            Ok((term, listeners)) => {
+                let _ignore = join_all(listeners).await;
+                AppendEntriesResponse::new_accept(term)
+            }
             Err((term, hint)) => AppendEntriesResponse::new_reject(term, hint),
         };
 
@@ -598,15 +609,25 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
 
     /// Log persist task
     pub(super) async fn log_persist_task(
-        mut log_rx: mpsc::UnboundedReceiver<Arc<LogEntry<C>>>,
-        storage: Arc<dyn StorageApi<Command = C>>,
-        // This task will safely exit when the log_tx is dropped, but we still
-        // need to keep the shutdown_listener here to notify the shutdown trigger
-        _shutdown_listener: shutdown::Listener,
+        mut log_rx: mpsc::UnboundedReceiver<(Arc<LogEntry<C>>, Event)>,
+        _storage: Arc<dyn StorageApi<Command = C>>,
+        shutdown_listener: shutdown::Listener,
     ) {
-        while let Some(e) = log_rx.recv().await {
-            if let Err(err) = storage.put_log_entry(e.as_ref()).await {
-                error!("storage error, {err}");
+        const MAX_BATCH_SIZE: usize = 4096;
+        const LOG_PERSISTNET_DURATION: Duration = Duration::from_micros(100);
+        loop {
+            tokio::time::sleep(LOG_PERSISTNET_DURATION).await;
+            if shutdown_listener.is_shutdown() {
+                break;
+            }
+            let (_entries, notifiers): (Vec<_>, Vec<_>) =
+                std::iter::repeat_with(|| log_rx.try_recv())
+                    .take_while(Result::is_ok)
+                    .take(MAX_BATCH_SIZE)
+                    .flatten()
+                    .unzip();
+            for notifier in notifiers {
+                notifier.notify(1);
             }
         }
         debug!("log persist task exits");
@@ -741,7 +762,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     fn run_bg_tasks(
         curp: Arc<RawCurp<C, RC>>,
         storage: Arc<impl StorageApi<Command = C> + 'static>,
-        log_rx: mpsc::UnboundedReceiver<Arc<LogEntry<C>>>,
+        log_rx: mpsc::UnboundedReceiver<(Arc<LogEntry<C>>, Event)>,
     ) {
         let shutdown_listener = curp.shutdown_listener();
         let _election_task = tokio::spawn(Self::election_task(Arc::clone(&curp)));

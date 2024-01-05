@@ -22,7 +22,7 @@ use std::{
 use clippy_utilities::{NumericCast, OverflowArithmetic};
 use curp_external_api::cmd::ConflictCheck;
 use dashmap::DashMap;
-use event_listener::Event;
+use event_listener::{Event, EventListener};
 use itertools::Itertools;
 use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -240,8 +240,19 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         propose_id: ProposeId,
         cmd: Arc<C>,
         term: u64,
-    ) -> Result<Option<Arc<LogEntry<C>>>, CurpError> {
+    ) -> (
+        Result<Option<Arc<LogEntry<C>>>, CurpError>,
+        Option<EventListener>,
+    ) {
         debug!("{} gets proposal for cmd({})", self.id(), propose_id);
+
+        let mut log_persistent_listener = None;
+        macro_rules! return_with_listener {
+            ($res:expr) => {
+                return ($res, log_persistent_listener);
+            };
+        }
+
         let st_r = self.st.read();
 
         // Rejects the request
@@ -250,13 +261,13 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         match st_r.term.cmp(&term) {
             // Current node is a zombie
             cmp::Ordering::Less => {
-                return Err(CurpError::Zombie(()));
+                return_with_listener!(Err(CurpError::Zombie(())));
             }
             cmp::Ordering::Greater => {
-                return Err(CurpError::Redirect(Redirect {
+                return_with_listener!(Err(CurpError::Redirect(Redirect {
                     leader_id: st_r.leader_id,
                     term: st_r.term,
-                }));
+                })));
             }
             cmp::Ordering::Equal => {}
         }
@@ -269,16 +280,16 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         // Non-leader doesn't need to sync or execute
         if st_r.role != Role::Leader {
             if conflict {
-                return Err(CurpError::key_conflict());
+                return_with_listener!(Err(CurpError::key_conflict()));
             }
-            return Ok(None);
+            return_with_listener!(Ok(None));
         }
         if !self
             .ctx
             .cb
             .map_write(|mut cb_w| cb_w.sync.insert(propose_id))
         {
-            return Err(CurpError::duplicated());
+            return_with_listener!(Err(CurpError::duplicated()));
         }
 
         // leader also needs to check if the cmd conflicts un-synced commands
@@ -290,30 +301,41 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             })
         }
 
-        let entry = log_w.push(st_r.term, propose_id, cmd)?;
+        let entry = match log_w.push(st_r.term, propose_id, cmd) {
+            Ok((e, l)) => {
+                log_persistent_listener = Some(l);
+                e
+            }
+            Err(err) => {
+                return_with_listener!(Err(err.into()));
+            }
+        };
         debug!("{} gets new log[{}]", self.id(), entry.index);
 
         self.entry_process(&mut log_w, Arc::clone(&entry), conflict);
 
         if conflict {
-            return Err(CurpError::key_conflict());
+            return_with_listener!(Err(CurpError::key_conflict()));
         }
 
-        Ok(Some(entry))
+        return_with_listener!(Ok(Some(entry)));
     }
 
     /// Handle `shutdown` request
-    pub(super) fn handle_shutdown(&self, propose_id: ProposeId) -> Result<(), CurpError> {
+    pub(super) fn handle_shutdown(
+        &self,
+        propose_id: ProposeId,
+    ) -> Result<EventListener, CurpError> {
         let st_r = self.st.read();
         if st_r.role != Role::Leader {
             return Err(CurpError::redirect(st_r.leader_id, st_r.term));
         }
 
         let mut log_w = self.log.write();
-        let entry = log_w.push(st_r.term, propose_id, EntryData::Shutdown)?;
+        let (entry, listener) = log_w.push(st_r.term, propose_id, EntryData::Shutdown)?;
         debug!("{} gets new log[{}]", self.id(), entry.index);
         self.entry_process(&mut log_w, entry, true);
-        Ok(())
+        Ok(listener)
     }
 
     /// Handle `propose_conf_change` request
@@ -321,7 +343,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         &self,
         propose_id: ProposeId,
         conf_changes: Vec<ConfChange>,
-    ) -> Result<(), CurpError> {
+    ) -> Result<EventListener, CurpError> {
         debug!("{} gets conf change for with id {}", self.id(), propose_id);
         let st_r = self.st.read();
 
@@ -336,7 +358,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         conflict |= self.insert_ucp(propose_id, conf_changes.clone());
 
         let mut log_w = self.log.write();
-        let entry = log_w.push(st_r.term, propose_id, conf_changes.clone())?;
+        let (entry, listener) = log_w.push(st_r.term, propose_id, conf_changes.clone())?;
         debug!("{} gets new log[{}]", self.id(), entry.index);
         let (addrs, name, is_learner) = self.apply_conf_change(conf_changes);
         self.ctx
@@ -347,11 +369,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             FallbackContext::new(Arc::clone(&entry), addrs, name, is_learner),
         );
         self.entry_process(&mut log_w, entry, conflict);
-        Ok(())
+        Ok(listener)
     }
 
     /// Handle `publish` request
-    pub(super) fn handle_publish(&self, req: PublishRequest) -> Result<(), CurpError> {
+    pub(super) fn handle_publish(&self, req: PublishRequest) -> Result<EventListener, CurpError> {
         debug!(
             "{} gets publish with propose id {}",
             self.id(),
@@ -362,10 +384,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             return Err(CurpError::redirect(st_r.leader_id, st_r.term));
         }
         let mut log_w = self.log.write();
-        let entry = log_w.push(st_r.term, req.propose_id(), req)?;
+        let (entry, listener) = log_w.push(st_r.term, req.propose_id(), req)?;
         debug!("{} gets new log[{}]", self.id(), entry.index);
         self.entry_process(&mut log_w, entry, false);
-        Ok(())
+        Ok(listener)
     }
 
     /// Handle `append_entries`
@@ -379,7 +401,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         prev_log_term: u64,
         entries: Vec<LogEntry<C>>,
         leader_commit: LogIndex,
-    ) -> Result<u64, (u64, LogIndex)> {
+    ) -> Result<(u64, Vec<EventListener>), (u64, LogIndex)> {
         if entries.is_empty() {
             trace!(
                 "{} received heartbeat from {}: term({}), commit({}), prev_log_index({}), prev_log_term({})",
@@ -416,9 +438,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
         // append log entries
         let mut log_w = self.log.write();
-        let (cc_entries, fallback_indexes) = log_w
+        let (cc_entries, fallback_indexes, persistent_listeners) = log_w
             .try_append_entries(entries, prev_log_index, prev_log_term)
             .map_err(|_ig| (term, log_w.commit_index + 1))?;
+
         // fallback overwritten conf change entries
         for idx in fallback_indexes.iter().sorted().rev() {
             let info = log_w.fallback_contexts.remove(idx).unwrap_or_else(|| {
@@ -447,7 +470,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         if prev_commit_index < log_w.commit_index {
             self.apply(&mut *log_w, false);
         }
-        Ok(term)
+        Ok((term, persistent_listeners))
     }
 
     /// Handle `append_entries` response
@@ -818,7 +841,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         uncommitted_pool: UncommittedPoolRef<C>,
         cfg: Arc<CurpConfig>,
         sync_events: DashMap<ServerId, Arc<Event>>,
-        log_tx: mpsc::UnboundedSender<Arc<LogEntry<C>>>,
+        log_tx: mpsc::UnboundedSender<(Arc<LogEntry<C>>, Event)>,
         role_change: RC,
         shutdown_trigger: shutdown::Trigger,
         connects: DashMap<ServerId, InnerConnectApiWrapper>,
@@ -875,7 +898,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         uncommitted_pool: UncommittedPoolRef<C>,
         cfg: &Arc<CurpConfig>,
         sync_event: DashMap<ServerId, Arc<Event>>,
-        log_tx: mpsc::UnboundedSender<Arc<LogEntry<C>>>,
+        log_tx: mpsc::UnboundedSender<(Arc<LogEntry<C>>, Event)>,
         voted_for: Option<(u64, ServerId)>,
         entries: Vec<LogEntry<C>>,
         last_applied: LogIndex,
@@ -1447,19 +1470,24 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let mut sp_l = self.ctx.sp.lock();
 
         let term = st.term;
+        let mut listeners = vec![];
         for entry in recovered_cmds {
             let _ig_sync = cb_w.sync.insert(entry.id); // may have been inserted before
             let _ig_spec = sp_l.insert(entry.clone()); // may have been inserted before
             #[allow(clippy::expect_used)]
-            let entry = log
+            let (entry, listener) = log
                 .push(term, entry.id, entry.inner)
                 .expect("cmd {cmd:?} cannot be serialized");
+            listeners.push(listener);
             debug!(
                 "{} recovers speculatively executed cmd({}) in log[{}]",
                 self.id(),
                 entry.propose_id,
                 entry.index,
             );
+        }
+        for listener in listeners {
+            listener.wait();
         }
     }
 

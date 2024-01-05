@@ -10,6 +10,7 @@ use std::{
 
 use bincode::serialized_size;
 use clippy_utilities::{NumericCast, OverflowArithmetic};
+use event_listener::{Event, EventListener};
 use itertools::Itertools;
 use tokio::sync::mpsc;
 use tracing::error;
@@ -42,7 +43,7 @@ pub(super) struct Log<C: Command> {
     /// Contexts of fallback log entries
     pub(super) fallback_contexts: HashMap<LogIndex, FallbackContext<C>>,
     /// Tx to send log entries to persist task
-    log_tx: mpsc::UnboundedSender<Arc<LogEntry<C>>>,
+    log_tx: mpsc::UnboundedSender<(Arc<LogEntry<C>>, Event)>,
     /// Entries to keep in memory
     entries_cap: usize,
 }
@@ -214,7 +215,7 @@ type FallbackIndexes = HashSet<LogIndex>;
 impl<C: Command> Log<C> {
     /// Create a new log
     pub(super) fn new(
-        log_tx: mpsc::UnboundedSender<Arc<LogEntry<C>>>,
+        log_tx: mpsc::UnboundedSender<(Arc<LogEntry<C>>, Event)>,
         batch_limit: u64,
         entries_cap: usize,
     ) -> Self {
@@ -270,7 +271,7 @@ impl<C: Command> Log<C> {
         entries: Vec<LogEntry<C>>,
         prev_log_index: LogIndex,
         prev_log_term: u64,
-    ) -> Result<(ConfChangeEntries<C>, FallbackIndexes), Vec<LogEntry<C>>> {
+    ) -> Result<(ConfChangeEntries<C>, FallbackIndexes, Vec<EventListener>), Vec<LogEntry<C>>> {
         let mut conf_changes = vec![];
         let mut need_fallback_indexes = HashSet::new();
         // check if entries can be appended
@@ -282,6 +283,7 @@ impl<C: Command> Log<C> {
         }
         // append log entries, will erase inconsistencies
         let mut li = prev_log_index;
+        let mut persistent_listeners = vec![];
         for entry in entries {
             let entry = Arc::new(entry);
             li += 1;
@@ -307,17 +309,20 @@ impl<C: Command> Log<C> {
                 .push_back(Arc::clone(&entry))
                 .expect("log entry {entry:?} cannot be serialized");
 
-            self.send_persist(entry);
+            persistent_listeners.push(self.send_persist(entry));
         }
 
-        Ok((conf_changes, need_fallback_indexes))
+        Ok((conf_changes, need_fallback_indexes, persistent_listeners))
     }
 
     /// Send log entries to persist task
-    pub(super) fn send_persist(&self, entry: Arc<LogEntry<C>>) {
-        if let Err(err) = self.log_tx.send(entry) {
+    pub(super) fn send_persist(&self, entry: Arc<LogEntry<C>>) -> EventListener {
+        let persistent_event = Event::new();
+        let persistent_listener = persistent_event.listen();
+        if let Err(err) = self.log_tx.send((entry, persistent_event)) {
             error!("failed to send log to persist, {err}");
         }
+        persistent_listener
     }
 
     /// Check if the candidate's log is up-to-date
@@ -337,12 +342,12 @@ impl<C: Command> Log<C> {
         term: u64,
         propose_id: ProposeId,
         entry: impl Into<EntryData<C>>,
-    ) -> Result<Arc<LogEntry<C>>, bincode::Error> {
+    ) -> Result<(Arc<LogEntry<C>>, EventListener), bincode::Error> {
         let index = self.last_log_index() + 1;
         let entry = Arc::new(LogEntry::new(index, term, propose_id, entry));
         self.entries.push_back(Arc::clone(&entry))?;
-        self.send_persist(Arc::clone(&entry));
-        Ok(entry)
+        let persistent_listener = self.send_persist(Arc::clone(&entry));
+        Ok((entry, persistent_listener))
     }
 
     /// check whether the log entry range [li,..) exceeds the batch limit or not
