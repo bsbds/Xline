@@ -1,7 +1,6 @@
 use std::{path::Path, sync::Arc};
 
 use bytes::BytesMut;
-use curp_external_api::cmd::ProposeId;
 use curp_test_utils::test_cmd::TestCommand;
 use parking_lot::Mutex;
 use tempfile::TempDir;
@@ -9,6 +8,7 @@ use tokio_util::codec::Encoder;
 
 use crate::{
     log_entry::{EntryData, LogEntry},
+    rpc::ProposeId,
     server::storage::wal::{
         codec::DataFrameOwned, test_util::EntryGenerator, util::get_file_paths_with_ext,
     },
@@ -97,7 +97,7 @@ async fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
 
     storage.truncate_tail(truncate_at).await;
     let next_entry =
-        LogEntry::<TestCommand>::new(truncate_at + 1, 1, EntryData::Empty(ProposeId(1, 3)));
+        LogEntry::<TestCommand>::new(truncate_at + 1, 1, ProposeId(1, 3), EntryData::Empty);
     storage
         .send_sync(vec![DataFrame::Entry(&next_entry)])
         .await
