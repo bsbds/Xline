@@ -24,12 +24,15 @@ use engine::{Engine, EngineType, Snapshot, SnapshotAllocator};
 use itertools::Itertools;
 use madsim::runtime::NodeHandle;
 use parking_lot::Mutex;
+use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tracing::debug;
 use utils::{
-    config::{ClientConfig, CurpConfigBuilder, EngineConfig},
+    config::{ClientConfig, CurpConfigBuilder, EngineConfig, WALConfig},
     shutdown,
 };
+
+use crate::WAL_TEST_SEGMENT_SIZE;
 
 struct MemorySnapshotAllocator;
 
@@ -49,6 +52,7 @@ pub struct CurpNode {
     pub store: Arc<Mutex<Option<Arc<Engine>>>>,
     pub storage_path: PathBuf,
     pub role_change_arc: Arc<TestRoleChangeInner>,
+    pub wal_dir: TempDir,
 }
 
 pub struct CurpGroup {
@@ -91,6 +95,8 @@ impl CurpGroup {
                 let store_c = Arc::clone(&store);
                 let role_change_cb = TestRoleChange::default();
                 let role_change_arc = role_change_cb.get_inner_arc();
+                let wal_dir = tempfile::tempdir().unwrap();
+                let wal_dir_path = PathBuf::from(wal_dir.path());
 
                 let node_handle = handle
                     .create_node()
@@ -120,6 +126,7 @@ impl CurpGroup {
                             },
                             Arc::new(
                                 CurpConfigBuilder::default()
+                                    .wal_cfg(WALConfig::new(&wal_dir_path, WAL_TEST_SEGMENT_SIZE))
                                     .engine_cfg(engine_cfg.clone())
                                     .log_entries_cap(10)
                                     .build()
@@ -141,6 +148,7 @@ impl CurpGroup {
                         store,
                         storage_path,
                         role_change_arc,
+                        wal_dir,
                     },
                 )
             })

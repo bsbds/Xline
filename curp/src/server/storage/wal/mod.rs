@@ -16,7 +16,7 @@ mod remover;
 mod segment;
 
 /// WAL storage simulation tests
-#[cfg(test)]
+#[cfg(all(test, wal_sim_test))]
 mod sim_tests;
 
 /// WAL test utils

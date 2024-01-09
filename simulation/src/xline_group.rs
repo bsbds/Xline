@@ -1,12 +1,14 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use curp::members::{ClusterInfo, ServerId};
 use itertools::Itertools;
 use madsim::runtime::NodeHandle;
+use tempfile::TempDir;
 use tonic::transport::Channel;
 use tracing::debug;
 use utils::config::{
-    ClientConfig, CompactConfig, CurpConfig, EngineConfig, ServerTimeout, StorageConfig,
+    ClientConfig, CompactConfig, CurpConfigBuilder, EngineConfig, ServerTimeout, StorageConfig,
+    WALConfig,
 };
 use xline::{server::XlineServer, storage::db::DB};
 use xline_client::{
@@ -22,11 +24,14 @@ use xline_client::{
 };
 use xlineapi::{command::Command, KvClient, RequestUnion, WatchClient};
 
+use crate::WAL_TEST_SEGMENT_SIZE;
+
 pub struct XlineNode {
     pub id: ServerId,
     pub addr: String,
     pub name: String,
     pub handle: NodeHandle,
+    pub wal_dir: TempDir,
 }
 
 pub struct XlineGroup {
@@ -48,6 +53,8 @@ impl XlineGroup {
                 let addr = format!("192.168.1.{}:12345", i + 1);
                 let cluster_info = Arc::new(ClusterInfo::new(all.clone(), &name));
                 let id = cluster_info.self_id();
+                let wal_dir = tempfile::tempdir().unwrap();
+                let wal_dir_path = PathBuf::from(wal_dir.path());
 
                 let handle = handle
                     .create_node()
@@ -57,7 +64,10 @@ impl XlineGroup {
                         let server = XlineServer::new(
                             cluster_info.clone(),
                             false,
-                            CurpConfig::default(),
+                            CurpConfigBuilder::default()
+                                .wal_cfg(WALConfig::new(&wal_dir_path, WAL_TEST_SEGMENT_SIZE))
+                                .build()
+                                .unwrap(),
                             ClientConfig::default(),
                             ServerTimeout::default(),
                             StorageConfig::default(),
@@ -82,6 +92,7 @@ impl XlineGroup {
                         addr,
                         name,
                         handle,
+                        wal_dir,
                     },
                 )
             })

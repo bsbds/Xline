@@ -24,6 +24,7 @@ use engine::{
 };
 use futures::future::join_all;
 use itertools::Itertools;
+use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
     runtime::{Handle, Runtime},
@@ -32,7 +33,7 @@ use tokio::{
 };
 use tracing::debug;
 use utils::{
-    config::{ClientConfig, CurpConfigBuilder, EngineConfig, StorageConfig},
+    config::{ClientConfig, CurpConfigBuilder, EngineConfig, StorageConfig, WALConfig},
     shutdown::{self, Trigger},
 };
 pub mod commandpb {
@@ -44,6 +45,8 @@ pub use commandpb::{
     ProposeResponse,
 };
 
+const WAL_TEST_SEGMENT_SIZE: u64 = 512;
+
 pub struct CurpNode {
     pub id: ServerId,
     pub addr: String,
@@ -52,6 +55,7 @@ pub struct CurpNode {
     pub role_change_arc: Arc<TestRoleChangeInner>,
     pub handle: JoinHandle<Result<(), ServerError>>,
     pub trigger: Trigger,
+    pub wal_dir: TempDir,
 }
 
 pub struct CurpGroup {
@@ -125,6 +129,7 @@ impl CurpGroup {
                     .collect();
                 let id = cluster_info.self_id();
 
+                let wal_dir = tempfile::tempdir().unwrap();
                 let role_change_cb = TestRoleChange::default();
                 let role_change_arc = role_change_cb.get_inner_arc();
                 let handle = tokio::spawn(Rpc::run_from_listener(
@@ -136,6 +141,7 @@ impl CurpGroup {
                     role_change_cb,
                     Arc::new(
                         CurpConfigBuilder::default()
+                            .wal_cfg(WALConfig::new(&wal_dir, WAL_TEST_SEGMENT_SIZE))
                             .engine_cfg(curp_storage_config)
                             .log_entries_cap(10)
                             .build()
@@ -154,6 +160,7 @@ impl CurpGroup {
                         role_change_arc,
                         handle,
                         trigger,
+                        wal_dir,
                     },
                 )
             })
@@ -199,6 +206,7 @@ impl CurpGroup {
         let id = cluster_info.self_id();
         let role_change_cb = TestRoleChange::default();
         let role_change_arc = role_change_cb.get_inner_arc();
+        let wal_dir = tempfile::tempdir().unwrap();
         let handle = tokio::spawn(Rpc::run_from_listener(
             cluster_info,
             false,
@@ -208,6 +216,7 @@ impl CurpGroup {
             role_change_cb,
             Arc::new(
                 CurpConfigBuilder::default()
+                    .wal_cfg(WALConfig::new(&wal_dir, WAL_TEST_SEGMENT_SIZE))
                     .engine_cfg(curp_storage_config)
                     .log_entries_cap(10)
                     .build()
@@ -225,6 +234,7 @@ impl CurpGroup {
                 role_change_arc,
                 handle,
                 trigger,
+                wal_dir,
             },
         );
         let client = self.new_client().await;

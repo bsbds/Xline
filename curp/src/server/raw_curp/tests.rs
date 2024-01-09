@@ -6,7 +6,7 @@ use tokio::time::sleep;
 use tracing_test::traced_test;
 use utils::config::{
     default_candidate_timeout_ticks, default_follower_timeout_ticks, default_heartbeat_interval,
-    CurpConfigBuilder,
+    CurpConfigBuilder, WALConfig,
 };
 
 use super::*;
@@ -15,6 +15,8 @@ use crate::{
     server::{cmd_board::CommandBoard, raw_curp::UncommittedPool, spec_pool::SpeculativePool},
     LogIndex,
 };
+
+const WAL_TEST_SEGMENT_SIZE: u64 = 512;
 
 // Hooks for tests
 impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
@@ -42,9 +44,12 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let cmd_board = Arc::new(RwLock::new(CommandBoard::new()));
         let spec_pool = Arc::new(Mutex::new(SpeculativePool::new()));
         let uncommitted_pool = Arc::new(Mutex::new(UncommittedPool::new()));
-        let (log_tx, log_rx) = mpsc::unbounded_channel();
-        // prevent the channel from being closed
-        std::mem::forget(log_rx);
+        let (log_tx, mut log_rx) = mpsc::unbounded_channel::<(Arc<LogEntry<C>>, Event)>();
+        std::thread::spawn(move || {
+            while let Some((_log, notifier)) = log_rx.blocking_recv() {
+                notifier.notify(1);
+            }
+        });
         let sync_events = cluster_info
             .peers_ids()
             .into_iter()
@@ -60,7 +65,9 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 )
             })
             .collect();
+        let wal_dir = tempfile::tempdir().unwrap();
         let curp_config = CurpConfigBuilder::default()
+            .wal_cfg(WALConfig::new(wal_dir.into_path(), WAL_TEST_SEGMENT_SIZE))
             .log_entries_cap(10)
             .build()
             .unwrap();

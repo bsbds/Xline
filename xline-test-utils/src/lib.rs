@@ -93,6 +93,7 @@ impl Cluster {
             };
             let mut wal_dir = path.clone();
             wal_dir.push("wal");
+            std::fs::create_dir(&wal_dir).unwrap();
             tokio::spawn(async move {
                 let server = XlineServer::new(
                     cluster_info.into(),
