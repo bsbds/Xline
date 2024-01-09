@@ -22,7 +22,7 @@ use super::{
     cmd_worker::{after_sync, execute, worker_reset, worker_snapshot},
     raw_curp::{AppendEntries, RawCurp, UncommittedPool, Vote},
     spec_pool::{SpecPoolRef, SpeculativePool},
-    storage::StorageApi,
+    storage::{CurpStorage, StorageApi},
 };
 use crate::{
     cmd::{Command, CommandExecutor},
@@ -39,7 +39,7 @@ use crate::{
         PublishResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
         TriggerShutdownResponse, VoteRequest, VoteResponse, WaitSyncedRequest, WaitSyncedResponse,
     },
-    server::{raw_curp::SyncAction, storage::db::DB},
+    server::raw_curp::SyncAction,
     snapshot::{Snapshot, SnapshotMeta},
 };
 
@@ -697,12 +697,13 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let last_applied = cmd_executor
             .last_applied()
             .map_err(|e| CurpError::internal(format!("get applied index error, {e}")))?;
-        let storage = Arc::new(DB::open(&curp_cfg.engine_cfg)?);
+        let (storage, voted_for, entries) =
+            CurpStorage::recover(&curp_cfg.engine_cfg, &curp_cfg.wal_cfg).await?;
+        let storage_arc = Arc::new(storage);
         // TODO: bounded might better
         let (as_tx, as_rx) = flume::unbounded();
 
         // create curp state machine
-        let (voted_for, entries) = storage.recover().await?;
         let curp = if voted_for.is_none() && entries.is_empty() {
             Arc::new(RawCurp::new(
                 Arc::clone(&cluster_info),
@@ -744,14 +745,14 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             ))
         };
 
-        Self::run_bg_tasks(Arc::clone(&curp), Arc::clone(&storage), log_rx);
+        Self::run_bg_tasks(Arc::clone(&curp), Arc::clone(&storage_arc), log_rx);
         Self::run_as_tasks(Arc::clone(&curp), Arc::clone(&cmd_executor), as_rx);
 
         Ok(Self {
             curp,
             spec_pool,
             cmd_board,
-            storage,
+            storage: storage_arc,
             snapshot_allocator,
             cmd_executor,
             as_tx,

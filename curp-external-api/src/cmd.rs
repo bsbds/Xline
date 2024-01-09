@@ -17,12 +17,15 @@ mod pri {
 
     /// Trait bound for serializable
     #[allow(unreachable_pub)]
-    pub trait Serializable: ThreadSafe + Clone + Serialize + DeserializeOwned {}
+    pub trait Serializable: ThreadSafe + Clone + Serialize + DeserializeOwned + Unpin {}
 }
 
 impl<T> pri::ThreadSafe for T where T: Debug + Send + Sync + 'static {}
 
-impl<T> pri::Serializable for T where T: pri::ThreadSafe + Clone + Serialize + DeserializeOwned {}
+impl<T> pri::Serializable for T where
+    T: pri::ThreadSafe + Clone + Serialize + DeserializeOwned + Unpin
+{
+}
 
 /// Command to execute on the server side
 #[async_trait]

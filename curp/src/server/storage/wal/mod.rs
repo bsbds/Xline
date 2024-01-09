@@ -62,7 +62,7 @@ const WAL_VERSION: u8 = 0x00;
 const WAL_FILE_EXT: &str = ".wal";
 
 /// The WAL storage
-struct WALStorage<C> {
+pub(super) struct WALStorage<C> {
     /// The directory to store the log files
     config: WALConfig,
     /// The pipeline that pre-allocates files
@@ -83,7 +83,7 @@ where
 {
     /// Recover from the given directory if there's any segments
     /// Otherwise, creates a new `LogStorage`
-    pub(super) async fn new_or_recover(config: WALConfig) -> io::Result<(Self, Vec<LogEntry<C>>)> {
+    pub(crate) async fn new_or_recover(config: WALConfig) -> io::Result<(Self, Vec<LogEntry<C>>)> {
         // We try to recover the removal first
         SegmentRemover::recover(&config.dir).await?;
 
@@ -144,7 +144,7 @@ where
 
     /// Send frames with fsync
     #[allow(clippy::pattern_type_mismatch)] // Cannot satisfy both clippy
-    pub(super) async fn send_sync(&mut self, item: Vec<&LogEntry<C>>) -> io::Result<()> {
+    pub(crate) async fn send_sync(&mut self, item: Vec<&LogEntry<C>>) -> io::Result<()> {
         let last_segment = self
             .segments
             .last_mut()
@@ -169,7 +169,7 @@ where
     /// Tuncate all the logs whose index is less than or equal to `compact_index`
     ///
     /// `compact_index` should be the smallest index required in CURP
-    pub(super) async fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
+    pub(crate) async fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
         if compact_index >= self.next_log_index {
             warn!(
                 "head truncation: compact index too large, compact index: {}, storage next index: {}",
@@ -200,7 +200,7 @@ where
     }
 
     /// Tuncate all the logs whose index is greater than `max_index`
-    pub(super) async fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
+    pub(crate) async fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
         // segments to truncate
         let segments = self
             .segments
