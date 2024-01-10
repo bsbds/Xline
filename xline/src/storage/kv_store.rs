@@ -8,7 +8,7 @@ use std::{
 };
 
 use clippy_utilities::{Cast, OverflowArithmetic};
-use engine::Transaction;
+use engine::{Transaction, TransactionApi};
 use prost::Message;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -212,14 +212,12 @@ where
     }
 
     /// After-Syncs a request
-    pub(crate) async fn after_sync<'a>(
+    pub(crate) async fn after_sync(
         &self,
         request: &RequestWithToken,
-        txn_db: &Transaction,
-    ) -> Result<(SyncResponse, Vec<WriteOp<'a>>), ExecuteError> {
-        self.sync_request(&request.request, txn_db)
-            .await
-            .map(|resp| (resp, vec![]))
+        txn_db: Transaction,
+    ) -> Result<SyncResponse, ExecuteError> {
+        self.sync_request(&request.request, txn_db).await
     }
 
     /// Recover data from persistent storage
@@ -761,7 +759,7 @@ where
     async fn sync_request(
         &self,
         wrapper: &RequestWrapper,
-        txn_db: &Transaction,
+        txn_db: Transaction,
     ) -> Result<SyncResponse, ExecuteError> {
         debug!("Execute {:?}", wrapper);
 
@@ -774,18 +772,22 @@ where
                 vec![]
             }
             RequestWrapper::PutRequest(ref req) => {
-                self.sync_put(txn_db, &txn_index, req, next_revision, &mut 0)?
+                self.sync_put(&txn_db, &txn_index, req, next_revision, &mut 0)?
             }
             RequestWrapper::DeleteRangeRequest(ref req) => {
-                self.sync_delete_range(txn_db, &txn_index, req, next_revision, &mut 0)?
+                self.sync_delete_range(&txn_db, &txn_index, req, next_revision, &mut 0)?
             }
             RequestWrapper::TxnRequest(ref req) => {
-                self.sync_txn(txn_db, &txn_index, req, next_revision, &mut 0)?
+                self.sync_txn(&txn_db, &txn_index, req, next_revision, &mut 0)?
             }
             RequestWrapper::CompactionRequest(ref req) => self.sync_compaction(req).await?,
             _ => unreachable!("Other request should not be sent to this store"),
         };
 
+        txn_db
+            .commit()
+            .await
+            .map_err(|e| ExecuteError::DbError(e.to_string()))?;
         txn_index.commit();
 
         let response = if events.is_empty() {
@@ -1041,7 +1043,6 @@ where
 mod test {
     use std::time::Duration;
 
-    use engine::TransactionApi;
     use test_macros::abort_on_panic;
     use tokio::{runtime::Handle, task::block_in_place};
     use utils::{config::EngineConfig, shutdown};
@@ -1154,10 +1155,7 @@ mod test {
         request: &RequestWithToken,
     ) -> Result<(), ExecuteError> {
         let txn = store.db().transaction();
-        store.after_sync(request, &txn).await?;
-        txn.commit()
-            .await
-            .map_err(|e| ExecuteError::DbError(e.to_string()))
+        store.after_sync(request, txn).await.map(|_| ())
     }
 
     fn index_compact(store: &Arc<KvStore<DB>>, at_rev: i64) -> Vec<Vec<u8>> {

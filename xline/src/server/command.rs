@@ -321,17 +321,21 @@ where
         let txn_db = self.persistent.transaction();
         txn_db.write_op(WriteOp::PutAppliedIndex(index))?;
 
-        let (res, wr_ops) = match wrapper.request.backend() {
-            RequestBackend::Kv => self.kv_storage.after_sync(wrapper, &txn_db).await?,
-            RequestBackend::Auth => self.auth_storage.after_sync(wrapper)?,
-            RequestBackend::Lease => self.lease_storage.after_sync(wrapper).await?,
-            RequestBackend::Alarm => self.alarm_storage.after_sync(wrapper),
-        };
-        if let RequestWrapper::CompactionRequest(ref compact_req) = wrapper.request {
-            if compact_req.physical {
-                if let Some(n) = self.compact_events.get(&cmd.compact_id()) {
-                    n.notify(usize::MAX);
-                }
+        let res = match wrapper.request.backend() {
+            RequestBackend::Kv => self.kv_storage.after_sync(wrapper, txn_db).await?,
+            RequestBackend::Auth | RequestBackend::Lease | RequestBackend::Alarm => {
+                let (res, wr_ops) = match wrapper.request.backend() {
+                    RequestBackend::Auth => self.auth_storage.after_sync(wrapper)?,
+                    RequestBackend::Lease => self.lease_storage.after_sync(wrapper).await?,
+                    RequestBackend::Alarm => self.alarm_storage.after_sync(wrapper),
+                    RequestBackend::Kv => unreachable!(),
+                };
+                txn_db.write_ops(wr_ops)?;
+                txn_db
+                    .commit()
+                    .await
+                    .map_err(|e| ExecuteError::DbError(e.to_string()))?;
+                res
             }
         };
         if let RequestWrapper::CompactionRequest(ref compact_req) = wrapper.request {
@@ -341,11 +345,14 @@ where
                 }
             }
         };
-        txn_db.write_ops(wr_ops)?;
-        txn_db
-            .commit()
-            .await
-            .map_err(|e| ExecuteError::DbError(e.to_string()))?;
+        if let RequestWrapper::CompactionRequest(ref compact_req) = wrapper.request {
+            if compact_req.physical {
+                if let Some(n) = self.compact_events.get(&cmd.compact_id()) {
+                    n.notify(usize::MAX);
+                }
+            }
+        };
+
         self.lease_storage.mark_lease_synced(&wrapper.request);
 
         if !quota_enough {

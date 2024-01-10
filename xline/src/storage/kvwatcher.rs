@@ -585,7 +585,6 @@ mod test {
 
     use std::{collections::BTreeMap, time::Duration};
 
-    use engine::TransactionApi;
     use test_macros::abort_on_panic;
     use tokio::time::{sleep, timeout};
     use utils::config::EngineConfig;
@@ -745,7 +744,6 @@ mod test {
             .into(),
         );
         let txn = store.db().transaction();
-        store.after_sync(&req, &txn).await.unwrap();
-        txn.commit().await.unwrap();
+        store.after_sync(&req, txn).await.unwrap();
     }
 }

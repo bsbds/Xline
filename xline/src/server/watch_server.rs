@@ -429,7 +429,6 @@ mod test {
         time::Duration,
     };
 
-    use engine::TransactionApi;
     use parking_lot::Mutex;
     use test_macros::abort_on_panic;
     use tokio::{
@@ -466,8 +465,7 @@ mod test {
         );
 
         let txn = store.db().transaction();
-        store.after_sync(&req, &txn).await.unwrap();
-        txn.commit().await.unwrap();
+        store.after_sync(&req, txn).await.unwrap();
     }
 
     #[tokio::test]
