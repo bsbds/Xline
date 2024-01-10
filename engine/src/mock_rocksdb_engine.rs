@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// Mock `RocksDB` Storage Engine
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RocksEngine {
     /// The inner storage engine of Mock `RocksDB`
     inner: MemoryEngine,
