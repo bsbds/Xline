@@ -156,12 +156,13 @@ use utils::{
         default_compact_sleep_interval, default_compact_timeout, default_follower_timeout_ticks,
         default_gc_interval, default_heartbeat_interval, default_initial_retry_timeout,
         default_log_entries_cap, default_log_level, default_max_retry_timeout,
-        default_propose_timeout, default_quota, default_range_retry_timeout, default_retry_count,
-        default_rotation, default_rpc_timeout, default_server_wait_synced_timeout,
-        default_sync_victims_interval, default_use_backoff, default_watch_progress_notify_interval,
-        file_appender, AuthConfig, AutoCompactConfig, ClientConfig, ClusterConfig, CompactConfig,
-        CurpConfigBuilder, EngineConfig, InitialClusterState, LevelConfig, LogConfig,
-        RotationConfig, ServerTimeout, StorageConfig, TraceConfig, XlineServerConfig,
+        default_max_segment_size, default_propose_timeout, default_quota,
+        default_range_retry_timeout, default_retry_count, default_rotation, default_rpc_timeout,
+        default_server_wait_synced_timeout, default_sync_victims_interval, default_use_backoff,
+        default_watch_progress_notify_interval, file_appender, AuthConfig, AutoCompactConfig,
+        ClientConfig, ClusterConfig, CompactConfig, CurpConfigBuilder, EngineConfig,
+        InitialClusterState, LevelConfig, LogConfig, RotationConfig, ServerTimeout, StorageConfig,
+        TraceConfig, WALConfig, XlineServerConfig,
     },
     parse_batch_bytes, parse_duration, parse_log_level, parse_members, parse_rotation, parse_state,
     ConfigFileError,
@@ -300,25 +301,35 @@ struct ServerArgs {
     /// Quota
     #[clap(long)]
     quota: Option<u64>,
+    /// WAL segment size
+    #[clap(long)]
+    wal_segment_size: Option<u64>,
 }
 
 impl From<ServerArgs> for XlineServerConfig {
     fn from(args: ServerArgs) -> Self {
+        let curp_dir = args.curp_dir.unwrap_or_else(|| {
+            let mut path = args.data_dir.clone();
+            path.push("curp");
+            path
+        });
+        let wal_dir = {
+            let mut path = curp_dir.clone();
+            path.push("wal");
+            path
+        };
         let (engine, curp_engine) = match args.storage_engine.as_str() {
             "memory" => (EngineConfig::Memory, EngineConfig::Memory),
             "rocksdb" => (
                 EngineConfig::RocksDB(args.data_dir.clone()),
-                EngineConfig::RocksDB(args.curp_dir.unwrap_or_else(|| {
-                    let mut path = args.data_dir;
-                    path.push("curp");
-                    path
-                })),
+                EngineConfig::RocksDB(curp_dir),
             ),
             &_ => unreachable!("xline only supports memory and rocksdb engine"),
         };
 
         let storage = StorageConfig::new(engine, args.quota.unwrap_or_else(default_quota));
         let Ok(curp_config) = CurpConfigBuilder::default()
+        .wal_cfg(WALConfig::new(wal_dir, args.wal_segment_size.unwrap_or_else(default_max_segment_size)))
         .heartbeat_interval(args.heartbeat_interval
             .unwrap_or_else(default_heartbeat_interval))
         .wait_synced_timeout(args.server_wait_synced_timeout
