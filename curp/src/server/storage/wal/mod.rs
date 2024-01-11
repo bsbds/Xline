@@ -84,6 +84,10 @@ where
     /// Recover from the given directory if there's any segments
     /// Otherwise, creates a new `LogStorage`
     pub(crate) async fn new_or_recover(config: WALConfig) -> io::Result<(Self, Vec<LogEntry<C>>)> {
+        if !config.dir.try_exists()? {
+            std::fs::create_dir_all(&config.dir);
+        }
+
         // We try to recover the removal first
         SegmentRemover::recover(&config.dir).await?;
 
