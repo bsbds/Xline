@@ -11,15 +11,15 @@ MEMBERS="node1=${SERVERS[1]}:2379,node2=${SERVERS[2]}:2379,node3=${SERVERS[3]}:2
 # XLINE_TESTCASE[0] VS ETCD_TESTCASE[2]: The performance contrast between one using curp-client to propose and the other use etcd-client.
 XLINE_TESTCASE=(
     "client  true  ${MEMBERS}"
-    "client  false node3=${SERVERS[3]}:2379"
-    "client  false node1=${SERVERS[1]}:2379"
+    # "client  false node3=${SERVERS[3]}:2379"
+    # "client  false node1=${SERVERS[1]}:2379"
 )
 ETCD_TESTCASE=(
     "client  false node1=${SERVERS[1]}:2379"
-    "client  false node3=${SERVERS[2]}:2379"
+    # "client  false node3=${SERVERS[2]}:2379"
 )
-KEY_SPACE_SIZE=("1" "100000")
-CLIENTS_TOTAL=("1 50" "10 300" "50 1000" "100 3000" "200 5000")
+KEY_SPACE_SIZE=("100000")
+CLIENTS_TOTAL=("1000 100000")
 FORMAT="%-8s\t%-12s\t%-8s\t%-s\n"
 
 # generate benchmark command by arguments
@@ -37,14 +37,14 @@ benchmark_cmd() {
     clients=${4}
     total=${5}
     key_space_size=${6}
-    echo "docker exec ${container_name} /usr/local/bin/benchmark --endpoints ${endpoints} ${use_curp} --clients=${clients} --stdout put --key-size=8 --val-size=256 --total=${total} --key-space-size=${key_space_size}"
+    echo "docker exec ${container_name} env RUST_LOG=debug /usr/local/bin/benchmark --endpoints ${endpoints} ${use_curp} --clients=${clients} --stdout put --key-size=8 --val-size=256 --total=${total} --key-space-size=${key_space_size}"
 }
 
 # run xline node by index
 # args:
 #   $1: index of the node
 run_xline() {
-    cmd="/usr/local/bin/xline \
+    cmd="RUST_LOG=debug /usr/local/bin/xline \
     --name node${1} \
     --members ${MEMBERS} \
     --storage-engine rocksdb \
@@ -61,8 +61,8 @@ run_xline() {
         cmd="${cmd} --is-leader"
     fi
 
-    docker exec -e RUST_LOG=curp,xline. -d node${1} ${cmd}
-    echo "docker exec -e RUST_LOG=curp,xline -d node${1} ${cmd}"
+    docker exec -e RUST_LOG=debug. -d node${1} sh -c "${cmd} > /opt/xline.log"
+    echo "docker exec -e RUST_LOG=debug -d node${1} ${cmd}"
 }
 
 # run etcd node by index
@@ -200,12 +200,12 @@ run_container() {
         image="datenlord/etcd:v3.5.5"
         ;;
     esac
-    docker run -d -it --rm --name=client --net=xline_net --ip=${SERVERS[0]} --cap-add=NET_ADMIN --cpu-shares=512 -m=512M -v ${WORKDIR}:/mnt ${image} bash &
+    docker run -d -it --rm --name=client --net=xline_net --ip=${SERVERS[0]} --cap-add=NET_ADMIN -v ${WORKDIR}:/mnt ${image} bash &
     for ((i = 1; i <= ${size}; i++)); do
-        docker run -d -it --rm --name=node${i} --net=xline_net --ip=${SERVERS[$i]} --cap-add=NET_ADMIN -m=2048M -v ${WORKDIR}:/mnt ${image} bash &
+        docker run -d -it --rm --name=node${i} --net=xline_net --ip=${SERVERS[$i]} --cap-add=NET_ADMIN -v ${WORKDIR}:/mnt ${image} bash &
     done
     wait
-    set_cluster_latency ${size}
+#    set_cluster_latency ${size}
     echo container started
 }
 
@@ -216,7 +216,7 @@ rm -r ${OUTPUT_DIR} >/dev/null 2>&1
 mkdir ${OUTPUT_DIR}
 mkdir ${OUTPUT_DIR}/logs
 
-for server in "xline" "etcd"; do
+for server in "xline"; do
     count=0
     logs_dir=${OUTPUT_DIR}/logs/${server}_logs
     mkdir -p ${logs_dir}
@@ -265,7 +265,7 @@ for server in "xline" "etcd"; do
 
                 run_cluster ${server}
                 cmd=$(benchmark_cmd "${container_name}" "${endpoints}" "${use_curp}" "${clients}" "${total}" "${key_space_size}")
-                ${cmd} >${output_file}
+                ${cmd} > ${output_file}
                 stop_cluster ${server}
 
                 Latency=$(cat ${output_file} | grep Average | awk '{printf "%.1f",$2*1000}')
