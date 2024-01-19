@@ -28,3 +28,7 @@ madsim = { git = "https://github.com/madsim-rs/madsim.git", rev = "5eb4198", pac
 tokio = { git = "https://github.com/madsim-rs/madsim.git", rev = "5eb4198", package = "madsim-tokio" }
 tonic = { git = "https://github.com/madsim-rs/madsim.git", rev = "5eb4198", package = "madsim-tonic" }
 tonic-build = { git = "https://github.com/madsim-rs/madsim.git", rev = "5eb4198", package = "madsim-tonic-build" }
+
+
+[profile.release]
+debug = true
