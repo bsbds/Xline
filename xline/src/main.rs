@@ -134,6 +134,7 @@
 #![allow(
     clippy::panic, // allow debug_assert, panic in production code
     clippy::multiple_crate_versions, // caused by the dependency, can't be fixed
+    unused,
 )]
 
 use std::{collections::HashMap, env, net::ToSocketAddrs, path::PathBuf, time::Duration};
@@ -512,7 +513,7 @@ async fn main() -> Result<()> {
     let cluster_config = config.cluster();
     let auth_config = config.auth();
 
-    let _guard = init_subscriber(cluster_config.name(), log_config, trace_config)?;
+    // let _guard = init_subscriber(cluster_config.name(), log_config, trace_config)?;
 
     let key_pair = read_key_pair(
         auth_config.auth_private_key().clone(),
