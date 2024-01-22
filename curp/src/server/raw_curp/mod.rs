@@ -8,6 +8,7 @@
 
 #![allow(clippy::similar_names)] // st, lst, cst is similar but not confusing
 #![allow(clippy::integer_arithmetic)] // u64 is large enough and won't overflow
+#![allow(unused)]
 
 use std::{
     cmp::min,
@@ -251,7 +252,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         cmd: Arc<C>,
     ) -> Result<bool, CurpError> {
         debug!("{} gets proposal for cmd({})", self.id(), propose_id);
-        let mut conflict = self.insert_sp(propose_id, Arc::clone(&cmd));
+        let conflict = false;
         let st_r = self.st.read();
         // Non-leader doesn't need to sync or execute
         if st_r.role != Role::Leader {
@@ -269,8 +270,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             return Err(CurpError::duplicated());
         }
 
-        // leader also needs to check if the cmd conflicts un-synced commands
-        conflict |= self.insert_ucp(propose_id, Arc::clone(&cmd));
         let mut log_w = self.log.write();
         let entry = log_w.push(st_r.term, propose_id, cmd)?;
         debug!("{} gets new log[{}]", self.id(), entry.index);
