@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
 
 use clippy_utilities::NumericCast;
 use engine::{SnapshotAllocator, SnapshotApi};
-use event_listener::Event;
+use event_listener::{Event, EventListener};
 use futures::{future::join_all, pin_mut, stream::FuturesUnordered, Stream, StreamExt};
 use madsim::rand::{thread_rng, Rng};
 use parking_lot::{Mutex, RwLock};
@@ -59,6 +59,14 @@ pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
     cmd_executor: Arc<CE>,
     /// Tx to send entries to after_sync
     as_tx: flume::Sender<TaskType<C>>,
+
+    propose_tx: flume::Sender<(
+        ProposeRequest,
+        oneshot::Sender<(
+            Result<Option<Arc<LogEntry<C>>>, CurpError>,
+            Option<EventListener>,
+        )>,
+    )>,
 }
 
 /// The after sync task type
@@ -81,11 +89,11 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         }
         let id = req.propose_id();
         self.check_cluster_version(req.cluster_version)?;
-        let cmd: Arc<C> = Arc::new(req.cmd()?);
 
+        let (tx, rx) = oneshot::channel();
+        let _ignore = self.propose_tx.send((req, tx));
         // handle proposal
-        let (result, log_persistent_listener) =
-            self.curp.handle_propose(id, Arc::clone(&cmd), req.term);
+        let (result, log_persistent_listener) = rx.await?;
 
         if let Some(listener) = log_persistent_listener {
             listener.await;
@@ -702,6 +710,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let storage_arc = Arc::new(storage);
         // TODO: bounded might better
         let (as_tx, as_rx) = flume::unbounded();
+        let (propose_tx, propose_rx) = flume::unbounded();
 
         // create curp state machine
         let curp = if voted_for.is_none() && entries.is_empty() {
@@ -745,7 +754,12 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             ))
         };
 
-        Self::run_bg_tasks(Arc::clone(&curp), Arc::clone(&storage_arc), log_rx);
+        Self::run_bg_tasks(
+            Arc::clone(&curp),
+            Arc::clone(&storage_arc),
+            log_rx,
+            propose_rx,
+        );
         Self::run_as_tasks(Arc::clone(&curp), Arc::clone(&cmd_executor), as_rx);
 
         Ok(Self {
@@ -756,6 +770,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             snapshot_allocator,
             cmd_executor,
             as_tx,
+            propose_tx,
         })
     }
 
@@ -764,12 +779,31 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         curp: Arc<RawCurp<C, RC>>,
         storage: Arc<impl StorageApi<Command = C> + 'static>,
         log_rx: mpsc::UnboundedReceiver<(Arc<LogEntry<C>>, Event)>,
+        propose_rx: flume::Receiver<(
+            ProposeRequest,
+            oneshot::Sender<(
+                Result<Option<Arc<LogEntry<C>>>, CurpError>,
+                Option<EventListener>,
+            )>,
+        )>,
     ) {
         let shutdown_listener = curp.shutdown_listener();
         let _election_task = tokio::spawn(Self::election_task(Arc::clone(&curp)));
-        let _sync_followers_daemon = tokio::spawn(Self::sync_followers_daemon(curp));
+        let _sync_followers_daemon = tokio::spawn(Self::sync_followers_daemon(Arc::clone(&curp)));
         let _log_persist_task =
             tokio::spawn(Self::log_persist_task(log_rx, storage, shutdown_listener));
+        for _ in 0..1 {
+            let propose_rx_c = propose_rx.clone();
+            let curp_c = curp.clone();
+            let _ig = tokio::spawn(async move {
+                while let Ok((req, tx)) = propose_rx_c.recv_async().await {
+                    let propose_id = req.propose_id();
+                    let cmd: Arc<C> = Arc::new(req.cmd().unwrap_or_else(|_| unreachable!()));
+                    let res = curp_c.handle_propose(propose_id, cmd, req.term);
+                    let _ig = tx.send(res);
+                }
+            });
+        }
     }
 
     /// Run after sync tasks
