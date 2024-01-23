@@ -7,7 +7,7 @@ use futures::{pin_mut, stream::FuturesUnordered, Stream, StreamExt};
 use madsim::rand::{thread_rng, Rng};
 use parking_lot::{Mutex, RwLock};
 use tokio::{
-    sync::{broadcast, mpsc},
+    sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
     time::MissedTickBehavior,
 };
@@ -58,6 +58,7 @@ pub(super) struct CurpNode<C: Command, RC: RoleChange> {
     storage: Arc<dyn StorageApi<Command = C>>,
     /// Snapshot allocator
     snapshot_allocator: Box<dyn SnapshotAllocator>,
+    propose_tx: flume::Sender<(ProposeRequest, oneshot::Sender<Result<bool, CurpError>>)>,
 }
 
 /// Handlers for clients
@@ -67,12 +68,12 @@ impl<C: Command, RC: RoleChange> CurpNode<C, RC> {
         if self.curp.is_shutdown() {
             return Err(CurpError::shutting_down());
         }
-        let id = req.propose_id();
-        self.check_cluster_version(req.cluster_version)?;
-        let cmd: Arc<C> = Arc::new(req.cmd()?);
 
+        let id = req.propose_id();
+        let (tx, rx) = oneshot::channel();
+        let _ig = self.propose_tx.send((req, tx));
         // handle proposal
-        let sp_exec = self.curp.handle_propose(id, Arc::clone(&cmd))?;
+        let sp_exec = rx.await??;
 
         // if speculatively executed, wait for the result and return
         if sp_exec {
@@ -634,6 +635,7 @@ impl<C: Command, RC: RoleChange> CurpNode<C, RC> {
             conflict_checked_mpmc::channel(Arc::clone(&cmd_executor), shutdown_trigger.clone());
         let ce_event_tx: Arc<dyn CEEventTxApi<C>> = Arc::new(ce_event_tx);
         let storage = Arc::new(DB::open(&curp_cfg.storage_cfg)?);
+        let (propose_tx, propose_rx) = flume::unbounded();
 
         // create curp state machine
         let (voted_for, entries) = storage.recover().await?;
@@ -692,7 +694,7 @@ impl<C: Command, RC: RoleChange> CurpNode<C, RC> {
             shutdown_listener.clone(),
         );
 
-        Self::run_bg_tasks(Arc::clone(&curp), Arc::clone(&storage), log_rx);
+        Self::run_bg_tasks(Arc::clone(&curp), Arc::clone(&storage), log_rx, propose_rx);
 
         Ok(Self {
             curp,
@@ -701,6 +703,7 @@ impl<C: Command, RC: RoleChange> CurpNode<C, RC> {
             ce_event_tx,
             storage,
             snapshot_allocator,
+            propose_tx,
         })
     }
 
@@ -709,12 +712,22 @@ impl<C: Command, RC: RoleChange> CurpNode<C, RC> {
         curp: Arc<RawCurp<C, RC>>,
         storage: Arc<impl StorageApi<Command = C> + 'static>,
         log_rx: mpsc::UnboundedReceiver<Arc<LogEntry<C>>>,
+        propose_rx: flume::Receiver<(ProposeRequest, oneshot::Sender<Result<bool, CurpError>>)>,
     ) {
         let shutdown_listener = curp.shutdown_listener();
         let _election_task = tokio::spawn(Self::election_task(Arc::clone(&curp)));
-        let _sync_followers_daemon = tokio::spawn(Self::sync_followers_daemon(curp));
+        let _sync_followers_daemon = tokio::spawn(Self::sync_followers_daemon(Arc::clone(&curp)));
         let _log_persist_task =
             tokio::spawn(Self::log_persist_task(log_rx, storage, shutdown_listener));
+
+        let _ignore = tokio::spawn(async move {
+            while let Ok((req, tx)) = propose_rx.recv_async().await {
+                let id = req.propose_id();
+                let cmd: Arc<C> = Arc::new(req.cmd().unwrap_or_else(|_| unreachable!()));
+                let res = curp.handle_propose(id, cmd);
+                let _ig = tx.send(res);
+            }
+        });
     }
 
     /// Candidate or pre candidate broadcasts votes
