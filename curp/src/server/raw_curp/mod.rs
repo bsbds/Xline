@@ -272,6 +272,14 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             cmp::Ordering::Equal => {}
         }
 
+        if !self
+            .ctx
+            .cb
+            .map_write(|mut cb_w| cb_w.sync.insert(propose_id))
+        {
+            return_with_listener!(Err(CurpError::duplicated()));
+        }
+
         // NOTE: The log lock determines the conflict order and must be acquired
         // before inserting the command into sp/ucp
         let mut log_w = self.log.write();
@@ -283,13 +291,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 return_with_listener!(Err(CurpError::key_conflict()));
             }
             return_with_listener!(Ok(None));
-        }
-        if !self
-            .ctx
-            .cb
-            .map_write(|mut cb_w| cb_w.sync.insert(propose_id))
-        {
-            return_with_listener!(Err(CurpError::duplicated()));
         }
 
         if !conflict {
