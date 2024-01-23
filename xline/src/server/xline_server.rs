@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use engine::{MemorySnapshotAllocator, RocksSnapshotAllocator, SnapshotAllocator};
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use tokio::{sync::mpsc::channel, task::JoinHandle};
-use tonic::transport::{server::Router, Server};
+use tonic::transport::Server;
 use tracing::{error, warn};
 use utils::{
     config::{ClientConfig, CompactConfig, CurpConfig, ServerTimeout, StorageConfig},
@@ -204,7 +204,17 @@ impl XlineServer {
         &self,
         persistent: Arc<S>,
         key_pair: Option<(EncodingKey, DecodingKey)>,
-    ) -> Result<(Router, Arc<CurpClient>)> {
+        addrs: Vec<SocketAddr>,
+    ) -> Result<(
+        JoinHandle<Result<(), tonic::transport::Error>>,
+        Arc<CurpClient>,
+    )> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tonic::codegen::http;
+        use tower_http::trace::TraceLayer;
+        use tracing::Span;
+
         let (
             kv_server,
             lock_server,
@@ -216,7 +226,69 @@ impl XlineServer {
             curp_server,
             curp_client,
         ) = self.init_servers(persistent, key_pair).await?;
+
+        let request_cnt = Arc::new(AtomicUsize::new(0));
+        let response_cnt = Arc::new(AtomicUsize::new(0));
+        let error_cnt = Arc::new(AtomicUsize::new(0));
+        let latency_total = Arc::new(AtomicUsize::new(0));
+        let latency_total_c = Arc::clone(&latency_total);
+
+        let latency_total_cc = Arc::clone(&latency_total);
+        let request_cnt_c = Arc::clone(&request_cnt);
+        let response_cnt_c = Arc::clone(&response_cnt);
+        let error_cnt_c = Arc::clone(&error_cnt);
+
+        let _ignore = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut last_request = 0;
+            let mut last_response = 0;
+            loop {
+                let _ignore = interval.tick().await;
+                let request_cnt = request_cnt_c.load(Ordering::Relaxed);
+                let response_cnt = response_cnt_c.load(Ordering::Relaxed);
+                let error_cnt = error_cnt_c.load(Ordering::Relaxed);
+                let request_dlt = request_cnt - last_request;
+                let response_dlt = response_cnt - last_response;
+                println!(
+                    "request_cnt: {request_cnt}\nresponse_cnt: {response_cnt}\nerror_cnt:{error_cnt}\nrequest throuthput: {request_dlt}\nresponse throughput: {response_dlt}\nlatency avg: {:?}us\n",
+                    latency_total_cc.load(Ordering::Relaxed).checked_div(response_cnt).unwrap_or(0) 
+                );
+                last_request = request_cnt;
+                last_response = response_cnt;
+            }
+        });
+
+        let failure_fn = move |_error: tower_http::classify::GrpcFailureClass,
+                               _latency: Duration,
+                               _span: &Span| {
+            let _ignore = error_cnt.fetch_add(1, Ordering::Relaxed);
+        };
+
+        let request_fn = move |request: &http::Request<_>, _span: &Span| {
+            match request.uri().path().split('/').last().unwrap() {
+                "Propose" => {
+                    let _ignore = request_cnt.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        };
+        let response_fn = move |response: &http::Response<_>, latency: Duration, _span: &Span| {
+            match response.headers().get("type").map(|h| h.to_str().ok()).flatten().unwrap_or("") {
+                "Propose" => {
+                    let _ignore = response_cnt.fetch_add(1, Ordering::Relaxed);
+                    let _ignore = latency_total_c.fetch_add(latency.as_micros().cast(),Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        };
+
         let router = Server::builder()
+            .layer(
+                TraceLayer::new_for_grpc()
+                    .on_failure(failure_fn)
+                    .on_request(request_fn)
+                    .on_response(response_fn),
+            )
             .add_service(RpcLockServer::new(lock_server))
             .add_service(RpcKvServer::new(kv_server))
             .add_service(RpcLeaseServer::from_arc(lease_server))
@@ -234,7 +306,18 @@ impl XlineServer {
                 .await;
             router.add_service(health_server)
         };
-        Ok((router, curp_client))
+
+        let mut shutdown_listener = self.shutdown_trigger.subscribe();
+        let signal = async move {
+            let _r = shutdown_listener.wait_self_shutdown().await;
+        };
+        let incoming = bind_addrs(addrs.into_iter())?;
+
+        let handle =
+            tokio::spawn(
+                async move { router.serve_with_incoming_shutdown(incoming, signal).await },
+            );
+        Ok((handle, curp_client))
     }
 
     /// Start `XlineServer`
@@ -275,16 +358,7 @@ impl XlineServer {
         persistent: Arc<S>,
         key_pair: Option<(EncodingKey, DecodingKey)>,
     ) -> Result<JoinHandle<Result<(), tonic::transport::Error>>> {
-        let mut shutdown_listener = self.shutdown_trigger.subscribe();
-        let signal = async move {
-            let _r = shutdown_listener.wait_self_shutdown().await;
-        };
-        let (router, curp_client) = self.init_router(persistent, key_pair).await?;
-        let incoming = bind_addrs(addrs.into_iter())?;
-        let handle =
-            tokio::spawn(
-                async move { router.serve_with_incoming_shutdown(incoming, signal).await },
-            );
+        let (handle, curp_client) = self.init_router(persistent, key_pair, addrs).await?;
         if let Err(e) = self.publish(curp_client).await {
             warn!("publish name to cluster failed: {:?}", e);
         };
@@ -300,23 +374,10 @@ impl XlineServer {
     #[cfg(not(madsim))]
     pub async fn start_from_listener<S: StorageApi>(
         &self,
-        xline_listener: tokio::net::TcpListener,
-        persistent: Arc<S>,
-        key_pair: Option<(EncodingKey, DecodingKey)>,
+        _xline_listener: tokio::net::TcpListener,
+        _persistent: Arc<S>,
+        _key_pair: Option<(EncodingKey, DecodingKey)>,
     ) -> Result<()> {
-        let mut shutdown_listener = self.shutdown_trigger.subscribe();
-        let signal = async move {
-            shutdown_listener.wait_self_shutdown().await;
-        };
-        let (router, curp_client) = self.init_router(persistent, key_pair).await?;
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(xline_listener);
-        let _h =
-            tokio::spawn(
-                async move { router.serve_with_incoming_shutdown(incoming, signal).await },
-            );
-        if let Err(e) = self.publish(curp_client).await {
-            warn!("publish name to cluster failed: {:?}", e);
-        };
         Ok(())
     }
 

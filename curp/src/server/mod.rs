@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 #[cfg(not(madsim))]
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::metadata::MetadataValue;
 #[cfg(not(madsim))]
 use tracing::info;
 use tracing::instrument;
@@ -77,9 +78,10 @@ impl<C: Command, RC: RoleChange> crate::rpc::Protocol for Rpc<C, RC> {
         request: tonic::Request<ProposeRequest>,
     ) -> Result<tonic::Response<ProposeResponse>, tonic::Status> {
         request.metadata().extract_span();
-        Ok(tonic::Response::new(
-            self.inner.propose(request.into_inner()).await?,
-        ))
+        let mut resp = tonic::Response::new(self.inner.propose(request.into_inner()).await?);
+        let meta = resp.metadata_mut();
+        let _ignore = meta.insert("type", MetadataValue::from_static("Propose"));
+        Ok(resp)
     }
 
     #[instrument(skip_all, name = "curp_shutdown")]
@@ -121,9 +123,10 @@ impl<C: Command, RC: RoleChange> crate::rpc::Protocol for Rpc<C, RC> {
         request: tonic::Request<WaitSyncedRequest>,
     ) -> Result<tonic::Response<WaitSyncedResponse>, tonic::Status> {
         request.metadata().extract_span();
-        Ok(tonic::Response::new(
-            self.inner.wait_synced(request.into_inner()).await?,
-        ))
+        let mut resp = tonic::Response::new(self.inner.wait_synced(request.into_inner()).await?);
+        let meta = resp.metadata_mut();
+        let _ignore = meta.insert("type", MetadataValue::from_static("WaitSynced"));
+        Ok(resp)
     }
 
     #[instrument(skip_all, name = "curp_fetch_cluster")]
