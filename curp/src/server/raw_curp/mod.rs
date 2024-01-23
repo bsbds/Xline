@@ -276,7 +276,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         // before inserting the command into sp/ucp
         let mut log_w = self.log.write();
 
-        let mut conflict = self.insert_sp(propose_id, Arc::clone(&cmd));
+        let conflict = false;
         // Non-leader doesn't need to sync or execute
         if st_r.role != Role::Leader {
             if conflict {
@@ -291,9 +291,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         {
             return_with_listener!(Err(CurpError::duplicated()));
         }
-
-        // leader also needs to check if the cmd conflicts un-synced commands
-        conflict |= self.insert_ucp(propose_id, Arc::clone(&cmd));
 
         if !conflict {
             self.ctx.cb.map_write(|mut cb_w| {
