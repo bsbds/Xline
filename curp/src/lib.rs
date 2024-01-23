@@ -133,6 +133,7 @@
 )]
 #![allow(
     clippy::multiple_crate_versions, // caused by the dependency, can't be fixed
+    unused,
 )]
 #![cfg_attr(
     test,
