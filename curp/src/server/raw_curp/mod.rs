@@ -169,7 +169,7 @@ struct Context<C: Command, RC: RoleChange> {
     /// Election tick
     election_tick: AtomicU8,
     /// Followers sync event trigger
-    sync_events: DashMap<ServerId, Arc<Event>>,
+    sync_events: RwLock<HashMap<ServerId, Arc<Event>>>,
     /// Become leader event
     leader_event: Arc<Event>,
     /// Leader change callback
@@ -711,7 +711,8 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             // if some entries are recovered, sync with followers immediately
             self.ctx
                 .sync_events
-                .iter()
+                .read()
+                .values()
                 .for_each(|event| event.notify(1));
         }
 
@@ -838,7 +839,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         spec_pool: SpecPoolRef<C>,
         uncommitted_pool: UncommittedPoolRef<C>,
         cfg: Arc<CurpConfig>,
-        sync_events: DashMap<ServerId, Arc<Event>>,
+        sync_events: RwLock<HashMap<ServerId, Arc<Event>>>,
         log_tx: mpsc::UnboundedSender<(Arc<LogEntry<C>>, Event)>,
         role_change: RC,
         shutdown_trigger: shutdown::Trigger,
@@ -895,7 +896,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         spec_pool: SpecPoolRef<C>,
         uncommitted_pool: UncommittedPoolRef<C>,
         cfg: &Arc<CurpConfig>,
-        sync_event: DashMap<ServerId, Arc<Event>>,
+        sync_event: RwLock<HashMap<ServerId, Arc<Event>>>,
         log_tx: mpsc::UnboundedSender<(Arc<LogEntry<C>>, Event)>,
         voted_for: Option<(u64, ServerId)>,
         entries: Vec<LogEntry<C>>,
@@ -1050,9 +1051,9 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         Arc::clone(
             self.ctx
                 .sync_events
+                .read()
                 .get(&id)
-                .unwrap_or_else(|| unreachable!("server id {id} not found"))
-                .value(),
+                .unwrap_or_else(|| unreachable!("server id {id} not found")),
         )
     }
 
@@ -1179,7 +1180,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 self.cst
                     .map_lock(|mut cst_l| _ = cst_l.config.remove(node_id));
                 self.lst.remove(node_id);
-                _ = self.ctx.sync_events.remove(&node_id);
+                _ = self.ctx.sync_events.write().remove(&node_id);
                 let _ig = self.ctx.cluster_info.remove(&node_id);
                 _ = self.ctx.connects.remove(&node_id);
                 Some(ConfChange::remove(node_id))
@@ -1189,7 +1190,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 self.cst
                     .map_lock(|mut cst_l| _ = cst_l.config.insert(node_id, is_learner));
                 self.lst.insert(node_id, is_learner);
-                _ = self.ctx.sync_events.insert(node_id, Arc::new(Event::new()));
+                _ = self
+                    .ctx
+                    .sync_events
+                    .write()
+                    .insert(node_id, Arc::new(Event::new()));
                 let _ig = self.ctx.cluster_info.insert(member);
                 if is_learner {
                     Some(ConfChange::add_learner(node_id, old_addrs))
@@ -1566,7 +1571,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 self.cst
                     .map_lock(|mut cst_l| _ = cst_l.config.insert(node_id, is_learner));
                 self.lst.insert(node_id, is_learner);
-                _ = self.ctx.sync_events.insert(node_id, Arc::new(Event::new()));
+                _ = self
+                    .ctx
+                    .sync_events
+                    .write()
+                    .insert(node_id, Arc::new(Event::new()));
                 let m = self.ctx.cluster_info.insert(member);
                 (m.is_none(), (vec![], String::new(), is_learner))
             }
@@ -1575,7 +1584,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                     .map_lock(|mut cst_l| _ = cst_l.config.remove(node_id));
                 self.lst.remove(node_id);
                 let m = self.ctx.cluster_info.remove(&node_id);
-                _ = self.ctx.sync_events.remove(&node_id);
+                _ = self.ctx.sync_events.write().remove(&node_id);
                 _ = self.ctx.connects.remove(&node_id);
                 let modified = m.is_some();
                 let removed_member =
@@ -1633,8 +1642,8 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         if !conflict {
             log_w.last_exe = index;
         }
-        self.ctx.sync_events.iter().for_each(|e| {
-            if let Some(next) = self.lst.get_next_index(*e.key()) {
+        self.ctx.sync_events.read().iter().for_each(|(key, e)| {
+            if let Some(next) = self.lst.get_next_index(*key) {
                 if next > log_w.base_index && log_w.has_next_batch(next) {
                     e.notify(1);
                 }

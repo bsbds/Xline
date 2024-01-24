@@ -26,7 +26,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
     fn contains(&self, id: ServerId) -> bool {
         self.cluster().all_members().contains_key(&id)
-            && self.ctx.sync_events.contains_key(&id)
+            && self.ctx.sync_events.read().contains_key(&id)
             && self.lst.get_all_statuses().contains_key(&id)
             && self.cst.lock().config.contains(id)
     }
@@ -50,11 +50,13 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 notifier.notify(1);
             }
         });
-        let sync_events = cluster_info
-            .peers_ids()
-            .into_iter()
-            .map(|id| (id, Arc::new(Event::new())))
-            .collect();
+        let sync_events = RwLock::new(
+            cluster_info
+                .peers_ids()
+                .into_iter()
+                .map(|id| (id, Arc::new(Event::new())))
+                .collect(),
+        );
         let connects = cluster_info
             .peers_ids()
             .into_iter()

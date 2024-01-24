@@ -689,11 +689,13 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         shutdown_trigger: shutdown::Trigger,
     ) -> Result<Self, CurpError> {
         let _shutdown_listener = shutdown_trigger.subscribe();
-        let sync_events = cluster_info
-            .peers_ids()
-            .into_iter()
-            .map(|server_id| (server_id, Arc::new(Event::new())))
-            .collect();
+        let sync_events = RwLock::new(
+            cluster_info
+                .peers_ids()
+                .into_iter()
+                .map(|server_id| (server_id, Arc::new(Event::new())))
+                .collect(),
+        );
         let connects = rpc::inner_connects(cluster_info.peers_addrs())
             .await
             .map_err(|e| CurpError::internal(format!("parse peers addresses failed, err {e:?}")))?
