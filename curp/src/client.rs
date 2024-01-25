@@ -10,7 +10,7 @@ use std::{
 
 use dashmap::DashMap;
 use event_listener::Event;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{pin_mut, stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use parking_lot::RwLock;
 use tokio::time::timeout;
@@ -642,7 +642,6 @@ where
     ) -> Result<(C::ER, Option<C::ASR>), ClientError<C>> {
         let propose_id = self.gen_propose_id().await?;
         let cmd_arc = Arc::new(cmd);
-        assert!(use_fast_path);
         loop {
             let res_option = if use_fast_path {
                 self.fast_path(propose_id, Arc::clone(&cmd_arc)).await
@@ -664,10 +663,47 @@ where
         propose_id: ProposeId,
         cmd_arc: Arc<C>,
     ) -> Option<Result<(C::ER, Option<C::ASR>), ClientError<C>>> {
-        let res = self.fast_round(propose_id, Arc::clone(&cmd_arc)).await;
-        match res {
-            Ok((r, _)) => r.map(|er| Ok((er, None))),
-            Err(e) => Some(Err(e)),
+        let fast_round = self.fast_round(propose_id, Arc::clone(&cmd_arc));
+        let slow_round = self.slow_round(propose_id, cmd_arc);
+        pin_mut!(fast_round);
+        pin_mut!(slow_round);
+
+        // Wait for the fast and slow round at the same time
+        match futures::future::select(fast_round, slow_round).await {
+            futures::future::Either::Left((fast_result, slow_round)) => {
+                let (fast_er, success) = match fast_result {
+                    Ok(resp) => resp,
+                    Err(ClientError::WrongClusterVersion | ClientError::TermOutdated) => {
+                        return None;
+                    }
+                    Err(e) => return Some(Err(e)),
+                };
+
+                let res = if success {
+                    #[allow(clippy::unwrap_used)]
+                    // when success is true fast_er must be Some
+                    Ok((fast_er.unwrap(), None))
+                } else {
+                    let (asr, er) = match slow_round.await {
+                        Ok(res) => res,
+                        Err(ClientError::WrongClusterVersion) => {
+                            return None;
+                        }
+                        Err(e) => return Some(Err(e)),
+                    };
+                    Ok((er, Some(asr)))
+                };
+                Some(res)
+            }
+            futures::future::Either::Right((slow_result, fast_round)) => match slow_result {
+                Ok((asr, er)) => Some(Ok((er, Some(asr)))),
+                Err(ClientError::WrongClusterVersion) => None,
+                Err(err) => match fast_round.await {
+                    Ok((Some(er), true)) => Some(Ok((er, None))),
+                    Err(ClientError::WrongClusterVersion) => None,
+                    _ => Some(Err(err)),
+                },
+            },
         }
     }
 
