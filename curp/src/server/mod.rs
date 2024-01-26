@@ -4,6 +4,7 @@ use engine::SnapshotAllocator;
 #[cfg(not(madsim))]
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+use tokio_stream::wrappers::ReceiverStream;
 #[cfg(not(madsim))]
 use tokio_stream::wrappers::TcpListenerStream;
 #[cfg(not(madsim))]
@@ -16,14 +17,15 @@ use crate::{
     cmd::{Command, CommandExecutor},
     error::ServerError,
     members::{ClusterInfo, ServerId},
+    response::ResponseSender,
     role_change::RoleChange,
     rpc::{
         AppendEntriesRequest, AppendEntriesResponse, FetchClusterRequest, FetchClusterResponse,
         FetchReadStateRequest, FetchReadStateResponse, InnerProtocolServer, InstallSnapshotRequest,
-        InstallSnapshotResponse, ProposeConfChangeRequest, ProposeConfChangeResponse,
-        ProposeRequest, ProposeResponse, ProtocolServer, PublishRequest, PublishResponse,
-        ShutdownRequest, ShutdownResponse, TriggerShutdownRequest, TriggerShutdownResponse,
-        VoteRequest, VoteResponse, WaitSyncedRequest, WaitSyncedResponse,
+        InstallSnapshotResponse, OpResponse, ProposeConfChangeRequest, ProposeConfChangeResponse,
+        ProposeRequest, ProtocolServer, PublishRequest, PublishResponse, RecordRequest,
+        RecordResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
+        TriggerShutdownResponse, VoteRequest, VoteResponse,
     },
 };
 
@@ -62,14 +64,31 @@ pub struct Rpc<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
 
 #[tonic::async_trait]
 impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol for Rpc<C, CE, RC> {
-    #[instrument(skip_all, name = "curp_propose")]
-    async fn propose(
+    type ProposeStreamStream = ReceiverStream<Result<OpResponse, tonic::Status>>;
+
+    #[instrument(skip_all, name = "curp_propose_stream")]
+    async fn propose_stream(
         &self,
         request: tonic::Request<ProposeRequest>,
-    ) -> Result<tonic::Response<ProposeResponse>, tonic::Status> {
+    ) -> Result<tonic::Response<Self::ProposeStreamStream>, tonic::Status> {
+        request.metadata().extract_span();
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let resp_tx = Arc::new(ResponseSender::new(tx));
+        self.inner
+            .propose_stream(request.into_inner(), resp_tx)
+            .await?;
+
+        Ok(tonic::Response::new(ReceiverStream::new(rx)))
+    }
+
+    #[instrument(skip_all, name = "curp_record")]
+    async fn record(
+        &self,
+        request: tonic::Request<RecordRequest>,
+    ) -> Result<tonic::Response<RecordResponse>, tonic::Status> {
         request.metadata().extract_span();
         Ok(tonic::Response::new(
-            self.inner.propose(request.into_inner()).await?,
+            self.inner.record(request.into_inner()).await?,
         ))
     }
 
@@ -103,17 +122,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol fo
         request.metadata().extract_span();
         Ok(tonic::Response::new(
             self.inner.publish(request.into_inner()).await?,
-        ))
-    }
-
-    #[instrument(skip_all, name = "curp_wait_synced")]
-    async fn wait_synced(
-        &self,
-        request: tonic::Request<WaitSyncedRequest>,
-    ) -> Result<tonic::Response<WaitSyncedResponse>, tonic::Status> {
-        request.metadata().extract_span();
-        Ok(tonic::Response::new(
-            self.inner.wait_synced(request.into_inner()).await?,
         ))
     }
 

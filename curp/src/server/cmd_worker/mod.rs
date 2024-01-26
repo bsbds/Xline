@@ -10,9 +10,9 @@ use super::raw_curp::RawCurp;
 use crate::{
     cmd::{Command, CommandExecutor},
     log_entry::{EntryData, LogEntry},
+    response::ResponseSender,
     role_change::RoleChange,
-    rpc::ConfChangeType,
-    server::cmd_board::CommandBoard,
+    rpc::{ConfChangeType, ProposeResponse, SyncedResponse},
     snapshot::{Snapshot, SnapshotMeta},
 };
 
@@ -51,36 +51,38 @@ pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
 /// Cmd worker after sync handler
 pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     entry: Arc<LogEntry<C>>,
-    should_execute: bool,
+    resp_tx: Option<Arc<ResponseSender>>,
     ce: &CE,
     curp: &RawCurp<C, RC>,
 ) {
     let (cb, sp, ucp) = (curp.cmd_board(), curp.spec_pool(), curp.uncommitted_pool());
     let id = curp.id();
-    match entry.entry_data {
-        EntryData::Command(ref cmd) => {
-            if should_execute {
-                let er_err = match CommandBoard::wait_for_er(&cb, entry.propose_id).await {
-                    Some(er) => er.is_err(),
-                    None => {
-                        let er = ce.execute(cmd.as_ref()).await;
-                        let er_ok = er.is_err();
-                        cb.write().insert_er(entry.propose_id, er);
-                        er_ok
-                    }
-                };
-                if er_err {
+    let remove_from_sp_ucp = || {
+        sp.lock().remove(&entry.propose_id);
+        let _ig = ucp.lock().remove(&entry.propose_id);
+    };
+    #[allow(clippy::pattern_type_mismatch)]
+    match (&entry.entry_data, resp_tx) {
+        // Leader
+        (EntryData::Command(ref cmd), Some(ref tx)) => {
+            if tx.is_conflict() {
+                let er = ce.execute(cmd.as_ref()).await;
+                tx.send_propose(ProposeResponse::new_result::<C>(&er, true));
+                if er.is_err() {
                     ce.trigger(entry.inflight_id(), entry.index);
+                    remove_from_sp_ucp();
                     return;
                 }
             }
             let asr = ce.after_sync(cmd.as_ref(), entry.index).await;
-            cb.write().insert_asr(entry.propose_id, asr);
-            sp.lock().remove(&entry.propose_id);
-            let _ig = ucp.lock().remove(&entry.propose_id);
-            debug!("{id} cmd({}) after sync is called", entry.propose_id);
+            tx.send_synced(SyncedResponse::new_result::<C>(&asr));
         }
-        EntryData::Shutdown => {
+        // Follower
+        (EntryData::Command(ref cmd), None) => {
+            let _ignore = ce.after_sync(cmd.as_ref(), entry.index).await;
+            remove_from_sp_ucp();
+        }
+        (EntryData::Shutdown, _) => {
             curp.enter_shutdown();
             if curp.is_leader() {
                 curp.shutdown_trigger().mark_leader_notified();
@@ -90,7 +92,7 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
             }
             cb.write().notify_shutdown();
         }
-        EntryData::ConfChange(ref conf_change) => {
+        (EntryData::ConfChange(ref conf_change), _) => {
             if let Err(e) = ce.set_last_applied(entry.index) {
                 error!("failed to set last_applied, {e}");
                 return;
@@ -101,21 +103,21 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
             let shutdown_self =
                 change.change_type() == ConfChangeType::Remove && change.node_id == id;
             cb.write().insert_conf(entry.propose_id);
-            sp.lock().remove(&entry.propose_id);
-            let _ig = ucp.lock().remove(&entry.propose_id);
+            remove_from_sp_ucp();
             if shutdown_self {
                 curp.shutdown_trigger().self_shutdown();
             }
         }
-        EntryData::SetName(node_id, ref name) => {
+        (EntryData::SetName(node_id, ref name), _) => {
             if let Err(e) = ce.set_last_applied(entry.index) {
                 error!("failed to set last_applied, {e}");
                 return;
             }
-            curp.cluster().set_name(node_id, name.clone());
+            curp.cluster().set_name(*node_id, name.clone());
         }
-        EntryData::Empty => {}
+        (EntryData::Empty, _) => {}
     };
+    debug!("{id} cmd({}) after sync is called", entry.propose_id);
     ce.trigger(entry.inflight_id(), entry.index);
 }
 

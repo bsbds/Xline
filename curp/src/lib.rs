@@ -189,3 +189,6 @@ pub mod rpc;
 
 /// Snapshot
 mod snapshot;
+
+/// Propose response sender
+mod response;

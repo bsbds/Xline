@@ -10,8 +10,7 @@ use std::{
 
 use dashmap::DashMap;
 use event_listener::Event;
-use futures::{pin_mut, stream::FuturesUnordered, StreamExt};
-use itertools::Itertools;
+use futures::{future, stream::FuturesUnordered, StreamExt};
 use parking_lot::RwLock;
 use tokio::time::timeout;
 use tracing::{debug, instrument, warn};
@@ -21,11 +20,12 @@ use crate::{
     cmd::Command,
     error::{ClientBuildError, ClientError},
     members::ServerId,
+    response::ResponseReceiver,
     rpc::{
         self, connect::ConnectApi, protocol_client::ProtocolClient, ConfChange, CurpError,
         FetchClusterRequest, FetchClusterResponse, FetchReadStateRequest, Member,
         ProposeConfChangeRequest, ProposeId, ProposeRequest, PublishRequest,
-        ReadState as PbReadState, Redirect, ShutdownRequest, WaitSyncedRequest,
+        ReadState as PbReadState, RecordRequest, Redirect, ShutdownRequest,
     },
     LogIndex,
 };
@@ -246,140 +246,6 @@ where
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The fast round of Curp protocol
-    /// It broadcast the requests to all the curp servers.
-    #[instrument(skip_all)]
-    async fn fast_round(
-        &self,
-        propose_id: ProposeId,
-        cmd_arc: Arc<C>,
-    ) -> Result<(Option<<C as Command>::ER>, bool), ClientError<C>> {
-        debug!("fast round for cmd({}) started", propose_id);
-        let req = ProposeRequest::new(
-            propose_id,
-            cmd_arc.as_ref(),
-            self.cluster_version(),
-            self.state.read().term,
-        );
-
-        let connects = self
-            .connects
-            .iter()
-            .map(|connect| Arc::clone(&connect))
-            .collect_vec();
-        let mut rpcs: FuturesUnordered<_> = connects
-            .iter()
-            .zip(iter::repeat(req))
-            .map(|(connect, req_cloned)| {
-                connect.propose(req_cloned, *self.config.propose_timeout())
-            })
-            .collect();
-
-        let mut ok_cnt: usize = 0;
-        let mut execute_result: Option<C::ER> = None;
-        let superquorum = superquorum(self.connects.len());
-        while let Some(resp_result) = rpcs.next().await {
-            let resp = match resp_result {
-                Ok(resp) => resp.into_inner(),
-                Err(e) => {
-                    warn!("Propose error: {e:?}");
-                    match e {
-                        CurpError::ShuttingDown(_) => return Err(ClientError::ShuttingDown),
-                        CurpError::WrongClusterVersion(_) => {
-                            return Err(ClientError::WrongClusterVersion)
-                        }
-                        CurpError::Redirect(_) => {
-                            return Err(ClientError::TermOutdated);
-                        }
-                        _ => continue,
-                    }
-                }
-            };
-            resp.map_result::<C, _, Result<(), ClientError<C>>>(|res| {
-                if let Some(er) = res
-                    .transpose()
-                    .map_err(|e| ClientError::CommandError::<C>(e))?
-                {
-                    assert!(execute_result.is_none(), "should not set exe result twice");
-                    execute_result = Some(er);
-                }
-                ok_cnt = ok_cnt.wrapping_add(1);
-                Ok(())
-            })??;
-            if (ok_cnt >= superquorum) && execute_result.is_some() {
-                debug!("fast round for cmd({}) succeed", propose_id);
-                return Ok((execute_result, true));
-            }
-        }
-        Ok((execute_result, false))
-    }
-
-    /// The slow round of Curp protocol
-    #[instrument(skip_all)]
-    async fn slow_round(
-        &self,
-        propose_id: ProposeId,
-        cmd: Arc<C>,
-    ) -> Result<(<C as Command>::ASR, <C as Command>::ER), ClientError<C>> {
-        debug!("slow round for cmd({}) started", propose_id);
-        let mut retry_timeout = self.get_backoff();
-        let retry_count = *self.config.retry_count();
-        for _ in 0..retry_count {
-            // fetch leader id
-            let leader_id = match self.get_leader_id().await {
-                Ok(id) => id,
-                Err(e) => {
-                    warn!("failed to fetch leader, {e}");
-                    continue;
-                }
-            };
-            debug!("wait synced request sent to {}", leader_id);
-
-            let resp = match self
-                .get_connect(leader_id)
-                .unwrap_or_else(|| unreachable!("leader {leader_id} not found"))
-                .wait_synced(
-                    WaitSyncedRequest::new(propose_id, self.cluster_version()),
-                    *self.config.wait_synced_timeout(),
-                )
-                .await
-            {
-                Ok(resp) => resp.into_inner(),
-                Err(e) => {
-                    warn!("wait synced rpc error: {e:?}");
-                    match e {
-                        CurpError::ShuttingDown(_) => return Err(ClientError::ShuttingDown),
-                        CurpError::WrongClusterVersion(_) => {
-                            return Err(ClientError::WrongClusterVersion)
-                        }
-                        CurpError::RpcTransport(_) => {
-                            // it's quite likely that the leader has crashed, then we should wait for some time and fetch the leader again
-                            tokio::time::sleep(retry_timeout.next_retry()).await;
-                            self.resend_propose(propose_id, Arc::clone(&cmd), None)
-                                .await?;
-                            continue;
-                        }
-                        CurpError::Redirect(Redirect {
-                            leader_id: new_leader,
-                            term,
-                        }) => {
-                            self.state.write().check_and_update(new_leader, term);
-                            // resend the propose to the new leader
-                            self.resend_propose(propose_id, Arc::clone(&cmd), new_leader)
-                                .await?;
-                            continue;
-                        }
-                        _ => return Err(ClientError::InternalError(format!("{e:?}"))),
-                    }
-                }
-            };
-
-            return resp
-                .map_result::<C, _, _>(|res| res.map_err(|e| ClientError::CommandError(e)))?;
-        }
-        Err(ClientError::Timeout)
-    }
-
     /// Set the information of current cluster
     async fn set_cluster(&self, cluster: FetchClusterResponse) -> Result<(), ClientError<C>> {
         debug!("update client by remote cluster: {cluster:?}");
@@ -452,62 +318,6 @@ where
                 }
             };
             return Ok(());
-        }
-        Err(ClientError::Timeout)
-    }
-
-    /// Resend the propose only to the leader. This is used when leader changes and we need to ensure that the propose is received by the new leader.
-    async fn resend_propose(
-        &self,
-        propose_id: ProposeId,
-        cmd: Arc<C>,
-        mut new_leader: Option<ServerId>,
-    ) -> Result<(), ClientError<C>> {
-        let mut retry_timeout = self.get_backoff();
-        let retry_count = *self.config.retry_count();
-        for _ in 0..retry_count {
-            tokio::time::sleep(retry_timeout.next_retry()).await;
-
-            let leader_id = if let Some(id) = new_leader.take() {
-                id
-            } else {
-                match self.fetch_leader().await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        warn!("failed to fetch leader, {e}");
-                        continue;
-                    }
-                }
-            };
-            debug!("resend propose to {leader_id}");
-
-            let term = self.state.read().term;
-            let resp = self
-                .get_connect(leader_id)
-                .unwrap_or_else(|| unreachable!("leader {leader_id} not found"))
-                .propose(
-                    ProposeRequest::new(propose_id, cmd.as_ref(), self.cluster_version(), term),
-                    *self.config.propose_timeout(),
-                )
-                .await;
-
-            if let Err(e) = resp {
-                match e {
-                    CurpError::ShuttingDown(_) => return Err(ClientError::ShuttingDown),
-                    CurpError::WrongClusterVersion(_) => {
-                        return Err(ClientError::WrongClusterVersion);
-                    }
-                    CurpError::Duplicated(_) => {
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-                // if the propose fails again, need to fetch the leader and try again
-                warn!("failed to resend propose, {e:?}");
-                continue;
-            }
-
-            break;
         }
         Err(ClientError::Timeout)
     }
@@ -626,12 +436,7 @@ where
         Err(ClientError::Timeout)
     }
 
-    /// Propose the request to servers, if use_fast_path is false, it will wait for the synced index
-    /// # Errors
-    ///   `ClientError::Execute` if execution error is met
-    ///   `ClientError::AfterSync` error met while syncing logs to followers
-    /// # Panics
-    ///   If leader index is out of bound of all the connections, panic
+    /// Propose
     #[inline]
     #[instrument(skip_all)]
     #[allow(clippy::type_complexity)] // This type is not complex
@@ -640,91 +445,61 @@ where
         cmd: C,
         use_fast_path: bool,
     ) -> Result<(C::ER, Option<C::ASR>), ClientError<C>> {
-        let propose_id = self.gen_propose_id().await?;
         let cmd_arc = Arc::new(cmd);
-        loop {
-            let res_option = if use_fast_path {
-                self.fast_path(propose_id, Arc::clone(&cmd_arc)).await
-            } else {
-                self.slow_path(propose_id, Arc::clone(&cmd_arc)).await
-            };
-            let Some(res) = res_option else {
-                let cluster = self.fetch_cluster(false).await?;
-                self.set_cluster(cluster).await?;
-                continue;
-            };
-            return res;
-        }
-    }
+        let propose_id = self.gen_propose_id().await?;
+        let propose_req = ProposeRequest::new(
+            propose_id,
+            cmd_arc.as_ref(),
+            self.cluster_version(),
+            self.state.read().term,
+        );
+        let record_req = RecordRequest::new(propose_id, cmd_arc.as_ref());
+        let leader_id = self.get_leader_id().await?;
+        let leader_connect = self
+            .connects
+            .get(&leader_id)
+            .map(|e| Arc::clone(e.value()))
+            .unwrap_or_else(|| unreachable!());
+        let follower_connects: Vec<_> = self
+            .connects
+            .iter()
+            .filter(|e| *e.key() != leader_id)
+            .map(|e| Arc::clone(e.value()))
+            .collect();
+        let superquorum = superquorum(self.connects.len());
 
-    /// Fast path of propose
-    async fn fast_path(
-        &self,
-        propose_id: ProposeId,
-        cmd_arc: Arc<C>,
-    ) -> Option<Result<(C::ER, Option<C::ASR>), ClientError<C>>> {
-        let fast_round = self.fast_round(propose_id, Arc::clone(&cmd_arc));
-        let slow_round = self.slow_round(propose_id, cmd_arc);
-        pin_mut!(fast_round);
-        pin_mut!(slow_round);
+        let propose_fut =
+            leader_connect.propose_stream(propose_req.clone(), *self.config.propose_timeout());
+        let record_stream: FuturesUnordered<_> = follower_connects
+            .iter()
+            .zip(iter::repeat(record_req))
+            .map(|(connect, req_cloned)| connect.record(req_cloned, *self.config.propose_timeout()))
+            .collect();
+        let record_futs = record_stream
+            .filter_map(|res| future::ready(res.ok()))
+            .filter(|resp| future::ready(!resp.get_ref().conflict))
+            .take(superquorum.wrapping_sub(1))
+            .collect::<Vec<_>>();
+        let (propose_res, record_resps) = tokio::join!(propose_fut, record_futs);
 
-        // Wait for the fast and slow round at the same time
-        match futures::future::select(fast_round, slow_round).await {
-            futures::future::Either::Left((fast_result, slow_round)) => {
-                let (fast_er, success) = match fast_result {
-                    Ok(resp) => resp,
-                    Err(ClientError::WrongClusterVersion | ClientError::TermOutdated) => {
-                        return None;
-                    }
-                    Err(e) => return Some(Err(e)),
-                };
+        let resp_stream = propose_res
+            .map_err(|e| match e {
+                CurpError::ShuttingDown(_) => ClientError::ShuttingDown,
+                CurpError::WrongClusterVersion(_) => ClientError::WrongClusterVersion,
+                CurpError::Redirect(_) => ClientError::TermOutdated,
+                _ => unreachable!(),
+            })?
+            .into_inner();
+        let mut response_rx = ResponseReceiver::new(resp_stream);
 
-                let res = if success {
-                    #[allow(clippy::unwrap_used)]
-                    // when success is true fast_er must be Some
-                    Ok((fast_er.unwrap(), None))
-                } else {
-                    let (asr, er) = match slow_round.await {
-                        Ok(res) => res,
-                        Err(ClientError::WrongClusterVersion) => {
-                            return None;
-                        }
-                        Err(e) => return Some(Err(e)),
-                    };
-                    Ok((er, Some(asr)))
-                };
-                Some(res)
-            }
-            futures::future::Either::Right((slow_result, fast_round)) => match slow_result {
-                Ok((asr, er)) => Some(Ok((er, Some(asr)))),
-                Err(ClientError::WrongClusterVersion) => None,
-                Err(err) => match fast_round.await {
-                    Ok((Some(er), true)) => Some(Ok((er, None))),
-                    Err(ClientError::WrongClusterVersion) => None,
-                    _ => Some(Err(err)),
-                },
-            },
+        let (er, conflict) = response_rx.recv_er::<C>().await?;
+        let fast_path_failed = conflict || record_resps.len() < superquorum.wrapping_sub(1);
+        if !use_fast_path || fast_path_failed {
+            let asr = response_rx.recv_asr::<C>().await?;
+            return Ok((er, Some(asr)));
         }
-    }
 
-    /// Slow path of propose
-    async fn slow_path(
-        &self,
-        propose_id: ProposeId,
-        cmd_arc: Arc<C>,
-    ) -> Option<Result<(C::ER, Option<C::ASR>), ClientError<C>>> {
-        let fast_round = self.fast_round(propose_id, Arc::clone(&cmd_arc));
-        let slow_round = self.slow_round(propose_id, cmd_arc);
-        #[allow(clippy::integer_arithmetic)] // tokio framework triggers
-        let (fast_result, slow_result) = tokio::join!(fast_round, slow_round);
-        if let Err(ClientError::WrongClusterVersion | ClientError::TermOutdated) = fast_result {
-            return None;
-        }
-        match slow_result {
-            Ok((asr, er)) => Some(Ok((er, Some(asr)))),
-            Err(ClientError::WrongClusterVersion) => None,
-            Err(e) => Some(Err(e)),
-        }
+        Ok((er, None))
     }
 
     /// Propose the conf change request to servers

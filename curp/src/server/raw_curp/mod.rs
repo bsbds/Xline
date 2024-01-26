@@ -46,6 +46,7 @@ use crate::{
     cmd::Command,
     log_entry::{EntryData, LogEntry},
     members::{ClusterInfo, ServerId},
+    response::ResponseSender,
     role_change::RoleChange,
     rpc::{
         connect::InnerConnectApi, connect::InnerConnectApiWrapper, ConfChange, ConfChangeType,
@@ -53,7 +54,7 @@ use crate::{
         Redirect,
     },
     server::{
-        cmd_board::{CmdBoardRef, ExecutionState},
+        cmd_board::CmdBoardRef,
         raw_curp::{log::FallbackContext, state::VoteResult},
         spec_pool::SpecPoolRef,
     },
@@ -184,6 +185,8 @@ struct Context<C: Command, RC: RoleChange> {
     last_conf_change_idx: AtomicU64,
     /// Tx to send entries to after_sync
     as_tx: flume::Sender<TaskType<C>>,
+    /// Response Senders
+    resp_senders: Mutex<HashMap<LogIndex, Arc<ResponseSender>>>,
 }
 
 impl<C: Command, RC: RoleChange> Debug for Context<C, RC> {
@@ -233,26 +236,8 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
 // Curp handlers
 impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
-    /// Handle `propose` request
-    /// Return `Some(entry)` if the leader speculatively executed the command
-    pub(super) fn handle_propose(
-        &self,
-        propose_id: ProposeId,
-        cmd: Arc<C>,
-        term: u64,
-    ) -> (
-        Result<Option<Arc<LogEntry<C>>>, CurpError>,
-        Option<EventListener>,
-    ) {
-        debug!("{} gets proposal for cmd({})", self.id(), propose_id);
-
-        let mut log_persistent_listener = None;
-        macro_rules! return_with_listener {
-            ($res:expr) => {
-                return ($res, log_persistent_listener);
-            };
-        }
-
+    /// Checks the if term are up-to-date
+    pub(super) fn check_term(&self, term: u64) -> Result<(), CurpError> {
         let st_r = self.st.read();
 
         // Rejects the request
@@ -260,65 +245,54 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         // When `st_r.term < term`, the current node is a zombie
         match st_r.term.cmp(&term) {
             // Current node is a zombie
-            cmp::Ordering::Less => {
-                return_with_listener!(Err(CurpError::Zombie(())));
-            }
-            cmp::Ordering::Greater => {
-                return_with_listener!(Err(CurpError::Redirect(Redirect {
-                    leader_id: st_r.leader_id,
-                    term: st_r.term,
-                })));
-            }
-            cmp::Ordering::Equal => {}
+            cmp::Ordering::Less => Err(CurpError::Zombie(())),
+            cmp::Ordering::Greater => Err(CurpError::Redirect(Redirect {
+                leader_id: st_r.leader_id,
+                term: st_r.term,
+            })),
+            cmp::Ordering::Equal => Ok(()),
         }
+    }
 
-        // NOTE: The log lock determines the conflict order and must be acquired
-        // before inserting the command into sp/ucp
+    /// Handles record
+    pub(super) fn follower_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
+        self.insert_sp(propose_id, Arc::clone(&cmd))
+    }
+
+    /// Handles record
+    pub(super) fn leader_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
+        self.insert_sp(propose_id, Arc::clone(&cmd)) | self.insert_ucp(propose_id, cmd)
+    }
+
+    /// Registers response sender
+    pub(super) fn register_resp_tx(&self, index: LogIndex, resp_tx: Arc<ResponseSender>) {
+        let _ignore = self.ctx.resp_senders.lock().insert(index, resp_tx);
+    }
+
+    /// Handles leader propose
+    pub(super) fn push_log(
+        &self,
+        propose_id: ProposeId,
+        cmd: Arc<C>,
+        term: u64,
+        resp_tx: Arc<ResponseSender>,
+    ) -> Result<Option<Arc<LogEntry<C>>>, CurpError> {
         let mut log_w = self.log.write();
-
-        let mut conflict = self.insert_sp(propose_id, Arc::clone(&cmd));
-        // Non-leader doesn't need to sync or execute
-        if st_r.role != Role::Leader {
-            if conflict {
-                return_with_listener!(Err(CurpError::key_conflict()));
-            }
-            return_with_listener!(Ok(None));
-        }
-        if !self
-            .ctx
-            .cb
-            .map_write(|mut cb_w| cb_w.sync.insert(propose_id))
-        {
-            return_with_listener!(Err(CurpError::duplicated()));
-        }
-
-        // leader also needs to check if the cmd conflicts un-synced commands
-        conflict |= self.insert_ucp(propose_id, Arc::clone(&cmd));
-
-        if !conflict {
-            self.ctx.cb.map_write(|mut cb_w| {
-                let _ignore = cb_w.er_buffer.insert(propose_id, ExecutionState::Executing);
-            })
-        }
-
-        let entry = match log_w.push(st_r.term, propose_id, cmd) {
-            Ok((e, l)) => {
-                log_persistent_listener = Some(l);
-                e
-            }
+        let entry = match log_w.push(term, propose_id, cmd) {
+            Ok((e, _l)) => e,
             Err(err) => {
-                return_with_listener!(Err(err.into()));
+                return Err(err.into());
             }
         };
-        debug!("{} gets new log[{}]", self.id(), entry.index);
-
-        self.entry_process(&mut log_w, Arc::clone(&entry), conflict);
-
-        if conflict {
-            return_with_listener!(Err(CurpError::key_conflict()));
+        let index = entry.index;
+        let conflict = resp_tx.is_conflict();
+        self.register_resp_tx(index, resp_tx);
+        if !conflict {
+            log_w.last_exe = index;
         }
+        // TODO: notify sync
 
-        return_with_listener!(Ok(Some(entry)));
+        Ok((!conflict).then_some(entry))
     }
 
     /// Handle `shutdown` request
@@ -468,7 +442,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let prev_commit_index = log_w.commit_index;
         log_w.commit_index = min(leader_commit, log_w.last_log_index());
         if prev_commit_index < log_w.commit_index {
-            self.apply(&mut *log_w, false);
+            self.apply(&mut *log_w);
         }
         Ok((term, persistent_listeners))
     }
@@ -519,7 +493,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             if last_sent_index > log_w.commit_index {
                 log_w.commit_to(last_sent_index);
                 debug!("{} updates commit index to {last_sent_index}", self.id());
-                self.apply(&mut *log_w, true);
+                self.apply(&mut *log_w);
             }
         }
 
@@ -876,6 +850,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 connects,
                 last_conf_change_idx: AtomicU64::new(0),
                 as_tx,
+                resp_senders: Mutex::new(HashMap::new()),
             },
             shutdown_trigger,
         };
@@ -1515,7 +1490,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     }
 
     /// Applies new logs
-    fn apply(&self, log: &mut Log<C>, should_execute: bool) {
+    fn apply(&self, log: &mut Log<C>) {
         for i in (log.last_as + 1)..=log.commit_index {
             let entry = log.get(i).unwrap_or_else(|| {
                 unreachable!(
@@ -1523,7 +1498,8 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                     log.last_log_index()
                 )
             });
-            let task = TaskType::Entry((Arc::clone(entry), should_execute));
+            let sender = self.ctx.resp_senders.lock().remove(&i);
+            let task = TaskType::Entry((Arc::clone(entry), sender));
             if let Err(e) = self.ctx.as_tx.send(task) {
                 error!("send after sync error: {e}");
             }

@@ -32,9 +32,10 @@ pub use self::proto::{
 pub(crate) use self::proto::{
     commandpb::{
         fetch_read_state_response::{IdSet, ReadState},
+        op_response::Op as ResponseOp,
         protocol_server::Protocol,
-        CurpError as CurpErrorWrapper, FetchReadStateRequest, FetchReadStateResponse,
-        ShutdownRequest, ShutdownResponse, WaitSyncedRequest, WaitSyncedResponse,
+        CurpError as CurpErrorWrapper, FetchReadStateRequest, FetchReadStateResponse, OpResponse,
+        RecordRequest, RecordResponse, ShutdownRequest, ShutdownResponse, SyncedResponse,
     },
     inner_messagepb::{
         inner_protocol_server::InnerProtocol, AppendEntriesRequest, AppendEntriesResponse,
@@ -149,7 +150,7 @@ impl ProposeRequest {
 
 impl ProposeResponse {
     /// Create an ok propose response
-    pub(crate) fn new_result<C: Command>(result: &Result<C::ER, C::Error>) -> Self {
+    pub(crate) fn new_result<C: Command>(result: &Result<C::ER, C::Error>, conflict: bool) -> Self {
         let result = match *result {
             Ok(ref er) => Some(CmdResult {
                 result: Some(CmdResultInner::Ok(er.encode())),
@@ -158,12 +159,7 @@ impl ProposeResponse {
                 result: Some(CmdResultInner::Error(e.encode())),
             }),
         };
-        Self { result }
-    }
-
-    /// Create an empty propose response
-    pub(crate) fn new_empty() -> Self {
-        Self { result: None }
+        Self { result, conflict }
     }
 
     /// Deserialize result in response and take a map function
@@ -182,119 +178,61 @@ impl ProposeResponse {
     }
 }
 
-impl WaitSyncedRequest {
-    /// Create a `WaitSynced` request
-    pub(crate) fn new(id: ProposeId, cluster_version: u64) -> Self {
-        Self {
-            propose_id: Some(id.into()),
-            cluster_version,
+impl SyncedResponse {
+    /// Create a new response from `after_sync` result
+    pub(crate) fn new_result<C: Command>(result: &Result<C::ASR, C::Error>) -> Self {
+        match *result {
+            Ok(ref asr) => SyncedResponse {
+                after_sync_result: Some(CmdResult {
+                    result: Some(CmdResultInner::Ok(asr.encode())),
+                }),
+            },
+            Err(ref e) => SyncedResponse {
+                after_sync_result: Some(CmdResult {
+                    result: Some(CmdResultInner::Error(e.encode())),
+                }),
+            },
         }
-    }
-
-    /// Get the `propose_id` reference
-    pub(crate) fn propose_id(&self) -> ProposeId {
-        self.propose_id
-            .clone()
-            .unwrap_or_else(|| {
-                unreachable!("propose id should be set in propose wait synced request")
-            })
-            .into()
     }
 }
 
-impl WaitSyncedResponse {
-    /// Create a success response
-    fn new_success<C: Command>(asr: &C::ASR, er: &C::ER) -> Self {
-        Self {
-            after_sync_result: Some(CmdResult {
-                result: Some(CmdResultInner::Ok(asr.encode())),
-            }),
-            exe_result: Some(CmdResult {
-                result: Some(CmdResultInner::Ok(er.encode())),
-            }),
+impl RecordRequest {
+    /// Creates a new `RecordRequest`
+    pub(crate) fn new<C: Command>(propose_id: ProposeId, command: &C) -> Self {
+        RecordRequest {
+            propose_id: Some(propose_id.into()),
+            command: command.encode(),
         }
     }
 
-    /// Create an error response which includes an execution error
-    fn new_er_error<C: Command>(er: &C::Error) -> Self {
-        Self {
-            after_sync_result: None,
-            exe_result: Some(CmdResult {
-                result: Some(CmdResultInner::Error(er.encode())),
-            }),
-        }
+    /// Get the propose id
+    pub(crate) fn propose_id(&self) -> ProposeId {
+        self.propose_id
+            .clone()
+            .unwrap_or_else(|| unreachable!("propose id must be set in ProposeRequest"))
+            .into()
     }
 
-    /// Create an error response which includes an `after_sync` error
-    fn new_asr_error<C: Command>(er: &C::ER, asr_err: &C::Error) -> Self {
-        Self {
-            after_sync_result: Some(CmdResult {
-                result: Some(CmdResultInner::Error(asr_err.encode())),
-            }),
-            exe_result: Some(CmdResult {
-                result: Some(CmdResultInner::Ok(er.encode())),
-            }),
-        }
+    /// Get command
+    pub(crate) fn cmd<C: Command>(&self) -> Result<C, PbSerializeError> {
+        C::decode(&self.command)
     }
+}
 
-    /// Create a new response from execution result and `after_sync` result
-    pub(crate) fn new_from_result<C: Command>(
-        er: Result<C::ER, C::Error>,
-        asr: Option<Result<C::ASR, C::Error>>,
-    ) -> Self {
-        match (er, asr) {
-            (Ok(ref er), Some(Err(ref asr_err))) => {
-                WaitSyncedResponse::new_asr_error::<C>(er, asr_err)
-            }
-            (Ok(ref er), Some(Ok(ref asr))) => WaitSyncedResponse::new_success::<C>(asr, er),
-            (Ok(ref _er), None) => unreachable!("can't get after sync result"),
-            (Err(ref err), _) => WaitSyncedResponse::new_er_error::<C>(err),
-        }
-    }
-
-    /// Similar to `ProposeResponse::map_result`
+impl SyncedResponse {
+    /// Deserialize result in response and take a map function
     pub(crate) fn map_result<C: Command, F, R>(self, f: F) -> Result<R, PbSerializeError>
     where
-        F: FnOnce(Result<(C::ASR, C::ER), C::Error>) -> R,
+        F: FnOnce(Option<Result<C::ASR, C::Error>>) -> R,
     {
-        // according to the above methods, we can only get the following response union
-        // ER: Some(OK), ASR: Some(OK)  <-  WaitSyncedResponse::new_success
-        // ER: Some(Err), ASR: None     <-  WaitSyncedResponse::new_er_error
-        // ER: Some(OK), ASR: Some(Err) <- WaitSyncedResponse::new_asr_error
-        let res = match (self.exe_result, self.after_sync_result) {
-            (
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Ok(ref er)),
-                }),
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Ok(ref asr)),
-                }),
-            ) => {
-                let er = <C as Command>::ER::decode(er)?;
-                let asr = <C as Command>::ASR::decode(asr)?;
-                Ok((asr, er))
-            }
-            (
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Error(ref buf)),
-                }),
-                None,
-            )
-            | (
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Ok(_)),
-                }),
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Error(ref buf)),
-                }),
-            ) => {
-                let er = <C as Command>::Error::decode(buf.as_slice())?;
-                Err(er)
-            }
-            _ => unreachable!("got unexpected WaitSyncedResponse"),
+        let Some(res) = self.after_sync_result.and_then(|res| res.result) else {
+            return Ok(f(None));
         };
-
-        Ok(f(res))
+        let res = match res {
+            CmdResultInner::Ok(ref buf) => Ok(<C as Command>::ASR::decode(buf)?),
+            CmdResultInner::Error(ref buf) => Err(<C as Command>::Error::decode(buf)?),
+        };
+        Ok(f(Some(res)))
     }
 }
 
@@ -585,11 +523,7 @@ impl PublishRequest {
 }
 
 impl CurpError {
-    /// `KeyConflict` error
-    pub(crate) fn key_conflict() -> Self {
-        Self::KeyConflict(())
-    }
-
+    #[allow(unused)] // TODO: implement dedup
     /// `Duplicated` error
     pub(crate) fn duplicated() -> Self {
         Self::Duplicated(())
@@ -671,10 +605,6 @@ impl From<CurpError> for tonic::Status {
     #[inline]
     fn from(err: CurpError) -> Self {
         let (code, msg) = match err {
-            CurpError::KeyConflict(_) => (
-                tonic::Code::AlreadyExists,
-                "Key conflict error: A key conflict occurred.",
-            ),
             CurpError::Duplicated(_) => (
                 tonic::Code::AlreadyExists,
                 "Duplicated error: The request already sent.",
