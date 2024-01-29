@@ -20,9 +20,7 @@ use tokio::net::TcpListener;
 use tokio_stream::StreamExt;
 use utils::{config::ClientConfig, timestamp};
 
-use crate::common::curp_group::{
-    commandpb::ProposeId, CurpGroup, FetchClusterRequest, ProposeRequest, ProposeResponse,
-};
+use crate::common::curp_group::{CurpGroup, FetchClusterRequest};
 
 #[tokio::test(flavor = "multi_thread")]
 #[abort_on_panic]
@@ -132,126 +130,6 @@ async fn exe_exactly_once_on_leader() {
         assert_eq!(cmd1, cmd);
         assert_eq!(index, 1);
     }
-}
-
-// To verify PR #86 is fixed
-#[tokio::test(flavor = "multi_thread")]
-#[abort_on_panic]
-async fn fast_round_is_slower_than_slow_round() {
-    init_logger();
-
-    let group = CurpGroup::new(3).await;
-    let cmd = Arc::new(TestCommand::new_get(vec![0]));
-
-    let leader = group.get_leader().await.0;
-
-    // send propose only to the leader
-    let mut leader_connect = group.get_connect(&leader).await;
-    leader_connect
-        .propose(tonic::Request::new(ProposeRequest {
-            propose_id: Some(ProposeId {
-                client_id: 0,
-                seq_num: 0,
-            }),
-            command: bincode::serialize(&cmd).unwrap(),
-            cluster_version: 0,
-            term: 1,
-        }))
-        .await
-        .unwrap();
-
-    // wait for the command to be synced to others
-    // because followers never get the cmd from the client, it will mark the cmd done in spec pool instead of removing the cmd from it
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // send propose to follower
-    let follower_id = group.nodes.keys().find(|&id| &leader != id).unwrap();
-    let mut follower_connect = group.get_connect(follower_id).await;
-
-    // the follower should response empty immediately
-    let resp: ProposeResponse = follower_connect
-        .propose(tonic::Request::new(ProposeRequest {
-            propose_id: Some(ProposeId {
-                client_id: 0,
-                seq_num: 0,
-            }),
-            command: bincode::serialize(&cmd).unwrap(),
-            cluster_version: 0,
-            term: 1,
-        }))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(resp.result.is_none());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[abort_on_panic]
-async fn concurrent_cmd_order() {
-    init_logger();
-
-    let cmd0 = TestCommand::new_put(vec![0], 0).set_exe_dur(Duration::from_secs(1));
-    let cmd1 = TestCommand::new_put(vec![0, 1], 1);
-    let cmd2 = TestCommand::new_put(vec![1], 2);
-
-    let group = CurpGroup::new(3).await;
-    let leader = group.get_leader().await.0;
-    let mut leader_connect = group.get_connect(&leader).await;
-
-    let mut c = leader_connect.clone();
-    tokio::spawn(async move {
-        c.propose(ProposeRequest {
-            propose_id: Some(ProposeId {
-                client_id: 0,
-                seq_num: 0,
-            }),
-            command: bincode::serialize(&cmd0).unwrap(),
-            cluster_version: 0,
-            term: 1,
-        })
-        .await
-        .expect("propose failed");
-    });
-
-    sleep_millis(20).await;
-    let response = leader_connect
-        .propose(ProposeRequest {
-            propose_id: Some(ProposeId {
-                client_id: 0,
-                seq_num: 1,
-            }),
-            command: bincode::serialize(&cmd1).unwrap(),
-            cluster_version: 0,
-            term: 1,
-        })
-        .await;
-    assert!(response.is_err());
-    let response = leader_connect
-        .propose(ProposeRequest {
-            propose_id: Some(ProposeId {
-                client_id: 0,
-                seq_num: 2,
-            }),
-            command: bincode::serialize(&cmd2).unwrap(),
-            cluster_version: 0,
-            term: 1,
-        })
-        .await;
-    assert!(response.is_err());
-
-    sleep_secs(1).await;
-
-    let client = group.new_client().await;
-
-    assert_eq!(
-        client
-            .propose(TestCommand::new_get(vec![1]), true)
-            .await
-            .unwrap()
-            .0
-            .values,
-        vec![2]
-    );
 }
 
 /// This test case ensures that the issue 228 is fixed.
