@@ -487,7 +487,10 @@ where
                 CurpError::ShuttingDown(_) => ClientError::ShuttingDown,
                 CurpError::WrongClusterVersion(_) => ClientError::WrongClusterVersion,
                 CurpError::Redirect(_) => ClientError::TermOutdated,
-                _ => unreachable!(),
+                CurpError::RpcTransport(_) => {
+                    ClientError::InternalError("rpc transport".to_owned())
+                }
+                e => unreachable!("err: {e:?}"),
             })?
             .into_inner();
         let mut response_rx = ResponseReceiver::new(resp_stream);

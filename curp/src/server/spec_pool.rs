@@ -31,6 +31,7 @@ impl<C: Command> SpeculativePool<C> {
             Some(entry)
         } else {
             let id = entry.id;
+            debug!("sp size: {}", self.pool.len());
             let result = self.pool.insert(id, entry);
             if result.is_none() {
                 debug!("insert cmd({id}) into spec pool");

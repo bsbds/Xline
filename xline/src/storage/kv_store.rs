@@ -601,7 +601,25 @@ where
     }
 
     /// Handle `PutRequest`
+    #[allow(unused)]
     fn execute_put(
+        &self,
+        txn_db: &Transaction,
+        txn_index: &IndexTransaction,
+        req: &PutRequest,
+        revision: i64,
+        sub_revision: &mut i64,
+    ) -> Result<PutResponse, ExecuteError> {
+        let response = PutResponse {
+            header: Some(self.header_gen.gen_header(false)),
+            ..Default::default()
+        };
+        Ok(response)
+    }
+
+    /// Handle `PutRequest`
+    #[allow(unused)]
+    fn execute_put_old(
         &self,
         txn_db: &Transaction,
         txn_index: &IndexTransaction,

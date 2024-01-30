@@ -261,7 +261,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
     /// Handles record
     pub(super) fn leader_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
-        self.insert_sp(propose_id, Arc::clone(&cmd)) | self.insert_ucp(propose_id, cmd)
+        self.insert_sp(propose_id, Arc::clone(&cmd)) || self.insert_ucp(propose_id, cmd)
     }
 
     /// Registers response sender
@@ -287,10 +287,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let index = entry.index;
         let conflict = resp_tx.is_conflict();
         self.register_resp_tx(index, resp_tx);
-        if !conflict {
-            log_w.last_exe = index;
-        }
-        // TODO: notify sync
+        self.entry_process(&mut log_w, Arc::clone(&entry), true);
 
         Ok((!conflict).then_some(entry))
     }
@@ -1631,6 +1628,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     fn insert_ucp(&self, propose_id: ProposeId, inner: impl Into<PoolEntryInner<C>>) -> bool {
         let entry = PoolEntry::new(propose_id, inner);
         self.ctx.ucp.map_lock(|mut ucp_l| {
+            debug!("ucp size: {}", ucp_l.len());
             let conflict_uncommitted = ucp_l.values().any(|c| c.is_conflict(&entry));
             assert!(
                 ucp_l.insert(propose_id, entry.clone()).is_none(),

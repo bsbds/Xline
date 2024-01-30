@@ -71,7 +71,7 @@ impl ResponseReceiver {
     pub(crate) async fn recv_er<C: Command>(&mut self) -> Result<(C::ER, bool), ClientError<C>> {
         let op = self.recv_resp().await?;
         // TODO: replace unreachable with error
-        let ResponseOp::Propose(resp)  = op else { unreachable!() };
+        let ResponseOp::Propose(resp)  = op else { unreachable!("op: {op:?}") };
 
         let conflict = resp.conflict;
         let er = resp.map_result::<C, _, Result<<C as Command>::ER, ClientError<C>>>(|res| {

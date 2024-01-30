@@ -107,14 +107,15 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     }
 
     /// Handle `Record` requests
-    pub(super) async fn record(&self, req: RecordRequest) -> Result<RecordResponse, CurpError> {
+    pub(super) async fn record(&self, _req: RecordRequest) -> Result<RecordResponse, CurpError> {
         if self.curp.is_shutdown() {
             return Err(CurpError::shutting_down());
         }
-        let id = req.propose_id();
-        let cmd: Arc<C> = Arc::new(req.cmd()?);
-        let curp_c = Arc::clone(&self.curp);
-        let conflict = Self::spawn_compute(move || curp_c.follower_record(id, cmd)).await?;
+        // let id = req.propose_id();
+        // let cmd: Arc<C> = Arc::new(req.cmd()?);
+        // let curp_c = Arc::clone(&self.curp);
+        let conflict = false;
+        // let conflict = Self::spawn_compute(move || curp_c.follower_record(id, cmd)).await?;
 
         Ok(RecordResponse { conflict })
     }
@@ -143,13 +144,15 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let id = req.propose_id();
         let cmd: Arc<C> = Arc::new(req.cmd()?);
         debug_assert_eq!(req.term, curp.term());
-        let cmd_c = Arc::clone(&cmd);
-        let curp_c = Arc::clone(&curp);
-        let conflict = Self::spawn_compute(move || curp_c.leader_record(id, cmd_c)).await?;
+        // let cmd_c = Arc::clone(&cmd);
+        // let curp_c = Arc::clone(&curp);
+        let conflict = false;
+        // let conflict = Self::spawn_compute(move || curp_c.leader_record(id, cmd_c)).await?;
         resp_tx.set_conflict(conflict);
         curp.push_log(id, cmd, req.term, resp_tx)
     }
 
+    #[allow(unused)]
     /// Spawns a CPU-intensive task
     async fn spawn_compute<R: 'static + Send>(
         compute: impl 'static + Send + FnOnce() -> R,
