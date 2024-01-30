@@ -169,6 +169,9 @@ use utils::{
 };
 use xline::{server::XlineServer, storage::db::DB};
 
+#[global_allocator]
+static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 /// Command line arguments
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
