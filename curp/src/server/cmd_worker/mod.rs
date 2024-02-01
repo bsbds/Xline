@@ -26,7 +26,7 @@ pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     let id = curp.id();
     match entry.entry_data {
         EntryData::Command(ref cmd) => {
-            let er = ce.execute(cmd).await;
+            let er = ce.mock_exe(cmd).await;
             if er.is_err() {
                 sp.lock().remove(&entry.propose_id);
                 let _ig = ucp.lock().remove(&entry.propose_id);
@@ -66,7 +66,7 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
         // Leader
         (EntryData::Command(ref cmd), Some(ref tx)) => {
             if tx.is_conflict() {
-                let er = ce.execute(cmd.as_ref()).await;
+                let er = ce.mock_exe(cmd.as_ref()).await;
                 tx.send_propose(ProposeResponse::new_result::<C>(&er, true));
                 if er.is_err() {
                     ce.trigger(entry.inflight_id(), entry.index);
@@ -74,7 +74,7 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
                     return;
                 }
             }
-            let asr = ce.after_sync(cmd.as_ref(), entry.index).await;
+            let asr = ce.mock_as(cmd.as_ref(), entry.index).await;
             tx.send_synced(SyncedResponse::new_result::<C>(&asr));
             remove_from_sp_ucp();
         }

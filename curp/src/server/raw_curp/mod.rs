@@ -287,7 +287,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let index = entry.index;
         let conflict = resp_tx.is_conflict();
         self.register_resp_tx(index, resp_tx);
-        self.entry_process(&mut log_w, Arc::clone(&entry), true);
+
+        let index = entry.index;
+        if !conflict {
+            log_w.last_exe = index;
+        }
 
         Ok((!conflict).then_some(entry))
     }

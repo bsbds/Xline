@@ -100,7 +100,13 @@ where
     C: Command,
 {
     /// Execute the command
+    async fn mock_exe(&self, cmd: &C) -> Result<C::ER, C::Error>;
+
+    /// Execute the command
     async fn execute(&self, cmd: &C) -> Result<C::ER, C::Error>;
+
+    /// Execute the after_sync callback
+    async fn mock_as(&self, cmd: &C, index: LogIndex) -> Result<C::ASR, C::Error>;
 
     /// Execute the after_sync callback
     async fn after_sync(&self, cmd: &C, index: LogIndex) -> Result<C::ASR, C::Error>;

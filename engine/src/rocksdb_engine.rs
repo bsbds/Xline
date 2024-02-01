@@ -357,6 +357,7 @@ impl Meta {
     }
 }
 
+#[allow(unused)]
 /// Transaction type for `RocksDB`
 ///
 /// WARN: `db` should never be dropped before `txn`
@@ -458,26 +459,13 @@ impl TransactionApi for RocksTransaction {
     }
 
     async fn commit(self) -> Result<(), EngineError> {
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = self
-                .txn
-                .lock()
-                .take()
-                .unwrap()
-                .commit()
-                .map_err(EngineError::from)
-            {
-                return Err(e);
-            }
+        self.txn.lock().take().unwrap().commit()?;
+        let size = self.txn_size.load(std::sync::atomic::Ordering::Relaxed);
+        let _ignore = self
+            .engine_size
+            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
 
-            let size = self.txn_size.load(std::sync::atomic::Ordering::Relaxed);
-            let _ignore = self
-                .engine_size
-                .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
-
-            Ok(())
-        })
-        .await?
+        Ok(())
     }
 
     fn rollback(&self) -> Result<(), EngineError> {

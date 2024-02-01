@@ -1,4 +1,12 @@
-use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use clippy_utilities::NumericCast;
 use engine::{SnapshotAllocator, SnapshotApi};
@@ -128,11 +136,34 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             Arc<ResponseSender>,
         )>,
     ) {
+        let mut total = Arc::new(AtomicU64::new(0));
+        let mut cnt = Arc::new(AtomicU64::new(0));
+
+        let total_c = Arc::clone(&total);
+        let cnt_c = Arc::clone(&cnt);
+        let _ig = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut last = 0;
+            loop {
+                let _ig = interval.tick().await;
+                let t = total_c.load(Ordering::SeqCst);
+                let c = cnt_c.load(Ordering::SeqCst);
+                let dlt = c - last;
+                if c != 0 {
+                    println!("avg: {:?}us, throughput: {}", (t / c) as f64 / 1000.0, dlt);
+                }
+                last = c;
+            }
+        });
         while let Ok((req, wait_tx, resp_tx)) = rx.recv_async().await {
+            let start = std::time::Instant::now();
             let result = Self::handle_propose_inner(req, Arc::clone(&curp), resp_tx).await;
             if let Err(_) = wait_tx.send(result) {
                 error!("wait_rx accidentally dropped");
             }
+            let takes = start.elapsed();
+            let _ig = total.fetch_add(takes.as_nanos() as u64, Ordering::SeqCst);
+            let _ig = cnt.fetch_add(1, Ordering::SeqCst);
         }
     }
 

@@ -30,7 +30,4 @@ tonic = { git = "https://github.com/madsim-rs/madsim.git", rev = "5eb4198", pack
 tonic-build = { git = "https://github.com/madsim-rs/madsim.git", rev = "5eb4198", package = "madsim-tonic-build" }
 
 [profile.release]
-opt-level = 3
-codegen-units = 1
-lto = true
 debug = true

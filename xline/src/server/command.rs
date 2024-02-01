@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::sync::Arc;
 
 use clippy_utilities::OverflowArithmetic;
@@ -13,7 +14,9 @@ use engine::{Snapshot, TransactionApi};
 use event_listener::Event;
 use tracing::warn;
 use xlineapi::{
-    command::Command, execute_error::ExecuteError, AlarmAction, AlarmRequest, AlarmType,
+    command::{Command, CommandResponse, SyncResponse},
+    execute_error::ExecuteError,
+    AlarmAction, AlarmRequest, AlarmType,
 };
 
 use super::barriers::{IdBarrier, IndexBarrier};
@@ -295,6 +298,18 @@ impl<S> CurpCommandExecutor<Command> for CommandExecutor<S>
 where
     S: StorageApi,
 {
+    async fn mock_exe(
+        &self,
+        cmd: &Command,
+    ) -> Result<<Command as CurpCommand>::ER, <Command as CurpCommand>::Error> {
+        Ok(CommandResponse::new(
+            xlineapi::ResponseWrapper::PutResponse(xlineapi::PutResponse {
+                header: None,
+                prev_kv: None,
+            }),
+        ))
+    }
+
     async fn execute(
         &self,
         cmd: &Command,
@@ -308,6 +323,14 @@ where
             RequestBackend::Lease => self.lease_storage.execute(wrapper),
             RequestBackend::Alarm => Ok(self.alarm_storage.execute(wrapper)),
         }
+    }
+
+    async fn mock_as(
+        &self,
+        cmd: &Command,
+        index: LogIndex,
+    ) -> Result<<Command as CurpCommand>::ASR, <Command as CurpCommand>::Error> {
+        Ok(SyncResponse::new(-1))
     }
 
     async fn after_sync(
