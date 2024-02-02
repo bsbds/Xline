@@ -74,7 +74,7 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
                     return;
                 }
             }
-            let asr = ce.mock_as(cmd.as_ref(), entry.index).await;
+            let asr = ce.after_sync(cmd.as_ref(), entry.index).await;
             tx.send_synced(SyncedResponse::new_result::<C>(&asr));
             remove_from_sp_ucp();
         }
