@@ -9,7 +9,7 @@ use curp::{
     InflightId, LogIndex,
 };
 use dashmap::DashMap;
-use engine::{Snapshot, TransactionApi, TransactionSingle};
+use engine::{Snapshot, StorageOps, TransactionApi};
 use event_listener::Event;
 use tracing::warn;
 use xlineapi::{
@@ -21,7 +21,7 @@ use crate::{
     rpc::{RequestBackend, RequestWithToken, RequestWrapper},
     storage::{
         db::WriteOp,
-        storage_api::{StorageApi, StorageTxnApi},
+        storage_api::{StorageApi, XlineStorageOps},
         AlarmStore, AuthStore, KvStore, LeaseStore,
     },
 };
@@ -62,10 +62,7 @@ impl RangeType {
 
 /// Command Executor
 #[derive(Debug)]
-pub(crate) struct CommandExecutor<S>
-where
-    S: StorageApi,
-{
+pub(crate) struct CommandExecutor<S> {
     /// Kv Storage
     kv_storage: Arc<KvStore<S>>,
     /// Auth Storage
@@ -321,13 +318,6 @@ where
         let txn_db = self.persistent.transaction();
         txn_db.write_op(WriteOp::PutAppliedIndex(index))?;
 
-        if true {
-            self.kv_storage.after_sync(wrapper, txn_db).await?;
-        } else {
-            let another_txn = TransactionSingle::default();
-            self.kv_storage.after_sync(wrapper, another_txn).await?;
-        }
-
         let res = match wrapper.request.backend() {
             RequestBackend::Kv => self.kv_storage.after_sync(wrapper, txn_db).await?,
             RequestBackend::Auth | RequestBackend::Lease | RequestBackend::Alarm => {
@@ -340,7 +330,6 @@ where
                 txn_db.write_ops(wr_ops)?;
                 txn_db
                     .commit()
-                    .await
                     .map_err(|e| ExecuteError::DbError(e.to_string()))?;
                 res
             }
@@ -382,7 +371,7 @@ where
     ) -> Result<(), <Command as CurpCommand>::Error> {
         let s = if let Some((snapshot, index)) = snapshot {
             self.persistent
-                .flush_ops(vec![WriteOp::PutAppliedIndex(index)])?;
+                .write_ops(vec![WriteOp::PutAppliedIndex(index)])?;
             Some(snapshot)
         } else {
             None
@@ -397,7 +386,7 @@ where
 
     fn set_last_applied(&self, index: LogIndex) -> Result<(), <Command as CurpCommand>::Error> {
         self.persistent
-            .flush_ops(vec![WriteOp::PutAppliedIndex(index)])?;
+            .write_ops(vec![WriteOp::PutAppliedIndex(index)])?;
         Ok(())
     }
 

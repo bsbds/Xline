@@ -375,7 +375,6 @@ where
 
         txn_db
             .commit()
-            .await
             .map_err(|e| ExecuteError::DbError(e.to_string()))?;
         txn_index.commit();
 

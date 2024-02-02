@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use engine::{Engine, EngineType, StorageEngine, WriteOperation};
+use engine::{Engine, EngineType, StorageEngine, StorageOps, WriteOperation};
 use utils::config::EngineConfig;
 
 use super::StorageError;
@@ -42,7 +42,7 @@ impl<C> DB<C> {
     ) -> Result<(), StorageError> {
         let bytes = bincode::serialize(&(term, voted_for))?;
         let op = WriteOperation::new_put(CF, VOTE_FOR.to_vec(), bytes);
-        self.db.write_batch(vec![op], true)?;
+        self.db.write(op, true)?;
 
         Ok(())
     }

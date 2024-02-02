@@ -5,12 +5,13 @@ use bytes::{Bytes, BytesMut};
 #[cfg(madsim)]
 use crate::mock_rocksdb_engine::{RocksEngine, RocksSnapshot, RocksTransaction};
 #[cfg(not(madsim))]
-use crate::rocksdb_engine::{RocksEngine, RocksSnapshot, RocksTransaction};
+use crate::rocksdb_engine::{RocksEngine, RocksSnapshot};
 use crate::{
     api::transaction_api::TransactionApi,
     error::EngineError,
     memory_engine::{MemoryEngine, MemorySnapshot, MemoryTransaction},
-    SnapshotApi, StorageEngine, WriteOperation,
+    rocksdb_engine::RocksTransaction,
+    SnapshotApi, StorageEngine, StorageOps, WriteOperation,
 };
 
 #[derive(Debug)]
@@ -47,16 +48,20 @@ impl Engine {
     }
 }
 
-#[async_trait::async_trait]
-impl StorageEngine for Engine {
-    type Snapshot = Snapshot;
-    type Transaction = Transaction;
+impl StorageOps for Engine {
+    #[inline]
+    fn write(&self, op: WriteOperation<'_>, sync: bool) -> Result<(), EngineError> {
+        match *self {
+            Engine::Memory(ref e) => e.write(op, sync),
+            Engine::Rocks(ref e) => e.write(op, sync),
+        }
+    }
 
     #[inline]
-    fn transaction(&self) -> Transaction {
+    fn write_multi(&self, ops: Vec<WriteOperation<'_>>, sync: bool) -> Result<(), EngineError> {
         match *self {
-            Engine::Memory(ref e) => Transaction::Memory(e.transaction()),
-            Engine::Rocks(ref e) => Transaction::Rocks(e.transaction()),
+            Engine::Memory(ref e) => e.write_multi(ops, sync),
+            Engine::Rocks(ref e) => e.write_multi(ops, sync),
         }
     }
 
@@ -79,20 +84,26 @@ impl StorageEngine for Engine {
             Engine::Rocks(ref e) => e.get_multi(table, keys),
         }
     }
+}
+
+#[async_trait::async_trait]
+impl StorageEngine for Engine {
+    type Snapshot = Snapshot;
+    type Transaction = Transaction;
+
+    #[inline]
+    fn transaction(&self) -> Transaction {
+        match *self {
+            Engine::Memory(ref e) => Transaction::Memory(e.transaction()),
+            Engine::Rocks(ref e) => Transaction::Rocks(e.transaction()),
+        }
+    }
 
     #[inline]
     fn get_all(&self, table: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, EngineError> {
         match *self {
             Engine::Memory(ref e) => e.get_all(table),
             Engine::Rocks(ref e) => e.get_all(table),
-        }
-    }
-
-    #[inline]
-    fn write_batch(&self, wr_ops: Vec<WriteOperation<'_>>, sync: bool) -> Result<(), EngineError> {
-        match *self {
-            Engine::Memory(ref e) => e.write_batch(wr_ops, sync),
-            Engine::Rocks(ref e) => e.write_batch(wr_ops, sync),
         }
     }
 
@@ -155,76 +166,20 @@ pub enum Transaction {
     Rocks(RocksTransaction),
 }
 
-/// `Tran`
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum TransactionSingle {
-    /// Memory snapshot
-    Memory(MemoryTransaction),
-    /// Rocks snapshot
-    Rocks(RocksTransaction),
-}
-
-impl Default for TransactionSingle {
-    fn default() -> Self {
-        todo!()
-    }
-}
-
-#[async_trait::async_trait]
-impl TransactionApi for TransactionSingle {
+impl StorageOps for Transaction {
     #[inline]
-    fn write(&self, op: WriteOperation<'_>) -> Result<(), EngineError> {
+    fn write(&self, op: WriteOperation<'_>, sync: bool) -> Result<(), EngineError> {
         match *self {
-            TransactionSingle::Memory(ref t) => t.write(op),
-            TransactionSingle::Rocks(ref t) => t.write(op),
+            Transaction::Memory(ref t) => t.write(op, sync),
+            Transaction::Rocks(ref t) => t.write(op, sync),
         }
     }
 
     #[inline]
-    fn get(&self, table: &str, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, EngineError> {
+    fn write_multi(&self, ops: Vec<WriteOperation<'_>>, sync: bool) -> Result<(), EngineError> {
         match *self {
-            TransactionSingle::Memory(ref t) => t.get(table, key),
-            TransactionSingle::Rocks(ref t) => t.get(table, key),
-        }
-    }
-
-    #[inline]
-    fn get_multi(
-        &self,
-        table: &str,
-        keys: &[impl AsRef<[u8]>],
-    ) -> Result<Vec<Option<Vec<u8>>>, EngineError> {
-        match *self {
-            TransactionSingle::Memory(ref t) => t.get_multi(table, keys),
-            TransactionSingle::Rocks(ref t) => t.get_multi(table, keys),
-        }
-    }
-
-    #[inline]
-    async fn commit(self) -> Result<(), EngineError> {
-        match self {
-            TransactionSingle::Memory(t) => t.commit().await,
-            TransactionSingle::Rocks(t) => t.commit().await,
-        }
-    }
-
-    #[inline]
-    fn rollback(&self) -> Result<(), EngineError> {
-        match *self {
-            TransactionSingle::Memory(ref t) => t.rollback(),
-            TransactionSingle::Rocks(ref t) => t.rollback(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl TransactionApi for Transaction {
-    #[inline]
-    fn write(&self, op: WriteOperation<'_>) -> Result<(), EngineError> {
-        match *self {
-            Transaction::Memory(ref t) => t.write(op),
-            Transaction::Rocks(ref t) => t.write(op),
+            Transaction::Memory(ref t) => t.write_multi(ops, sync),
+            Transaction::Rocks(ref t) => t.write_multi(ops, sync),
         }
     }
 
@@ -247,12 +202,14 @@ impl TransactionApi for Transaction {
             Transaction::Rocks(ref t) => t.get_multi(table, keys),
         }
     }
+}
 
+impl TransactionApi for Transaction {
     #[inline]
-    async fn commit(self) -> Result<(), EngineError> {
+    fn commit(self) -> Result<(), EngineError> {
         match self {
-            Transaction::Memory(t) => t.commit().await,
-            Transaction::Rocks(t) => t.commit().await,
+            Transaction::Memory(t) => t.commit(),
+            Transaction::Rocks(t) => t.commit(),
         }
     }
 
@@ -353,8 +310,8 @@ mod test {
     const TESTTABLES: [&'static str; 3] = ["kv", "lease", "auth"];
 
     #[test]
-    fn write_batch_into_a_non_existing_table_should_fail() {
-        let dir = PathBuf::from("/tmp/write_batch_into_a_non_existing_table_should_fail");
+    fn write_multi_into_a_non_existing_table_should_fail() {
+        let dir = PathBuf::from("/tmp/write_multi_into_a_non_existing_table_should_fail");
         let rocks_engine_path = dir.join("rocks_engine");
         let engines = vec![
             Engine::new(EngineType::Memory, &TESTTABLES).unwrap(),
@@ -367,20 +324,20 @@ mod test {
                 "hello".as_bytes().to_vec(),
                 "world".as_bytes().to_vec(),
             );
-            assert!(engine.write_batch(vec![put], false).is_err());
+            assert!(engine.write_multi(vec![put], false).is_err());
 
             let delete = WriteOperation::new_delete("hello", b"hello");
-            assert!(engine.write_batch(vec![delete], false).is_err());
+            assert!(engine.write_multi(vec![delete], false).is_err());
 
             let delete_range = WriteOperation::new_delete_range("hello", b"hello", b"world");
-            assert!(engine.write_batch(vec![delete_range], false).is_err());
+            assert!(engine.write_multi(vec![delete_range], false).is_err());
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn write_batch_should_success() {
-        let dir = PathBuf::from("/tmp/write_batch_should_success");
+    fn write_multi_should_success() {
+        let dir = PathBuf::from("/tmp/write_multi_should_success");
         let rocks_engine_path = dir.join("rocks_engine");
         let engines = vec![
             Engine::new(EngineType::Memory, &TESTTABLES).unwrap(),
@@ -396,7 +353,7 @@ mod test {
                 .map(|(k, v)| WriteOperation::new_put("kv", k, v))
                 .collect::<Vec<WriteOperation<'_>>>();
 
-            assert!(engine.write_batch(puts, false).is_ok());
+            assert!(engine.write_multi(puts, false).is_ok());
 
             let res_1 = engine.get_multi("kv", &origin_set).unwrap();
             assert_eq!(res_1.iter().filter(|v| v.is_some()).count(), 10);
@@ -404,7 +361,7 @@ mod test {
             let delete_key: Vec<u8> = vec![1, 1, 1, 1];
             let delete = WriteOperation::new_delete("kv", &delete_key);
 
-            let res_2 = engine.write_batch(vec![delete], false);
+            let res_2 = engine.write_multi(vec![delete], false);
             assert!(res_2.is_ok());
 
             let res_3 = engine.get("kv", &delete_key).unwrap();
@@ -413,7 +370,7 @@ mod test {
             let delete_start: Vec<u8> = vec![2, 2, 2, 2];
             let delete_end: Vec<u8> = vec![5, 5, 5, 5];
             let delete_range = WriteOperation::new_delete_range("kv", &delete_start, &delete_end);
-            let res_4 = engine.write_batch(vec![delete_range], false);
+            let res_4 = engine.write_multi(vec![delete_range], false);
             assert!(res_4.is_ok());
 
             let get_key_1: Vec<u8> = vec![5, 5, 5, 5];
@@ -437,7 +394,7 @@ mod test {
             let batch = test_set.iter().map(|&(key, value)| {
                 WriteOperation::new_put("kv", key.as_bytes().to_vec(), value.as_bytes().to_vec())
             });
-            let res = engine.write_batch(batch.collect(), false);
+            let res = engine.write_multi(batch.collect(), false);
             assert!(res.is_ok());
 
             let res_1 = engine.get("kv", "hello").unwrap();
@@ -489,14 +446,14 @@ mod test {
             .zip(recover_engines)
         {
             let put_kv = WriteOperation::new_put("kv", "key".into(), "value".into());
-            assert!(engine.write_batch(vec![put_kv], false).is_ok());
+            assert!(engine.write_multi(vec![put_kv], false).is_ok());
 
             let put_lease = WriteOperation::new_put("lease", "lease_id".into(), "lease".into());
-            assert!(engine.write_batch(vec![put_lease], false).is_ok());
+            assert!(engine.write_multi(vec![put_lease], false).is_ok());
 
             let mut snapshot = engine.get_snapshot(&snapshot_dir, &TESTTABLES).unwrap();
             let put = WriteOperation::new_put("kv", "key2".into(), "value2".into());
-            assert!(engine.write_batch(vec![put], false).is_ok());
+            assert!(engine.write_multi(vec![put], false).is_ok());
 
             let mut buf = BytesMut::with_capacity(snapshot.size().numeric_cast());
             snapshot.read_buf_exact(&mut buf).await.unwrap();
@@ -523,8 +480,8 @@ mod test {
 
     #[tokio::test]
     #[abort_on_panic]
-    async fn txn_write_batch_should_success() {
-        let dir = PathBuf::from("/tmp/txn_write_batch_should_success");
+    async fn txn_write_multi_should_success() {
+        let dir = PathBuf::from("/tmp/txn_write_multi_should_success");
         let rocks_engine_path = dir.join("rocks_engine");
         let engines = vec![
             Engine::new(EngineType::Memory, &TESTTABLES).unwrap(),
@@ -542,7 +499,7 @@ mod test {
                 .collect::<Vec<WriteOperation<'_>>>();
 
             for put in puts {
-                txn.write(put).unwrap();
+                txn.write(put, false).unwrap();
             }
 
             let res_1 = txn.get_multi("kv", &origin_set).unwrap();
@@ -551,7 +508,7 @@ mod test {
             let delete_key: Vec<u8> = vec![1, 1, 1, 1];
             let delete = WriteOperation::new_delete("kv", &delete_key);
 
-            txn.write(delete).unwrap();
+            txn.write(delete, false).unwrap();
 
             let res_3 = txn.get("kv", &delete_key).unwrap();
             assert!(res_3.is_none());
@@ -559,14 +516,14 @@ mod test {
             let delete_start: Vec<u8> = vec![2, 2, 2, 2];
             let delete_end: Vec<u8> = vec![5, 5, 5, 5];
             let delete_range = WriteOperation::new_delete_range("kv", &delete_start, &delete_end);
-            txn.write(delete_range).unwrap();
+            txn.write(delete_range, false).unwrap();
 
             let get_key_1: Vec<u8> = vec![5, 5, 5, 5];
             let get_key_2: Vec<u8> = vec![3, 3, 3, 3];
             assert!(txn.get("kv", &get_key_1).unwrap().is_some());
             assert!(txn.get("kv", &get_key_2).unwrap().is_none());
 
-            txn.commit().await.unwrap();
+            txn.commit().unwrap();
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -587,7 +544,7 @@ mod test {
             });
             let txn = engine.transaction();
             for op in batch {
-                txn.write(op).unwrap();
+                txn.write(op, false).unwrap();
             }
             let res_1 = txn.get("kv", "hello").unwrap();
             assert_eq!(res_1, Some("hello".as_bytes().to_vec()));
@@ -600,7 +557,7 @@ mod test {
             let res_2 = txn.get_multi("kv", &multi_keys).unwrap();
             assert_eq!(multi_keys.len(), res_2.len());
             assert_eq!(res_2, expected_multi_values);
-            txn.commit().await.unwrap();
+            txn.commit().unwrap();
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -622,7 +579,7 @@ mod test {
                 .collect();
             for (key, val) in test_set.clone() {
                 let op = WriteOperation::new_put("kv", key, val);
-                txn.write(op).unwrap();
+                txn.write(op, false).unwrap();
             }
             for (key, val) in test_set.clone() {
                 assert_eq!(txn.get("kv", key).unwrap().unwrap(), val);
@@ -630,7 +587,7 @@ mod test {
             for (key, _) in test_set.clone() {
                 assert!(engine.get("kv", key).unwrap().is_none());
             }
-            txn.commit().await.unwrap();
+            txn.commit().unwrap();
             for (key, val) in test_set.clone() {
                 assert_eq!(engine.get("kv", key).unwrap().unwrap(), val);
             }
@@ -655,7 +612,7 @@ mod test {
                 .collect();
             for (key, val) in test_set.clone() {
                 let op = WriteOperation::new_put("kv", key, val);
-                txn.write(op).unwrap();
+                txn.write(op, false).unwrap();
             }
             for (key, val) in test_set.clone() {
                 assert_eq!(txn.get("kv", key).unwrap().unwrap(), val);
@@ -664,7 +621,7 @@ mod test {
             for (key, _) in test_set.clone() {
                 assert!(txn.get("kv", key).unwrap().is_none());
             }
-            txn.commit().await.unwrap();
+            txn.commit().unwrap();
             for (key, _) in test_set {
                 assert!(engine.get("kv", key).unwrap().is_none());
             }

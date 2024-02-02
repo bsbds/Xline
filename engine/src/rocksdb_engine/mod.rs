@@ -1,3 +1,6 @@
+/// `RocksDB` transaction implementation
+mod transaction;
+
 use std::{
     cmp::Ordering,
     fs, io,
@@ -19,13 +22,12 @@ use tokio::{fs::File, io::AsyncWriteExt};
 use tokio_util::io::read_buf;
 
 use crate::{
-    api::{
-        engine_api::{StorageEngine, WriteOperation},
-        snapshot_api::SnapshotApi,
-        transaction_api::TransactionApi,
-    },
+    api::{engine_api::StorageEngine, snapshot_api::SnapshotApi},
     error::EngineError,
+    StorageOps, WriteOperation,
 };
+
+pub(crate) use self::transaction::RocksTransaction;
 
 /// Translate a `RocksError` into a `EngineError`
 impl From<RocksError> for EngineError {
@@ -54,8 +56,6 @@ impl From<RocksError> for EngineError {
 /// `RocksDB` Storage Engine
 #[derive(Debug)]
 pub struct RocksEngine {
-    /// The mutex used to guard write operations
-    mutex: Arc<Mutex<()>>,
     /// The inner storage engine of `RocksDB`
     inner: Arc<OptimisticTransactionDB>,
     /// The tables of current engine
@@ -80,7 +80,6 @@ impl RocksEngine {
         )?);
         let size = Self::get_db_size(&db, tables)?;
         Ok(Self {
-            mutex: Arc::new(Mutex::new(())),
             inner: db,
             tables: tables.iter().map(|s| (*s).to_owned()).collect(),
             size: Arc::new(AtomicU64::new(size)),
@@ -112,7 +111,7 @@ impl RocksEngine {
 
     /// Gets the max write data size.
     /// Max write data size = 2 * key + value + cf_handle_size + 1008
-    fn max_write_size(table_len: usize, key_len: usize, value_len: usize) -> usize {
+    pub(super) fn max_write_size(table_len: usize, key_len: usize, value_len: usize) -> usize {
         key_len
             .overflow_mul(2)
             .overflow_add(value_len)
@@ -121,27 +120,7 @@ impl RocksEngine {
     }
 }
 
-#[async_trait::async_trait]
-impl StorageEngine for RocksEngine {
-    type Snapshot = RocksSnapshot;
-    type Transaction = RocksTransaction;
-
-    #[allow(unsafe_code)]
-    #[inline]
-    fn transaction(&self) -> RocksTransaction {
-        let txn = self.inner.transaction();
-        let txn_static =
-            // SAFETY: In `RocksTransaction` we hold an Arc reference to the DB, 
-            // so a `Transaction<'db, DB>` won't outlive the lifetime of the DB.
-            unsafe { std::mem::transmute::<_, Transaction<'static, OptimisticTransactionDB>>(txn) };
-        RocksTransaction {
-            db: Arc::clone(&self.inner),
-            txn: Mutex::new(Some(txn_static)),
-            engine_size: Arc::clone(&self.size),
-            txn_size: AtomicU64::new(0),
-        }
-    }
-
+impl StorageOps for RocksEngine {
     #[inline]
     fn get(&self, table: &str, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, EngineError> {
         if let Some(cf) = self.inner.cf_handle(table) {
@@ -168,27 +147,12 @@ impl StorageEngine for RocksEngine {
         }
     }
 
-    #[inline]
-    fn get_all(&self, table: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, EngineError> {
-        if let Some(cf) = self.inner.cf_handle(table) {
-            self.inner
-                .iterator_cf(&cf, IteratorMode::Start)
-                .map(|v| {
-                    v.map(|(key, value)| (key.to_vec(), value.to_vec()))
-                        .map_err(EngineError::from)
-                })
-                .collect()
-        } else {
-            Err(EngineError::TableNotFound(table.to_owned()))
-        }
+    fn write(&self, _op: WriteOperation<'_>, _sync: bool) -> Result<(), EngineError> {
+        todo!()
     }
 
-    /// TODO: use sync parameter
     #[inline]
-    fn write_batch(&self, wr_ops: Vec<WriteOperation<'_>>, _sync: bool) -> Result<(), EngineError> {
-        // FIXME: Conflicts should not occur.
-        // Remove the mutex after the refactor of cmd worker
-        let _l = self.mutex.lock();
+    fn write_multi(&self, wr_ops: Vec<WriteOperation<'_>>, _sync: bool) -> Result<(), EngineError> {
         let transaction = self.inner.transaction();
         let mut size = 0;
         #[allow(clippy::pattern_type_mismatch)] // can't be fixed
@@ -235,6 +199,43 @@ impl StorageEngine for RocksEngine {
             .fetch_add(size.numeric_cast(), std::sync::atomic::Ordering::Relaxed);
 
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageEngine for RocksEngine {
+    type Snapshot = RocksSnapshot;
+    type Transaction = RocksTransaction;
+
+    #[allow(unsafe_code)]
+    #[inline]
+    fn transaction(&self) -> RocksTransaction {
+        let txn = self.inner.transaction();
+        let txn_static =
+            // SAFETY: In `RocksTransaction` we hold an Arc reference to the DB, 
+            // so a `Transaction<'db, DB>` won't outlive the lifetime of the DB.
+            unsafe { std::mem::transmute::<_, Transaction<'static, OptimisticTransactionDB>>(txn) };
+        RocksTransaction {
+            db: Arc::clone(&self.inner),
+            txn: Mutex::new(Some(txn_static)),
+            engine_size: Arc::clone(&self.size),
+            txn_size: AtomicU64::new(0),
+        }
+    }
+
+    #[inline]
+    fn get_all(&self, table: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, EngineError> {
+        if let Some(cf) = self.inner.cf_handle(table) {
+            self.inner
+                .iterator_cf(&cf, IteratorMode::Start)
+                .map(|v| {
+                    v.map(|(key, value)| (key.to_vec(), value.to_vec()))
+                        .map_err(EngineError::from)
+                })
+                .collect()
+        } else {
+            Err(EngineError::TableNotFound(table.to_owned()))
+        }
     }
 
     #[inline]
@@ -354,136 +355,6 @@ impl Meta {
     /// length of the meta data
     fn len(&self) -> usize {
         self.data.get_ref().len()
-    }
-}
-
-/// Transaction type for `RocksDB`
-///
-/// WARN: `db` should never be dropped before `txn`
-pub struct RocksTransaction {
-    /// The inner DB
-    db: Arc<OptimisticTransactionDB>,
-    /// A transaction of the DB
-    txn: Mutex<Option<Transaction<'static, OptimisticTransactionDB>>>,
-    /// The size of the engine
-    engine_size: Arc<AtomicU64>,
-    /// The size of the txn
-    txn_size: AtomicU64,
-}
-
-impl std::fmt::Debug for RocksTransaction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RocksTransaction")
-            .field("db", &self.db)
-            .finish()
-    }
-}
-
-#[allow(clippy::unwrap_used, clippy::unwrap_in_result)] // The transaction always exist
-#[async_trait::async_trait]
-impl TransactionApi for RocksTransaction {
-    fn write(&self, op: WriteOperation<'_>) -> Result<(), EngineError> {
-        let txn_l = self.txn.lock();
-        let txn = txn_l.as_ref().unwrap();
-        let mut size = 0;
-        #[allow(clippy::pattern_type_mismatch)] // can't be fixed
-        match op {
-            WriteOperation::Put { table, key, value } => {
-                let cf = self
-                    .db
-                    .cf_handle(table.as_ref())
-                    .ok_or_else(|| EngineError::TableNotFound(table.to_owned()))?;
-                size = size.overflow_add(RocksEngine::max_write_size(
-                    table.len(),
-                    key.len(),
-                    value.len(),
-                ));
-                txn.put_cf(&cf, key, value).map_err(EngineError::from)?;
-            }
-            WriteOperation::Delete { table, key } => {
-                let cf = self
-                    .db
-                    .cf_handle(table.as_ref())
-                    .ok_or_else(|| EngineError::TableNotFound(table.to_owned()))?;
-                txn.delete_cf(&cf, key).map_err(EngineError::from)?;
-            }
-            WriteOperation::DeleteRange { table, from, to } => {
-                let cf = self
-                    .db
-                    .cf_handle(table.as_ref())
-                    .ok_or_else(|| EngineError::TableNotFound(table.to_owned()))?;
-                let mode = IteratorMode::From(from, Direction::Forward);
-                let kvs: Vec<_> = txn
-                    .iterator_cf(&cf, mode)
-                    .take_while(|res| res.as_ref().is_ok_and(|(key, _)| key.as_ref() < to))
-                    .collect::<Result<Vec<_>, _>>()?;
-                for (key, _) in kvs {
-                    txn.delete_cf(&cf, key)?;
-                }
-            }
-        };
-
-        _ = self
-            .txn_size
-            .fetch_add(size.numeric_cast(), std::sync::atomic::Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    fn get(&self, table: &str, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, EngineError> {
-        let txn_l = self.txn.lock();
-        let txn = txn_l.as_ref().unwrap();
-        let cf = self
-            .db
-            .cf_handle(table.as_ref())
-            .ok_or_else(|| EngineError::TableNotFound(table.to_owned()))?;
-        txn.get_cf(&cf, key).map_err(EngineError::from)
-    }
-
-    fn get_multi(
-        &self,
-        table: &str,
-        keys: &[impl AsRef<[u8]>],
-    ) -> Result<Vec<Option<Vec<u8>>>, EngineError> {
-        let txn_l = self.txn.lock();
-        let txn = txn_l.as_ref().unwrap();
-        let cf = self
-            .db
-            .cf_handle(table.as_ref())
-            .ok_or_else(|| EngineError::TableNotFound(table.to_owned()))?;
-        txn.multi_get_cf(repeat(&cf).zip(keys.iter()))
-            .into_iter()
-            .collect::<Result<_, _>>()
-            .map_err(EngineError::from)
-    }
-
-    async fn commit(self) -> Result<(), EngineError> {
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = self
-                .txn
-                .lock()
-                .take()
-                .unwrap()
-                .commit()
-                .map_err(EngineError::from)
-            {
-                return Err(e);
-            }
-
-            let size = self.txn_size.load(std::sync::atomic::Ordering::Relaxed);
-            let _ignore = self
-                .engine_size
-                .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
-
-            Ok(())
-        })
-        .await?
-    }
-
-    fn rollback(&self) -> Result<(), EngineError> {
-        let txn_l = self.txn.lock();
-        let txn = txn_l.as_ref().unwrap();
-        txn.rollback().map_err(EngineError::from)
     }
 }
 
@@ -818,13 +689,13 @@ mod test {
         let engine = RocksEngine::new(path.clone(), &TEST_TABLES).unwrap();
         let size1 = engine.file_size().unwrap();
         engine
-            .write_batch(
+            .write_multi(
                 vec![WriteOperation::new_put(
                     "t1",
                     b"key".to_vec(),
                     b"value".to_vec(),
                 )],
-                true,
+                false,
             )
             .unwrap();
         let size2 = engine.file_size().unwrap();

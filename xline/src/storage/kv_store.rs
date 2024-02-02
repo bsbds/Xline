@@ -18,10 +18,11 @@ use xlineapi::{
 };
 
 use super::{
+    db::DB,
     index::{Index, IndexOperate, IndexTransaction, IndexTransactionOperate},
     lease_store::LeaseCollection,
     revision::{KeyRevision, Revision},
-    storage_api::{StorageApi, StorageTxnApi},
+    storage_api::XlineStorageOps,
 };
 use crate::{
     header_gen::HeaderGenerator,
@@ -42,12 +43,9 @@ pub(crate) const KV_TABLE: &str = "kv";
 
 /// KV store
 #[derive(Debug)]
-pub(crate) struct KvStore<DB>
-where
-    DB: StorageApi,
-{
+pub(crate) struct KvStore {
     /// Kv storage inner
-    inner: Arc<KvStoreInner<DB>>,
+    inner: Arc<KvStoreInner>,
     /// Revision
     revision: Arc<RevisionNumberGenerator>,
     /// Header generator
@@ -62,10 +60,7 @@ where
 
 /// KV store inner, shared by `KvStore` and `KvWatcher`
 #[derive(Debug)]
-pub(crate) struct KvStoreInner<DB>
-where
-    DB: StorageApi,
-{
+pub(crate) struct KvStoreInner {
     /// Key Index
     index: Arc<Index>,
     /// DB to store key value
@@ -74,10 +69,7 @@ where
     compacted_rev: AtomicI64,
 }
 
-impl<DB> KvStoreInner<DB>
-where
-    DB: StorageApi,
-{
+impl KvStoreInner {
     /// Create new `KvStoreInner`
     pub(crate) fn new(index: Arc<Index>, db: Arc<DB>) -> Self {
         Self {
@@ -90,7 +82,7 @@ where
     /// Get `KeyValue` from the `KvStore`
     fn get_values<T>(txn: &T, revisions: &[Revision]) -> Result<Vec<KeyValue>, ExecuteError>
     where
-        T: StorageTxnApi,
+        T: XlineStorageOps,
     {
         let revisions = revisions
             .iter()
@@ -819,7 +811,6 @@ where
 
         txn_db
             .commit()
-            .await
             .map_err(|e| ExecuteError::DbError(e.to_string()))?;
         txn_index.commit();
 
