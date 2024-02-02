@@ -155,6 +155,69 @@ pub enum Transaction {
     Rocks(RocksTransaction),
 }
 
+/// `Tran`
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TransactionSingle {
+    /// Memory snapshot
+    Memory(MemoryTransaction),
+    /// Rocks snapshot
+    Rocks(RocksTransaction),
+}
+
+impl Default for TransactionSingle {
+    fn default() -> Self {
+        todo!()
+    }
+}
+
+#[async_trait::async_trait]
+impl TransactionApi for TransactionSingle {
+    #[inline]
+    fn write(&self, op: WriteOperation<'_>) -> Result<(), EngineError> {
+        match *self {
+            TransactionSingle::Memory(ref t) => t.write(op),
+            TransactionSingle::Rocks(ref t) => t.write(op),
+        }
+    }
+
+    #[inline]
+    fn get(&self, table: &str, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, EngineError> {
+        match *self {
+            TransactionSingle::Memory(ref t) => t.get(table, key),
+            TransactionSingle::Rocks(ref t) => t.get(table, key),
+        }
+    }
+
+    #[inline]
+    fn get_multi(
+        &self,
+        table: &str,
+        keys: &[impl AsRef<[u8]>],
+    ) -> Result<Vec<Option<Vec<u8>>>, EngineError> {
+        match *self {
+            TransactionSingle::Memory(ref t) => t.get_multi(table, keys),
+            TransactionSingle::Rocks(ref t) => t.get_multi(table, keys),
+        }
+    }
+
+    #[inline]
+    async fn commit(self) -> Result<(), EngineError> {
+        match self {
+            TransactionSingle::Memory(t) => t.commit().await,
+            TransactionSingle::Rocks(t) => t.commit().await,
+        }
+    }
+
+    #[inline]
+    fn rollback(&self) -> Result<(), EngineError> {
+        match *self {
+            TransactionSingle::Memory(ref t) => t.rollback(),
+            TransactionSingle::Rocks(ref t) => t.rollback(),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl TransactionApi for Transaction {
     #[inline]

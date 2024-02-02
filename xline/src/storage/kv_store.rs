@@ -8,7 +8,7 @@ use std::{
 };
 
 use clippy_utilities::{Cast, OverflowArithmetic};
-use engine::{Transaction, TransactionApi};
+use engine::Transaction;
 use prost::Message;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -88,10 +88,10 @@ where
     }
 
     /// Get `KeyValue` from the `KvStore`
-    fn get_values(
-        txn: &Transaction,
-        revisions: &[Revision],
-    ) -> Result<Vec<KeyValue>, ExecuteError> {
+    fn get_values<T>(txn: &T, revisions: &[Revision]) -> Result<Vec<KeyValue>, ExecuteError>
+    where
+        T: StorageTxnApi,
+    {
         let revisions = revisions
             .iter()
             .map(Revision::encode_to_vec)
@@ -112,13 +112,16 @@ where
     /// Get `KeyValue` of a range
     ///
     /// If `range_end` is `&[]`, this function will return one or zero `KeyValue`.
-    fn get_range(
-        txn_db: &Transaction,
+    fn get_range<T>(
+        txn_db: &T,
         txn_index: &IndexTransaction,
         key: &[u8],
         range_end: &[u8],
         revision: i64,
-    ) -> Result<Vec<KeyValue>, ExecuteError> {
+    ) -> Result<Vec<KeyValue>, ExecuteError>
+    where
+        T: StorageTxnApi,
+    {
         let revisions = txn_index.get(key, range_end, revision);
         Self::get_values(txn_db, &revisions)
     }
@@ -212,11 +215,14 @@ where
     }
 
     /// After-Syncs a request
-    pub(crate) async fn after_sync(
+    pub(crate) async fn after_sync<T>(
         &self,
         request: &RequestWithToken,
-        txn_db: Transaction,
-    ) -> Result<SyncResponse, ExecuteError> {
+        txn_db: T,
+    ) -> Result<SyncResponse, ExecuteError>
+    where
+        T: StorageTxnApi,
+    {
         self.sync_request(&request.request, txn_db).await
     }
 
@@ -451,7 +457,10 @@ where
     }
 
     /// Check result of a `Compare`
-    fn check_compare(txn_db: &Transaction, txn_index: &IndexTransaction, cmp: &Compare) -> bool {
+    fn check_compare<T>(txn_db: &T, txn_index: &IndexTransaction, cmp: &Compare) -> bool
+    where
+        T: StorageTxnApi,
+    {
         let kvs = KvStoreInner::<DB>::get_range(txn_db, txn_index, &cmp.key, &cmp.range_end, 0)
             .unwrap_or_default();
         if kvs.is_empty() {
@@ -674,14 +683,17 @@ where
     }
 
     /// Handle `DeleteRangeRequest`
-    fn execute_delete_range(
+    fn execute_delete_range<T>(
         &self,
-        txn_db: &Transaction,
+        txn_db: &T,
         txn_index: &IndexTransaction,
         req: &DeleteRangeRequest,
         revision: i64,
         sub_revision: &mut i64,
-    ) -> Result<DeleteRangeResponse, ExecuteError> {
+    ) -> Result<DeleteRangeResponse, ExecuteError>
+    where
+        T: StorageTxnApi,
+    {
         let prev_kvs =
             KvStoreInner::<DB>::get_range(txn_db, txn_index, &req.key, &req.range_end, 0)?;
         let mut response = DeleteRangeResponse {
@@ -774,11 +786,14 @@ where
     DB: StorageApi,
 {
     /// Handle kv requests
-    async fn sync_request(
+    async fn sync_request<T>(
         &self,
         wrapper: &RequestWrapper,
-        txn_db: Transaction,
-    ) -> Result<SyncResponse, ExecuteError> {
+        txn_db: T,
+    ) -> Result<SyncResponse, ExecuteError>
+    where
+        T: StorageTxnApi,
+    {
         debug!("Execute {:?}", wrapper);
 
         let txn_index = self.inner.index.transaction();
@@ -819,14 +834,17 @@ where
     }
 
     /// Handle `PutRequest`
-    fn sync_put(
+    fn sync_put<T>(
         &self,
-        txn_db: &Transaction,
+        txn_db: &T,
         txn_index: &IndexTransaction,
         req: &PutRequest,
         revision: i64,
         sub_revision: &mut i64,
-    ) -> Result<Vec<Event>, ExecuteError> {
+    ) -> Result<Vec<Event>, ExecuteError>
+    where
+        T: StorageTxnApi,
+    {
         let new_rev = txn_index.register_revision(&req.key, revision, *sub_revision);
         let mut kv = KeyValue {
             key: req.key.clone(),
@@ -881,14 +899,17 @@ where
     }
 
     /// Handle `DeleteRangeRequest`
-    fn sync_delete_range(
+    fn sync_delete_range<T>(
         &self,
-        txn_db: &Transaction,
+        txn_db: &T,
         txn_index: &IndexTransaction,
         req: &DeleteRangeRequest,
         revision: i64,
         sub_revision: &mut i64,
-    ) -> Result<Vec<Event>, ExecuteError> {
+    ) -> Result<Vec<Event>, ExecuteError>
+    where
+        T: StorageTxnApi,
+    {
         let keys = Self::delete_keys(
             txn_db,
             txn_index,
@@ -904,14 +925,17 @@ where
     }
 
     /// Handle `TxnRequest`
-    fn sync_txn(
+    fn sync_txn<T>(
         &self,
-        txn_db: &Transaction,
+        txn_db: &T,
         txn_index: &IndexTransaction,
         request: &TxnRequest,
         revision: i64,
         sub_revision: &mut i64,
-    ) -> Result<Vec<Event>, ExecuteError> {
+    ) -> Result<Vec<Event>, ExecuteError>
+    where
+        T: StorageTxnApi,
+    {
         request.check_revision(self.compacted_revision(), self.revision())?;
         let success = request
             .compare
@@ -1025,14 +1049,17 @@ where
     }
 
     /// Delete keys from index and detach them in lease collection, return all the write operations and events
-    pub(crate) fn delete_keys(
-        txn_db: &Transaction,
+    pub(crate) fn delete_keys<T>(
+        txn_db: &T,
         txn_index: &IndexTransaction,
         key: &[u8],
         range_end: &[u8],
         revision: i64,
         sub_revision: &mut i64,
-    ) -> Result<Vec<Vec<u8>>, ExecuteError> {
+    ) -> Result<Vec<Vec<u8>>, ExecuteError>
+    where
+        T: StorageTxnApi,
+    {
         let (revisions, keys) = txn_index.delete(key, range_end, revision, *sub_revision);
         let (del_ops, key_revisions) = Self::mark_deletions(&revisions, &keys);
 

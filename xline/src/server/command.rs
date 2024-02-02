@@ -9,7 +9,7 @@ use curp::{
     InflightId, LogIndex,
 };
 use dashmap::DashMap;
-use engine::{Snapshot, TransactionApi};
+use engine::{Snapshot, TransactionApi, TransactionSingle};
 use event_listener::Event;
 use tracing::warn;
 use xlineapi::{
@@ -320,6 +320,13 @@ where
         self.auth_storage.check_permission(wrapper)?;
         let txn_db = self.persistent.transaction();
         txn_db.write_op(WriteOp::PutAppliedIndex(index))?;
+
+        if true {
+            self.kv_storage.after_sync(wrapper, txn_db).await?;
+        } else {
+            let another_txn = TransactionSingle::default();
+            self.kv_storage.after_sync(wrapper, another_txn).await?;
+        }
 
         let res = match wrapper.request.backend() {
             RequestBackend::Kv => self.kv_storage.after_sync(wrapper, txn_db).await?,

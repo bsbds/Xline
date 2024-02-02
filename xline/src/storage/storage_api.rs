@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use engine::{Snapshot, Transaction};
+use engine::{Snapshot, Transaction, TransactionApi};
 use xlineapi::execute_error::ExecuteError;
 
 use super::db::WriteOp;
@@ -62,7 +62,7 @@ pub trait StorageApi: Send + Sync + 'static + std::fmt::Debug {
 }
 
 /// The Stable Storage Transaction Api
-pub(crate) trait StorageTxnApi {
+pub(crate) trait StorageTxnApi: TransactionApi {
     /// Get values by keys from storage
     ///
     /// # Errors

@@ -179,6 +179,6 @@ pub use crate::{
         transaction_api::TransactionApi,
     },
     error::EngineError,
-    proxy::{Engine, EngineType, Snapshot, Transaction},
+    proxy::{Engine, EngineType, Snapshot, Transaction, TransactionSingle},
     snapshot_allocator::{MemorySnapshotAllocator, RocksSnapshotAllocator},
 };
