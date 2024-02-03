@@ -9,7 +9,7 @@ use curp::{
     InflightId, LogIndex,
 };
 use dashmap::DashMap;
-use engine::{Snapshot, StorageOps, TransactionApi};
+use engine::{Snapshot, TransactionApi};
 use event_listener::Event;
 use tracing::warn;
 use xlineapi::{
@@ -20,8 +20,8 @@ use super::barriers::{IdBarrier, IndexBarrier};
 use crate::{
     rpc::{RequestBackend, RequestWithToken, RequestWrapper},
     storage::{
-        db::WriteOp,
-        storage_api::{StorageApi, XlineStorageOps},
+        db::{WriteOp, DB},
+        storage_api::XlineStorageOps,
         AlarmStore, AuthStore, KvStore, LeaseStore,
     },
 };
@@ -62,17 +62,17 @@ impl RangeType {
 
 /// Command Executor
 #[derive(Debug)]
-pub(crate) struct CommandExecutor<S> {
+pub(crate) struct CommandExecutor {
     /// Kv Storage
-    kv_storage: Arc<KvStore<S>>,
+    kv_storage: Arc<KvStore>,
     /// Auth Storage
-    auth_storage: Arc<AuthStore<S>>,
+    auth_storage: Arc<AuthStore>,
     /// Lease Storage
-    lease_storage: Arc<LeaseStore<S>>,
+    lease_storage: Arc<LeaseStore>,
     /// Alarm Storage
-    alarm_storage: Arc<AlarmStore<S>>,
+    alarm_storage: Arc<AlarmStore>,
     /// persistent storage
-    persistent: Arc<S>,
+    persistent: Arc<DB>,
     /// Barrier for applied index
     index_barrier: Arc<IndexBarrier>,
     /// Barrier for propose id
@@ -93,14 +93,11 @@ pub(crate) trait QuotaChecker: Sync + Send + std::fmt::Debug {
 
 /// Quota checker for `Command`
 #[derive(Debug)]
-struct CommandQuotaChecker<S>
-where
-    S: StorageApi,
-{
+struct CommandQuotaChecker {
     /// Quota size
     quota: u64,
     /// persistent storage
-    persistent: Arc<S>,
+    persistent: Arc<DB>,
 }
 
 /// functions used to estimate request write size
@@ -156,20 +153,14 @@ mod size_estimate {
     }
 }
 
-impl<S> CommandQuotaChecker<S>
-where
-    S: StorageApi,
-{
+impl CommandQuotaChecker {
     /// Create a new `CommandQuotaChecker`
-    fn new(quota: u64, persistent: Arc<S>) -> Self {
+    fn new(quota: u64, persistent: Arc<DB>) -> Self {
         Self { quota, persistent }
     }
 }
 
-impl<S> QuotaChecker for CommandQuotaChecker<S>
-where
-    S: StorageApi,
-{
+impl QuotaChecker for CommandQuotaChecker {
     fn check(&self, cmd: &Command) -> bool {
         if !cmd.need_check_quota() {
             return true;
@@ -227,18 +218,15 @@ impl Alarmer {
     }
 }
 
-impl<S> CommandExecutor<S>
-where
-    S: StorageApi,
-{
+impl CommandExecutor {
     /// New `CommandExecutor`
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        kv_storage: Arc<KvStore<S>>,
-        auth_storage: Arc<AuthStore<S>>,
-        lease_storage: Arc<LeaseStore<S>>,
-        alarm_storage: Arc<AlarmStore<S>>,
-        persistent: Arc<S>,
+        kv_storage: Arc<KvStore>,
+        auth_storage: Arc<AuthStore>,
+        lease_storage: Arc<LeaseStore>,
+        alarm_storage: Arc<AlarmStore>,
+        persistent: Arc<DB>,
         index_barrier: Arc<IndexBarrier>,
         id_barrier: Arc<IdBarrier>,
         compact_events: Arc<DashMap<u64, Arc<Event>>>,
@@ -288,10 +276,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<S> CurpCommandExecutor<Command> for CommandExecutor<S>
-where
-    S: StorageApi,
-{
+impl CurpCommandExecutor<Command> for CommandExecutor {
     async fn execute(
         &self,
         cmd: &Command,

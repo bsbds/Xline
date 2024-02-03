@@ -43,17 +43,17 @@ use crate::{
     state::State,
     storage::{
         compact::{auto_compactor, compact_bg_task, COMPACT_CHANNEL_SIZE},
+        db::DB,
         index::Index,
         kv_store::KvStoreInner,
         kvwatcher::KvWatcher,
         lease_store::LeaseCollection,
-        storage_api::StorageApi,
         AlarmStore, AuthStore, KvStore, LeaseStore,
     },
 };
 
 /// Rpc Server of curp protocol
-type CurpServer<S> = Rpc<Command, CommandExecutor<S>, State<S>>;
+type CurpServer = Rpc<Command, CommandExecutor, State>;
 
 /// Rpc Client of curp protocol
 type CurpClient = Client<Command>;
@@ -126,18 +126,18 @@ impl XlineServer {
     /// Construct underlying storages, including `KvStore`, `LeaseStore`, `AuthStore`
     #[allow(clippy::type_complexity)] // it is easy to read
     #[inline]
-    async fn construct_underlying_storages<S: StorageApi>(
+    async fn construct_underlying_storages(
         &self,
-        persistent: Arc<S>,
+        persistent: Arc<DB>,
         lease_collection: Arc<LeaseCollection>,
         header_gen: Arc<HeaderGenerator>,
         key_pair: Option<(EncodingKey, DecodingKey)>,
     ) -> Result<(
-        Arc<KvStore<S>>,
-        Arc<LeaseStore<S>>,
-        Arc<AuthStore<S>>,
-        Arc<AlarmStore<S>>,
-        Arc<KvWatcher<S>>,
+        Arc<KvStore>,
+        Arc<LeaseStore>,
+        Arc<AuthStore>,
+        Arc<AlarmStore>,
+        Arc<KvWatcher>,
     )> {
         let (compact_task_tx, compact_task_rx) = channel(COMPACT_CHANNEL_SIZE);
         let index = Arc::new(Index::new());
@@ -214,9 +214,9 @@ impl XlineServer {
     ///
     /// Will return `Err` when `init_servers` return an error
     #[inline]
-    pub async fn init_router<S: StorageApi>(
+    pub async fn init_router(
         &self,
-        persistent: Arc<S>,
+        persistent: Arc<DB>,
         key_pair: Option<(EncodingKey, DecodingKey)>,
     ) -> Result<(Router, Arc<CurpClient>)> {
         let (
@@ -283,10 +283,10 @@ impl XlineServer {
     /// Will return `Err` when `tonic::Server` serve return an error
     #[inline]
     #[cfg(not(madsim))]
-    pub async fn start<S: StorageApi>(
+    pub async fn start(
         &self,
         addrs: Vec<SocketAddr>,
-        persistent: Arc<S>,
+        persistent: Arc<DB>,
         key_pair: Option<(EncodingKey, DecodingKey)>,
     ) -> Result<JoinHandle<Result<(), tonic::transport::Error>>> {
         let mut shutdown_listener = self.shutdown_trigger.subscribe();
@@ -312,10 +312,10 @@ impl XlineServer {
     /// Will return `Err` when `tonic::Server` serve return an error
     #[inline]
     #[cfg(not(madsim))]
-    pub async fn start_from_listener<S: StorageApi>(
+    pub async fn start_from_listener(
         &self,
         xline_listener: tokio::net::TcpListener,
-        persistent: Arc<S>,
+        persistent: Arc<DB>,
         key_pair: Option<(EncodingKey, DecodingKey)>,
     ) -> Result<()> {
         let mut shutdown_listener = self.shutdown_trigger.subscribe();
@@ -337,19 +337,19 @@ impl XlineServer {
     /// Init `KvServer`, `LockServer`, `LeaseServer`, `WatchServer` and `CurpServer`
     /// for the Xline Server.
     #[allow(clippy::type_complexity, clippy::too_many_lines)] // it is easy to read
-    async fn init_servers<S: StorageApi>(
+    async fn init_servers(
         &self,
-        persistent: Arc<S>,
+        persistent: Arc<DB>,
         key_pair: Option<(EncodingKey, DecodingKey)>,
     ) -> Result<(
-        KvServer<S>,
+        KvServer,
         LockServer,
-        Arc<LeaseServer<S>>,
+        Arc<LeaseServer>,
         AuthServer,
-        WatchServer<S>,
-        MaintenanceServer<S>,
+        WatchServer,
+        MaintenanceServer,
         ClusterServer,
-        Arc<CurpServer<S>>,
+        Arc<CurpServer>,
         Arc<CurpClient>,
     )> {
         let (header_gen, id_gen) = Self::construct_generator(&self.cluster_info);

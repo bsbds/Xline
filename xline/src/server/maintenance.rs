@@ -22,7 +22,7 @@ use crate::{
         MoveLeaderRequest, MoveLeaderResponse, SnapshotRequest, SnapshotResponse, StatusRequest,
         StatusResponse,
     },
-    storage::storage_api::StorageApi,
+    storage::db::DB,
 };
 
 /// Minimum page size
@@ -32,12 +32,9 @@ pub(crate) const MAINTENANCE_SNAPSHOT_CHUNK_SIZE: u64 = 64 * 1024;
 
 /// Maintenance Server
 #[derive(Debug)]
-pub(crate) struct MaintenanceServer<S>
-where
-    S: StorageApi,
-{
+pub(crate) struct MaintenanceServer {
     /// persistent storage
-    persistent: Arc<S>, // TODO: `persistent` is not a good name, rename it in a better way
+    persistent: Arc<DB>, // TODO: `persistent` is not a good name, rename it in a better way
     /// Header generator
     header_gen: Arc<HeaderGenerator>,
     /// Consensus client
@@ -46,14 +43,11 @@ where
     cluster_info: Arc<ClusterInfo>,
 }
 
-impl<S> MaintenanceServer<S>
-where
-    S: StorageApi,
-{
+impl MaintenanceServer {
     /// New `MaintenanceServer`
     pub(crate) fn new(
         client: Arc<Client<Command>>,
-        persistent: Arc<S>,
+        persistent: Arc<DB>,
         header_gen: Arc<HeaderGenerator>,
         cluster_info: Arc<ClusterInfo>,
     ) -> Self {
@@ -85,10 +79,7 @@ where
 }
 
 #[tonic::async_trait]
-impl<S> Maintenance for MaintenanceServer<S>
-where
-    S: StorageApi,
-{
+impl Maintenance for MaintenanceServer {
     async fn alarm(
         &self,
         request: tonic::Request<AlarmRequest>,
@@ -197,9 +188,9 @@ where
 }
 
 /// Generate snapshot stream
-fn snapshot_stream<S: StorageApi>(
+fn snapshot_stream(
     header_gen: &HeaderGenerator,
-    persistent: &S,
+    persistent: &DB,
 ) -> Result<impl Stream<Item = Result<SnapshotResponse, tonic::Status>>, tonic::Status> {
     let tmp_path = format!("/tmp/snapshot-{}", uuid::Uuid::new_v4());
     let mut snapshot = persistent.get_snapshot(tmp_path).map_err(|e| {

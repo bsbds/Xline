@@ -11,7 +11,6 @@ use xlineapi::command::Command;
 
 use super::{
     index::{Index, IndexOperate},
-    storage_api::StorageApi,
     KvStore,
 };
 use crate::{
@@ -97,16 +96,14 @@ pub(crate) async fn auto_compactor(
 
 /// background compact executor
 #[allow(clippy::integer_arithmetic)] // introduced bt tokio::select! macro
-pub(crate) async fn compact_bg_task<DB>(
-    kv_store: Arc<KvStore<DB>>,
+pub(crate) async fn compact_bg_task(
+    kv_store: Arc<KvStore>,
     index: Arc<Index>,
     batch_limit: usize,
     interval: Duration,
     mut compact_task_rx: Receiver<(i64, Option<Arc<Event>>)>,
     mut shutdown_listener: shutdown::Listener,
-) where
-    DB: StorageApi,
-{
+) {
     loop {
         let (revision, listener) = tokio::select! {
             recv = compact_task_rx.recv() => {

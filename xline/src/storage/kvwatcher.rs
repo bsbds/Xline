@@ -20,7 +20,7 @@ use tracing::debug;
 use utils::{parking_lot_lock::RwLockMap, shutdown};
 use xlineapi::command::KeyRange;
 
-use super::{kv_store::KvStoreInner, storage_api::StorageApi};
+use super::kv_store::KvStoreInner;
 use crate::rpc::{Event, KeyValue};
 
 /// Watch ID
@@ -164,12 +164,9 @@ impl Watcher {
 
 /// KV watcher
 #[derive(Debug)]
-pub(crate) struct KvWatcher<S>
-where
-    S: StorageApi,
-{
+pub(crate) struct KvWatcher {
     /// KV storage Inner
-    kv_store_inner: Arc<KvStoreInner<S>>,
+    kv_store_inner: Arc<KvStoreInner>,
     /// Watch indexes
     watcher_map: Arc<RwLock<WatcherMap>>,
 }
@@ -302,10 +299,7 @@ pub(crate) trait KvWatcherOps {
 }
 
 #[async_trait::async_trait]
-impl<S> KvWatcherOps for KvWatcher<S>
-where
-    S: StorageApi,
-{
+impl KvWatcherOps for KvWatcher {
     fn watch(
         &self,
         id: WatchId,
@@ -382,13 +376,10 @@ where
     }
 }
 
-impl<S> KvWatcher<S>
-where
-    S: StorageApi,
-{
+impl KvWatcher {
     /// Create a new `Arc<KvWatcher>`
     pub(crate) fn new_arc(
-        kv_store_inner: Arc<KvStoreInner<S>>,
+        kv_store_inner: Arc<KvStoreInner>,
         kv_update_rx: mpsc::Receiver<(i64, Vec<Event>)>,
         sync_victims_interval: Duration,
         shutdown_listener: shutdown::Listener,
@@ -414,7 +405,7 @@ where
     /// Background task to handle KV updates
     #[allow(clippy::integer_arithmetic)] // Introduced by tokio::select!
     async fn kv_updates_task(
-        kv_watcher: Arc<KvWatcher<S>>,
+        kv_watcher: Arc<KvWatcher>,
         mut kv_update_rx: mpsc::Receiver<(i64, Vec<Event>)>,
         // This task will safely exit when the log_tx is dropped, but we still
         // need to keep the shutdown_listener here to notify the shutdown trigger
@@ -429,7 +420,7 @@ where
     /// Background task to sync victims
     #[allow(clippy::integer_arithmetic)] // Introduced by tokio::select!
     async fn sync_victims_task(
-        kv_watcher: Arc<KvWatcher<S>>,
+        kv_watcher: Arc<KvWatcher>,
         sync_victims_interval: Duration,
         mut shutdown_listener: shutdown::Listener,
     ) {
@@ -599,7 +590,7 @@ mod test {
         },
     };
 
-    fn init_empty_store(rx: shutdown::Listener) -> (Arc<KvStore<DB>>, Arc<KvWatcher<DB>>) {
+    fn init_empty_store(rx: shutdown::Listener) -> (Arc<KvStore>, Arc<KvWatcher>) {
         let (compact_tx, _compact_rx) = mpsc::channel(COMPACT_CHANNEL_SIZE);
         let db = DB::open(&EngineConfig::Memory).unwrap();
         let header_gen = Arc::new(HeaderGenerator::new(0, 0));
@@ -734,7 +725,7 @@ mod test {
         tx.self_shutdown_and_wait().await;
     }
 
-    async fn put(store: &KvStore<DB>, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) {
+    async fn put(store: &KvStore, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) {
         let req = RequestWithToken::new(
             PutRequest {
                 key: key.into(),

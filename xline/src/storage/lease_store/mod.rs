@@ -25,7 +25,10 @@ use xlineapi::{
 };
 
 pub(crate) use self::{lease::Lease, lease_collection::LeaseCollection};
-use super::{db::WriteOp, index::Index, storage_api::StorageApi};
+use super::{
+    db::{WriteOp, DB},
+    index::Index,
+};
 use crate::{
     header_gen::HeaderGenerator,
     revision_number::RevisionNumberGenerator,
@@ -44,10 +47,7 @@ const MAX_LEASE_TTL: i64 = 9_000_000_000;
 
 /// Lease store
 #[derive(Debug)]
-pub(crate) struct LeaseStore<DB>
-where
-    DB: StorageApi,
-{
+pub(crate) struct LeaseStore {
     /// lease collection
     lease_collection: Arc<LeaseCollection>,
     /// Db to store lease
@@ -68,10 +68,7 @@ where
     sync_event: event_listener::Event,
 }
 
-impl<DB> LeaseStore<DB>
-where
-    DB: StorageApi,
-{
+impl LeaseStore {
     /// New `LeaseStore`
     pub(crate) fn new(
         lease_collection: Arc<LeaseCollection>,
@@ -205,10 +202,7 @@ where
     }
 }
 
-impl<DB> LeaseStore<DB>
-where
-    DB: StorageApi,
-{
+impl LeaseStore {
     /// Handle lease requests
     fn handle_lease_requests(
         &self,
@@ -360,16 +354,10 @@ where
         let txn_index = self.index.transaction();
 
         for (key, mut sub_revision) in del_keys.iter().zip(0..) {
-            let deleted = KvStore::<DB>::delete_keys(
-                &txn_db,
-                &txn_index,
-                key,
-                &[],
-                revision,
-                &mut sub_revision,
-            )?;
-            KvStore::<DB>::detach_leases(&deleted, &self.lease_collection);
-            let mut del_event = KvStore::<DB>::new_deletion_events(revision, deleted);
+            let deleted =
+                KvStore::delete_keys(&txn_db, &txn_index, key, &[], revision, &mut sub_revision)?;
+            KvStore::detach_leases(&deleted, &self.lease_collection);
+            let mut del_event = KvStore::new_deletion_events(revision, deleted);
             updates.append(&mut del_event);
         }
 
@@ -395,7 +383,7 @@ mod test {
     use utils::config::EngineConfig;
 
     use super::*;
-    use crate::storage::db::DB;
+    use crate::storage::{db::DB, storage_api::XlineStorageOps};
 
     #[tokio::test(flavor = "multi_thread")]
     #[abort_on_panic]
@@ -459,7 +447,7 @@ mod test {
         );
 
         let (_ignore, ops) = lease_store.after_sync(&req1).await?;
-        lease_store.db.flush_ops(ops)?;
+        lease_store.db.write_ops(ops)?;
         lease_store.mark_lease_synced(&req1.request);
 
         assert!(
@@ -480,7 +468,7 @@ mod test {
         );
 
         let (_ignore, ops) = lease_store.after_sync(&req2).await?;
-        lease_store.db.flush_ops(ops)?;
+        lease_store.db.write_ops(ops)?;
         lease_store.mark_lease_synced(&req2.request);
 
         assert!(
@@ -518,7 +506,7 @@ mod test {
         Ok(())
     }
 
-    fn init_store(db: Arc<DB>) -> LeaseStore<DB> {
+    fn init_store(db: Arc<DB>) -> LeaseStore {
         let lease_collection = Arc::new(LeaseCollection::new(0));
         let (kv_update_tx, _) = mpsc::channel(1);
         let header_gen = Arc::new(HeaderGenerator::new(0, 0));
@@ -527,12 +515,12 @@ mod test {
     }
 
     async fn exe_and_sync_req(
-        ls: &LeaseStore<DB>,
+        ls: &LeaseStore,
         req: &RequestWithToken,
     ) -> Result<ResponseWrapper, ExecuteError> {
         let cmd_res = ls.execute(req)?;
         let (_ignore, ops) = ls.after_sync(req).await?;
-        ls.db.flush_ops(ops)?;
+        ls.db.write_ops(ops)?;
         Ok(cmd_res.into_inner())
     }
 }

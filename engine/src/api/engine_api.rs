@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use crate::{api::snapshot_api::SnapshotApi, error::EngineError, StorageOps, TransactionApi};
+use crate::{api::snapshot_api::SnapshotApi, error::EngineError, TransactionApi};
 
 /// The `StorageEngine` trait
 #[async_trait::async_trait]
-pub trait StorageEngine: StorageOps + Send + Sync + 'static + std::fmt::Debug {
+pub trait StorageEngine: Send + Sync + 'static + std::fmt::Debug {
     /// The snapshot type
     type Snapshot: SnapshotApi;
     /// The transaction type

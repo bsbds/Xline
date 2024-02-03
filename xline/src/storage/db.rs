@@ -62,9 +62,39 @@ impl DB {
     }
 }
 
+impl StorageOps for DB {
+    fn write(&self, op: WriteOperation<'_>, sync: bool) -> Result<(), engine::EngineError> {
+        self.engine.write(op, sync)
+    }
+
+    fn write_multi(
+        &self,
+        ops: Vec<WriteOperation<'_>>,
+        sync: bool,
+    ) -> Result<(), engine::EngineError> {
+        self.engine.write_multi(ops, sync)
+    }
+
+    fn get(
+        &self,
+        table: &str,
+        key: impl AsRef<[u8]>,
+    ) -> Result<Option<Vec<u8>>, engine::EngineError> {
+        self.engine.get(table, key)
+    }
+
+    fn get_multi(
+        &self,
+        table: &str,
+        keys: &[impl AsRef<[u8]>],
+    ) -> Result<Vec<Option<Vec<u8>>>, engine::EngineError> {
+        self.engine.get_multi(table, keys)
+    }
+}
+
 impl DB {
     /// Creates a transaction
-    fn transaction(&self) -> Transaction {
+    pub(crate) fn transaction(&self) -> Transaction {
         self.engine.transaction()
     }
 
@@ -74,14 +104,20 @@ impl DB {
     ///
     /// if error occurs in storage, return `Err(error)`
     #[allow(clippy::type_complexity)] // it's clear that (Vec<u8>, Vec<u8>) is a key-value pair
-    fn get_all(&self, table: &'static str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExecuteError> {
+    pub(crate) fn get_all(
+        &self,
+        table: &'static str,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ExecuteError> {
         self.engine.get_all(table).map_err(|e| {
             ExecuteError::DbError(format!("Failed to get all keys from {table:?}: {e}"))
         })
     }
 
     /// Get the snapshot of the storage
-    fn get_snapshot(&self, snap_path: impl AsRef<Path>) -> Result<Snapshot, ExecuteError> {
+    pub(crate) fn get_snapshot(
+        &self,
+        snap_path: impl AsRef<Path>,
+    ) -> Result<Snapshot, ExecuteError> {
         self.engine
             .get_snapshot(snap_path, &XLINE_TABLES)
             .map_err(|e| ExecuteError::DbError(format!("Failed to get snapshot, error: {e}")))
@@ -92,7 +128,7 @@ impl DB {
     /// # Errors
     ///
     /// if error occurs in storage, return `Err(error)`
-    async fn reset(&self, snapshot: Option<Snapshot>) -> Result<(), ExecuteError> {
+    pub(crate) async fn reset(&self, snapshot: Option<Snapshot>) -> Result<(), ExecuteError> {
         if let Some(snap) = snapshot {
             self.engine
                 .apply_snapshot(snap, &XLINE_TABLES)
@@ -114,12 +150,12 @@ impl DB {
     }
 
     /// Get the cached size of the engine
-    fn estimated_file_size(&self) -> u64 {
+    pub(crate) fn estimated_file_size(&self) -> u64 {
         self.engine.estimated_file_size()
     }
 
     /// Get the file size of the engine
-    fn file_size(&self) -> Result<u64, ExecuteError> {
+    pub(crate) fn file_size(&self) -> Result<u64, ExecuteError> {
         self.engine
             .file_size()
             .map_err(|e| ExecuteError::DbError(format!("Failed to get file size, error: {e}")))
@@ -363,7 +399,7 @@ mod test {
             ..Default::default()
         };
         let ops = vec![WriteOp::PutKeyValue(revision, kv.clone())];
-        db.flush_ops(ops)?;
+        db.write_ops(ops)?;
         let res = db.get_value(KV_TABLE, &key)?;
         assert_eq!(res, Some(kv.encode_to_vec()));
 
@@ -394,7 +430,7 @@ mod test {
             ..Default::default()
         };
         let ops = vec![WriteOp::PutKeyValue(revision, kv.clone())];
-        origin_db.flush_ops(ops)?;
+        origin_db.write_ops(ops)?;
 
         let snapshot = origin_db.get_snapshot(snapshot_path)?;
 
@@ -475,7 +511,7 @@ mod test {
             WriteOp::PutUser(user),
             WriteOp::PutRole(role),
         ];
-        db.flush_ops(write_ops).unwrap();
+        db.write_ops(write_ops).unwrap();
         assert_eq!(
             db.get_value(KV_TABLE, Revision::new(1, 2).encode_to_vec())
                 .unwrap(),
@@ -505,7 +541,7 @@ mod test {
             WriteOp::DeleteUser("user"),
             WriteOp::DeleteRole("role"),
         ];
-        db.flush_ops(del_ops).unwrap();
+        db.write_ops(del_ops).unwrap();
         assert_eq!(
             db.get_value(LEASE_TABLE, 1i64.encode_to_vec()).unwrap(),
             None

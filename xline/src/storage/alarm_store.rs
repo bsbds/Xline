@@ -16,7 +16,7 @@ use xlineapi::{
     ResponseWrapper,
 };
 
-use super::{db::WriteOp, storage_api::StorageApi};
+use super::db::{WriteOp, DB};
 use crate::{header_gen::HeaderGenerator, revision_number::RevisionNumberGenerator};
 
 /// Alarm table name
@@ -24,10 +24,7 @@ pub(crate) const ALARM_TABLE: &str = "alarm";
 
 /// Alarm store
 #[derive(Debug)]
-pub(crate) struct AlarmStore<DB>
-where
-    DB: StorageApi,
-{
+pub(crate) struct AlarmStore {
     /// Revision
     revision: Arc<RevisionNumberGenerator>,
     /// Header generator
@@ -40,10 +37,7 @@ where
     current_alarm: AtomicI32,
 }
 
-impl<DB> AlarmStore<DB>
-where
-    DB: StorageApi,
-{
+impl AlarmStore {
     /// execute a alarm request
     pub(crate) fn execute(&self, request: &RequestWithToken) -> CommandResponse {
         #[allow(clippy::wildcard_enum_match_arm)]
@@ -99,10 +93,7 @@ where
     }
 }
 
-impl<DB> AlarmStore<DB>
-where
-    DB: StorageApi,
-{
+impl AlarmStore {
     /// Create a new alarm store
     pub(crate) fn new(header_gen: Arc<HeaderGenerator>, db: Arc<DB>) -> Self {
         Self {

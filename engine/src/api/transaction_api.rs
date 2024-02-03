@@ -1,7 +1,7 @@
-use crate::{EngineError, StorageOps};
+use crate::EngineError;
 
 /// Api for database transactions
-pub trait TransactionApi: StorageOps {
+pub trait TransactionApi {
     /// Commits the changes
     ///
     /// # Errors

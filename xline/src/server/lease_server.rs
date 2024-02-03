@@ -22,7 +22,7 @@ use crate::{
         LeaseKeepAliveResponse, LeaseLeasesRequest, LeaseLeasesResponse, LeaseRevokeRequest,
         LeaseRevokeResponse, LeaseTimeToLiveRequest, LeaseTimeToLiveResponse, RequestWrapper,
     },
-    storage::{storage_api::StorageApi, AuthStore, LeaseStore},
+    storage::{AuthStore, LeaseStore},
 };
 
 /// Default Lease Request Time
@@ -30,14 +30,11 @@ const DEFAULT_LEASE_REQUEST_TIME: Duration = Duration::from_millis(500);
 
 /// Lease Server
 #[derive(Debug)]
-pub(crate) struct LeaseServer<S>
-where
-    S: StorageApi,
-{
+pub(crate) struct LeaseServer {
     /// Lease storage
-    lease_storage: Arc<LeaseStore<S>>,
+    lease_storage: Arc<LeaseStore>,
     /// Auth storage
-    auth_storage: Arc<AuthStore<S>>,
+    auth_storage: Arc<AuthStore>,
     /// Consensus client
     client: Arc<Client<Command>>,
     /// Id generator
@@ -48,14 +45,11 @@ where
     shutdown_listener: shutdown::Listener,
 }
 
-impl<S> LeaseServer<S>
-where
-    S: StorageApi,
-{
+impl LeaseServer {
     /// New `LeaseServer`
     pub(crate) fn new(
-        lease_storage: Arc<LeaseStore<S>>,
-        auth_storage: Arc<AuthStore<S>>,
+        lease_storage: Arc<LeaseStore>,
+        auth_storage: Arc<AuthStore>,
         client: Arc<Client<Command>>,
         id_gen: Arc<IdGenerator>,
         cluster_info: Arc<ClusterInfo>,
@@ -75,7 +69,7 @@ where
 
     /// Task of revoke expired leases
     #[allow(clippy::integer_arithmetic)] // Introduced by tokio::select!
-    async fn revoke_expired_leases_task(lease_server: Arc<LeaseServer<S>>) {
+    async fn revoke_expired_leases_task(lease_server: Arc<LeaseServer>) {
         let mut listener = lease_server.shutdown_listener.clone();
         loop {
             tokio::select! {
@@ -249,10 +243,7 @@ fn build_endpoints(mut addrs: Vec<String>) -> Result<Vec<Endpoint>, tonic::Statu
 }
 
 #[tonic::async_trait]
-impl<S> Lease for LeaseServer<S>
-where
-    S: StorageApi,
-{
+impl Lease for LeaseServer {
     /// LeaseGrant creates a lease which expires if the server does not receive a keepAlive
     /// within a given time to live period. All keys attached to the lease will be expired and
     /// deleted if the lease expires. Each expired key generates a delete event in the event history.
