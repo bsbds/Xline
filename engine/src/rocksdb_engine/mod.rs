@@ -12,10 +12,8 @@ use std::{
 
 use bytes::{Buf, Bytes, BytesMut};
 use clippy_utilities::{NumericCast, OverflowArithmetic};
-use parking_lot::Mutex;
 use rocksdb::{
     Direction, Error as RocksError, IteratorMode, OptimisticTransactionDB, Options, SstFileWriter,
-    Transaction,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{fs::File, io::AsyncWriteExt};
@@ -210,17 +208,7 @@ impl StorageEngine for RocksEngine {
     #[allow(unsafe_code)]
     #[inline]
     fn transaction(&self) -> RocksTransaction {
-        let txn = self.inner.transaction();
-        let txn_static =
-            // SAFETY: In `RocksTransaction` we hold an Arc reference to the DB, 
-            // so a `Transaction<'db, DB>` won't outlive the lifetime of the DB.
-            unsafe { std::mem::transmute::<_, Transaction<'static, OptimisticTransactionDB>>(txn) };
-        RocksTransaction {
-            db: Arc::clone(&self.inner),
-            txn: Mutex::new(Some(txn_static)),
-            engine_size: Arc::clone(&self.size),
-            txn_size: AtomicU64::new(0),
-        }
+        RocksTransaction::new(Arc::clone(&self.inner), Arc::clone(&self.size))
     }
 
     #[inline]
