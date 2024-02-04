@@ -501,7 +501,7 @@ impl KvStore {
         debug!("Execute {:?}", wrapper);
 
         let txn_db = self.inner.db.transaction();
-        let txn_index = self.inner.index.transaction();
+        let mut txn_index = self.inner.index.transaction();
         // As we store use revision as key in the DB storage,
         // a fake revision needs to be used during speculative execution
         let fake_revision = i64::MAX;
@@ -515,10 +515,10 @@ impl KvStore {
                 .execute_put(&txn_db, &txn_index, req, fake_revision, &mut 0)
                 .map(Into::into)?,
             RequestWrapper::DeleteRangeRequest(ref req) => self
-                .execute_delete_range(&txn_db, &txn_index, req, fake_revision, &mut 0)
+                .execute_delete_range(&txn_db, &mut txn_index, req, fake_revision, &mut 0)
                 .map(Into::into)?,
             RequestWrapper::TxnRequest(ref req) => self
-                .execute_txn(&txn_db, &txn_index, req, fake_revision, &mut 0)
+                .execute_txn(&txn_db, &mut txn_index, req, fake_revision, &mut 0)
                 .map(Into::into)?,
             RequestWrapper::CompactionRequest(ref req) => {
                 debug!("Receive CompactionRequest {:?}", req);
@@ -611,7 +611,7 @@ impl KvStore {
     fn execute_put_old(
         &self,
         txn_db: &Transaction,
-        txn_index: &IndexTransaction,
+        txn_index: &mut IndexTransaction,
         req: &PutRequest,
         revision: i64,
         sub_revision: &mut i64,
@@ -666,7 +666,7 @@ impl KvStore {
     fn execute_delete_range<T>(
         &self,
         txn_db: &T,
-        txn_index: &IndexTransaction,
+        txn_index: &mut IndexTransaction,
         req: &DeleteRangeRequest,
         revision: i64,
         sub_revision: &mut i64,
@@ -700,7 +700,7 @@ impl KvStore {
     fn execute_txn(
         &self,
         txn_db: &Transaction,
-        txn_index: &IndexTransaction,
+        txn_index: &mut IndexTransaction,
         request: &TxnRequest,
         revision: i64,
         sub_revision: &mut i64,
@@ -772,7 +772,7 @@ impl KvStore {
     {
         debug!("Execute {:?}", wrapper);
 
-        let txn_index = self.inner.index.transaction();
+        let mut txn_index = self.inner.index.transaction();
         let next_revision = self.revision.get().overflow_add(1);
 
         #[allow(clippy::wildcard_enum_match_arm)]
@@ -781,13 +781,13 @@ impl KvStore {
                 vec![]
             }
             RequestWrapper::PutRequest(ref req) => {
-                self.sync_put(&txn_db, &txn_index, req, next_revision, &mut 0)?
+                self.sync_put(&txn_db, &mut txn_index, req, next_revision, &mut 0)?
             }
             RequestWrapper::DeleteRangeRequest(ref req) => {
-                self.sync_delete_range(&txn_db, &txn_index, req, next_revision, &mut 0)?
+                self.sync_delete_range(&txn_db, &mut txn_index, req, next_revision, &mut 0)?
             }
             RequestWrapper::TxnRequest(ref req) => {
-                self.sync_txn(&txn_db, &txn_index, req, next_revision, &mut 0)?
+                self.sync_txn(&txn_db, &mut txn_index, req, next_revision, &mut 0)?
             }
             RequestWrapper::CompactionRequest(ref req) => self.sync_compaction(req).await?,
             _ => unreachable!("Other request should not be sent to this store"),
@@ -812,7 +812,7 @@ impl KvStore {
     fn sync_put<T>(
         &self,
         txn_db: &T,
-        txn_index: &IndexTransaction,
+        txn_index: &mut IndexTransaction,
         req: &PutRequest,
         revision: i64,
         sub_revision: &mut i64,
@@ -877,7 +877,7 @@ impl KvStore {
     fn sync_delete_range<T>(
         &self,
         txn_db: &T,
-        txn_index: &IndexTransaction,
+        txn_index: &mut IndexTransaction,
         req: &DeleteRangeRequest,
         revision: i64,
         sub_revision: &mut i64,
@@ -903,7 +903,7 @@ impl KvStore {
     fn sync_txn<T>(
         &self,
         txn_db: &T,
-        txn_index: &IndexTransaction,
+        txn_index: &mut IndexTransaction,
         request: &TxnRequest,
         revision: i64,
         sub_revision: &mut i64,
@@ -1023,7 +1023,7 @@ impl KvStore {
     /// Delete keys from index and detach them in lease collection, return all the write operations and events
     pub(crate) fn delete_keys<T>(
         txn_db: &T,
-        txn_index: &IndexTransaction,
+        txn_index: &mut IndexTransaction,
         key: &[u8],
         range_end: &[u8],
         revision: i64,
