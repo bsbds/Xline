@@ -21,8 +21,8 @@ impl IntervalGenerator {
     }
 
     fn next(&mut self) -> Interval<i32> {
-        let low = self.rng.gen_range(0..self.limit);
-        let high = self.rng.gen_range(low..self.limit);
+        let low = self.rng.gen_range(0..self.limit - 1);
+        let high = self.rng.gen_range((low + 1)..self.limit);
         Interval::new(low, high)
     }
 
@@ -36,8 +36,10 @@ impl IntervalGenerator {
     }
 
     fn next_with_range(&mut self, range: i32) -> Interval<i32> {
-        let low = self.rng.gen_range(0..self.limit);
-        let high = self.rng.gen_range(low..self.limit.min(low + range));
+        let low = self.rng.gen_range(0..self.limit - 1);
+        let high = self
+            .rng
+            .gen_range((low + 1)..self.limit.min(low + 1 + range));
         Interval::new(low, high)
     }
 }
@@ -229,9 +231,9 @@ fn find_all_overlap_simple() {
     map.insert(Interval::new(2, 4), ());
     map.insert(Interval::new(6, 7), ());
     map.insert(Interval::new(7, 11), ());
-    assert_eq!(map.find_all_overlap(&Interval::new(2, 6)).len(), 3);
+    assert_eq!(map.find_all_overlap(&Interval::new(2, 7)).len(), 3);
     map.remove(&Interval::new(1, 3));
-    assert_eq!(map.find_all_overlap(&Interval::new(2, 6)).len(), 2);
+    assert_eq!(map.find_all_overlap(&Interval::new(2, 7)).len(), 2);
 }
 
 #[test]
