@@ -3831,6 +3831,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror",
+ "utils",
  "workspace-hack",
 ]
 
