@@ -211,12 +211,15 @@ where
         if x.interval(|xi| xi.overlap(i)) {
             list.push(x.interval(Clone::clone));
         }
-        if !x.left(NodeRef::is_sentinel) && x.left(|l| l.max(|m| *m >= i.low)) {
+        if !x.left(NodeRef::is_sentinel) && x.left(|l| l.max(|m| *m > i.low)) {
             list.extend(Self::find_all_overlap_inner(&x.left_owned(), i));
         }
         if !x.right(NodeRef::is_sentinel)
-            && x.interval(|xi| xi.low <= i.high)
-            && x.right(|r| r.max(|m| *m >= i.low))
+            && Interval::new(
+                x.interval(|xi| xi.low.clone()),
+                x.right(|r| r.max(Clone::clone)),
+            )
+            .overlap(i)
         {
             list.extend(Self::find_all_overlap_inner(&x.right_owned(), i));
         }
@@ -227,7 +230,7 @@ where
     fn search(&self, interval: &Interval<T>) -> NodeRef<T, V> {
         let mut x = self.root.clone_rc();
         while !x.is_sentinel() && x.interval(|xi| !xi.overlap(interval)) {
-            if !x.left(NodeRef::is_sentinel) && x.left(|l| l.max(|lm| lm >= &interval.low)) {
+            if !x.left(NodeRef::is_sentinel) && x.left(|l| l.max(|lm| lm > &interval.low)) {
                 x = x.left_owned();
             } else {
                 x = x.right_owned();
@@ -710,7 +713,7 @@ enum Color {
 }
 
 /// The Interval stored in `IntervalMap`
-/// Represents the interval [low, high]
+/// Represents the interval [low, high)
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Interval<T> {
     /// Low value
@@ -727,13 +730,13 @@ impl<T: Ord> Interval<T> {
     /// This method panics when low is greater than high
     #[inline]
     pub fn new(low: T, high: T) -> Self {
-        assert!(low <= high, "invalid range");
+        assert!(low < high, "invalid range");
         Self { low, high }
     }
 
     /// Checks if self overlaps with other interval
     fn overlap(&self, other: &Self) -> bool {
-        self.high >= other.low && other.high >= self.low
+        self.high > other.low && other.high > self.low
     }
 }
 
