@@ -282,3 +282,23 @@ fn entry_modify() {
         .entry(Interval::new(3, 5))
         .and_modify(|v| assert_eq!(*v, 0));
 }
+
+#[test]
+fn iterate_through_map() {
+    with_map_and_generator(|mut map, mut gen| {
+        let mut intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
+            .enumerate()
+            .take(1000)
+            .collect();
+        for (v, i) in intervals.clone() {
+            let _ignore = map.insert(i, v);
+        }
+        intervals.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+
+        #[allow(clippy::pattern_type_mismatch)]
+        for (entry, (v, i)) in map.iter().zip(intervals.iter()) {
+            entry.map_interval(|ei| assert_eq!(ei, i));
+            entry.map_value(|ev| assert_eq!(ev, v));
+        }
+    });
+}

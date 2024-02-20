@@ -40,7 +40,10 @@ where
     #[inline]
     pub fn entry(&mut self, interval: Interval<T>) -> Entry<'_, T, V> {
         match self.search_exact(&interval) {
-            Some(node) => Entry::Occupied(OccupiedEntry { node }),
+            Some(node) => Entry::Occupied(OccupiedEntry {
+                _map_ref: self,
+                node,
+            }),
             None => Entry::Vacant(VacantEntry {
                 map_ref: self,
                 interval,
@@ -70,6 +73,17 @@ where
     #[inline]
     pub fn find_all_overlap(&self, interval: &Interval<T>) -> Vec<Interval<T>> {
         Self::find_all_overlap_inner(&self.root, interval)
+    }
+
+    // TODO: lazy evaluation
+    /// Gets an iterator over the entries of the map, sorted by key.
+    #[inline]
+    #[must_use]
+    pub fn iter(&self) -> Iter<'_, T, V> {
+        Iter {
+            map_ref: self,
+            stack: Iter::left_tree(self.root.clone_rc()),
+        }
     }
 
     /// Returns the number of elements in the map.
@@ -522,6 +536,10 @@ impl<T, V> Node<T, V> {
         self.interval.as_ref().unwrap()
     }
 
+    fn value(&self) -> &V {
+        self.value.as_ref().unwrap()
+    }
+
     fn max(&self) -> &T {
         self.max.as_ref().unwrap()
     }
@@ -673,6 +691,13 @@ impl<T, V> NodeRef<T, V> {
         op(self.borrow().interval())
     }
 
+    fn value<F, R>(&self, op: F) -> R
+    where
+        F: FnOnce(&V) -> R,
+    {
+        op(self.borrow().value())
+    }
+
     fn left<F, R>(&self, op: F) -> R
     where
         F: FnOnce(&NodeRef<T, V>) -> R,
@@ -700,6 +725,45 @@ impl<T, V> NodeRef<T, V> {
     {
         let mut grand_parent = self.borrow().parent().borrow().parent_owned();
         op(&mut grand_parent)
+    }
+}
+
+/// An iterator over the entries of a `IntervalMap`.
+#[allow(missing_debug_implementations)]
+pub struct Iter<'a, T, V> {
+    /// Reference to the map
+    map_ref: &'a IntervalMap<T, V>,
+    /// Stack for iteration
+    stack: Vec<NodeRef<T, V>>,
+}
+
+impl<T, V> Iter<'_, T, V> {
+    /// Pushes x and x's left sub tree to stack.
+    fn left_tree(mut x: NodeRef<T, V>) -> Vec<NodeRef<T, V>> {
+        let mut nodes = vec![];
+        while !x.is_sentinel() {
+            nodes.push(x.clone_rc());
+            x = x.left_owned();
+        }
+        nodes
+    }
+}
+
+impl<'a, T, V> Iterator for Iter<'a, T, V> {
+    type Item = OccupiedEntry<'a, T, V>;
+
+    #[allow(clippy::unwrap_used, clippy::unwrap_in_result)]
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stack.is_empty() {
+            return None;
+        }
+        let x = self.stack.pop().unwrap();
+        self.stack.extend(Self::left_tree(x.right_owned()));
+        Some(OccupiedEntry {
+            _map_ref: self.map_ref,
+            node: x,
+        })
     }
 }
 
@@ -744,7 +808,7 @@ impl<T: Ord> Interval<T> {
 #[allow(missing_debug_implementations, clippy::exhaustive_enums)]
 pub enum Entry<'a, T, V> {
     /// An occupied entry.
-    Occupied(OccupiedEntry<T, V>),
+    Occupied(OccupiedEntry<'a, T, V>),
     /// A vacant entry.
     Vacant(VacantEntry<'a, T, V>),
 }
@@ -752,7 +816,9 @@ pub enum Entry<'a, T, V> {
 /// A view into an occupied entry in a `IntervalMap`.
 /// It is part of the [`Entry`] enum.
 #[allow(missing_debug_implementations)]
-pub struct OccupiedEntry<T, V> {
+pub struct OccupiedEntry<'a, T, V> {
+    /// Reference to the map
+    _map_ref: &'a IntervalMap<T, V>,
     /// The entry node
     node: NodeRef<T, V>,
 }
@@ -800,5 +866,25 @@ where
             }
             Entry::Vacant(entry) => Self::Vacant(entry),
         }
+    }
+}
+
+impl<T, V> OccupiedEntry<'_, T, V> {
+    /// Maps on the interval of this entry
+    #[inline]
+    pub fn map_interval<F, R>(&self, op: F) -> R
+    where
+        F: FnOnce(&Interval<T>) -> R,
+    {
+        self.node.interval(op)
+    }
+
+    /// Maps on the value of this entry
+    #[inline]
+    pub fn map_value<F, R>(&self, op: F) -> R
+    where
+        F: FnOnce(&V) -> R,
+    {
+        self.node.value(op)
     }
 }
