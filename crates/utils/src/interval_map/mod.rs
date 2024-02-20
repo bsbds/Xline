@@ -75,17 +75,6 @@ where
         Self::find_all_overlap_inner(&self.root, interval)
     }
 
-    // TODO: lazy evaluation
-    /// Gets an iterator over the entries of the map, sorted by key.
-    #[inline]
-    #[must_use]
-    pub fn iter(&self) -> Iter<'_, T, V> {
-        Iter {
-            map_ref: self,
-            stack: Iter::left_tree(self.root.clone_rc()),
-        }
-    }
-
     /// Returns the number of elements in the map.
     #[inline]
     #[must_use]
@@ -98,6 +87,19 @@ where
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+}
+
+impl<T, V> IntervalMap<T, V> {
+    // TODO: lazy evaluation
+    /// Gets an iterator over the entries of the map, sorted by key.
+    #[inline]
+    #[must_use]
+    pub fn iter(&self) -> Iter<'_, T, V> {
+        Iter {
+            map_ref: self,
+            stack: Iter::left_tree(self.root.clone_rc()),
+        }
     }
 }
 
@@ -499,6 +501,16 @@ impl<T, V> std::fmt::Debug for IntervalMap<T, V> {
         f.debug_struct("IntervalMap")
             .field("len", &self.len)
             .finish()
+    }
+}
+
+impl<T, V> Drop for IntervalMap<T, V> {
+    #[inline]
+    fn drop(&mut self) {
+        // Removes circular references.
+        for entry in self.iter() {
+            drop(entry.node.borrow_mut().parent.take());
+        }
     }
 }
 
