@@ -7,7 +7,7 @@ use std::{cell::RefCell, ops::Deref, rc::Rc};
 pub struct IntervalMap<T, V> {
     /// Root of the interval tree
     root: NodeRef<T, V>,
-    /// Sentinel node, used to simplify boundary checkes
+    /// Sentinel node, used to simplify boundary checks
     sentinel: NodeRef<T, V>,
     /// Number of elements in the map
     len: usize,
