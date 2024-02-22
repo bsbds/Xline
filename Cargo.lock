@@ -3335,6 +3335,7 @@ dependencies = [
  "opentelemetry-jaeger",
  "opentelemetry_sdk",
  "parking_lot",
+ "petgraph",
  "rand",
  "serde",
  "test-macros",
