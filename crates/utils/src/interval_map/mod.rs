@@ -1,5 +1,3 @@
-#![allow(clippy::shadow_unrelated)]
-
 use petgraph::graph::{DefaultIx, IndexType, NodeIndex};
 
 #[cfg(test)]
@@ -58,9 +56,13 @@ where
     pub fn remove(&mut self, interval: &Interval<T>) -> Option<V> {
         if let Some(node_idx) = self.search_exact(interval) {
             self.remove_inner(node_idx);
+            // To achieve an O(1) time complexity for node removal, we swap the node
+            // with the last node stored in the vector and update parent/left/right
+            // nodes of the last node.
             let mut node = self.nodes.swap_remove(node_idx.index());
             let old = NodeIndex::<Ix>::new(self.nodes.len());
             self.update_idx(old, node_idx);
+
             return node.value.take();
         }
         None
@@ -579,8 +581,9 @@ where
     }
 }
 
-#[allow(clippy::missing_docs_in_private_items)]
-#[allow(clippy::indexing_slicing)]
+// Convenient methods for reference or mutate current/parent/left/right node
+#[allow(clippy::missing_docs_in_private_items)] // Trivial convenient methods
+#[allow(clippy::indexing_slicing)] // Won't panic since all the indices we used are inbound
 impl<'a, T, V, Ix> IntervalMap<T, V, Ix>
 where
     Ix: IndexType,
@@ -677,7 +680,7 @@ where
 }
 
 /// An iterator over the entries of a `IntervalMap`.
-#[allow(missing_debug_implementations)]
+#[derive(Debug)]
 pub struct Iter<'a, T, V, Ix> {
     /// Reference to the map
     map_ref: &'a IntervalMap<T, V, Ix>,
@@ -689,7 +692,7 @@ impl<T, V, Ix> Iter<'_, T, V, Ix>
 where
     Ix: IndexType,
 {
-    /// Initiliazes the stack
+    /// Initializes the stack
     fn init_stack(&mut self) {
         self.stack = Some(Self::left_tree(self.map_ref, self.map_ref.root));
     }
@@ -726,12 +729,13 @@ where
             self.map_ref,
             self.map_ref.nref(x, Node::right),
         ));
-        Some(self.map_ref.nref(x, |x| (x.interval(), x.value())))
+        Some(self.map_ref.nref(x, |xn| (xn.interval(), xn.value())))
     }
 }
 
 /// A view into a single entry in a map, which may either be vacant or occupied.
-#[allow(missing_debug_implementations, clippy::exhaustive_enums)]
+#[allow(clippy::exhaustive_enums)] // It is final
+#[derive(Debug)]
 pub enum Entry<'a, T, V, Ix> {
     /// An occupied entry.
     Occupied(OccupiedEntry<'a, T, V, Ix>),
@@ -741,7 +745,7 @@ pub enum Entry<'a, T, V, Ix> {
 
 /// A view into an occupied entry in a `IntervalMap`.
 /// It is part of the [`Entry`] enum.
-#[allow(missing_debug_implementations)]
+#[derive(Debug)]
 pub struct OccupiedEntry<'a, T, V, Ix> {
     /// Reference to the map
     map_ref: &'a mut IntervalMap<T, V, Ix>,
@@ -751,7 +755,7 @@ pub struct OccupiedEntry<'a, T, V, Ix> {
 
 /// A view into a vacant entry in a `IntervalMap`.
 /// It is part of the [`Entry`] enum.
-#[allow(missing_debug_implementations)]
+#[derive(Debug)]
 pub struct VacantEntry<'a, T, V, Ix> {
     /// Mutable reference to the map
     map_ref: &'a mut IntervalMap<T, V, Ix>,
@@ -784,7 +788,6 @@ where
     /// # Panics
     ///
     /// This method panics when the node is a sentinel node
-    #[allow(clippy::unwrap_used)]
     #[inline]
     #[must_use]
     pub fn and_modify<F>(self, f: F) -> Self
@@ -822,8 +825,10 @@ pub struct Node<T, V, Ix> {
     value: Option<V>,
 }
 
+// Convenient getter/setter methods
 #[allow(clippy::missing_docs_in_private_items)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::missing_docs_in_private_items)] // Trivial convenient methods
+#[allow(clippy::unwrap_used)] // Won't panic since the conditions are checked in the implementation
 impl<T, V, Ix> Node<T, V, Ix>
 where
     Ix: IndexType,
