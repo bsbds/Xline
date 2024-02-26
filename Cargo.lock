@@ -3702,6 +3702,8 @@ dependencies = [
  "num-traits",
  "opentelemetry-jaeger",
  "opentelemetry_sdk",
+ "petgraph",
+ "predicates",
  "rand",
  "serde",
  "serde_json",
