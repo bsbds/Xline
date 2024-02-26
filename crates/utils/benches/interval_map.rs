@@ -1,3 +1,4 @@
+#![cfg(bench)]
 #![feature(test)]
 
 extern crate test;
@@ -7,7 +8,7 @@ use std::hint::black_box;
 
 use test::Bencher;
 
-use utils::array_interval_map::{Interval, IntervalMap};
+use utils::interval_map::{Interval, IntervalMap};
 
 struct Rng {
     state: u32,

@@ -176,10 +176,10 @@ pub struct ClientTlsConfig;
 #[non_exhaustive]
 pub struct ServerTlsConfig;
 
-/// Interval tree implementation
-pub mod array_interval_map;
 /// configuration
 pub mod config;
+/// Interval tree implementation
+pub mod interval_map;
 /// utils for metrics
 pub mod metrics;
 /// utils of `parking_lot` lock

@@ -1,63 +1,67 @@
+#![allow(clippy::shadow_unrelated)]
+
+use petgraph::graph::{DefaultIx, IndexType, NodeIndex};
+
 #[cfg(test)]
 mod tests;
 
-use std::{cell::RefCell, ops::Deref, rc::Rc};
-
 /// An interval-value map, which support operations on dynamic sets of intervals.
-pub struct IntervalMap<T, V> {
+#[derive(Debug)]
+pub struct IntervalMap<T, V, Ix = DefaultIx> {
+    /// Vector that stores nodes
+    nodes: Vec<Node<T, V, Ix>>,
     /// Root of the interval tree
-    root: NodeRef<T, V>,
-    /// Sentinel node, used to simplify boundary checks
-    sentinel: NodeRef<T, V>,
+    root: NodeIndex<Ix>,
     /// Number of elements in the map
     len: usize,
 }
 
-impl<T, V> IntervalMap<T, V>
+impl<T, V, Ix> IntervalMap<T, V, Ix>
 where
-    T: Ord + Clone,
+    T: Clone + Ord,
+    Ix: IndexType,
 {
-    /// Creates an empty `IntervalMap`
-    #[must_use]
+    /// Creates a new `IntervalMap` with estimated capacity.
     #[inline]
-    pub fn new() -> Self {
-        let sentinel = Self::new_sentinel();
-        Self {
-            root: sentinel.clone_rc(),
-            sentinel,
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut nodes = vec![Self::new_sentinel()];
+        nodes.reserve(capacity);
+        IntervalMap {
+            nodes,
+            root: Self::sentinel(),
             len: 0,
         }
     }
 
     /// Inserts a interval-value pair into the map.
+    ///
+    /// # Panics
+    ///
+    /// This method panics when the tree is at the maximum number of nodes for its index
     #[inline]
     pub fn insert(&mut self, interval: Interval<T>, value: V) -> Option<V> {
-        let z = self.new_node(interval, value);
-        self.insert_inner(z)
-    }
-
-    /// Gets the given key's corresponding entry in the map for in-place manipulation.
-    #[inline]
-    pub fn entry(&mut self, interval: Interval<T>) -> Entry<'_, T, V> {
-        match self.search_exact(&interval) {
-            Some(node) => Entry::Occupied(OccupiedEntry {
-                _map_ref: self,
-                node,
-            }),
-            None => Entry::Vacant(VacantEntry {
-                map_ref: self,
-                interval,
-            }),
-        }
+        let node = Self::new_node(interval, value);
+        let node_idx = NodeIndex::new(self.nodes.len());
+        // check for max capacity, except if we use usize
+        assert!(
+            <Ix as IndexType>::max().index() == !0 || NodeIndex::end() != node_idx,
+            "Reached maximum number of nodes"
+        );
+        self.nodes.push(node);
+        self.insert_inner(node_idx)
     }
 
     /// Removes a interval from the map, returning the value at the interval if the interval
     /// was previously in the map.
     #[inline]
     pub fn remove(&mut self, interval: &Interval<T>) -> Option<V> {
-        if let Some(node) = self.search_exact(interval) {
-            self.remove_inner(&node);
-            return Some(node.take_value());
+        if let Some(node_idx) = self.search_exact(interval) {
+            self.remove_inner(node_idx);
+            let mut node = self.nodes.swap_remove(node_idx.index());
+            let old = NodeIndex::<Ix>::new(self.nodes.len());
+            self.update_idx(old, node_idx);
+            return node.value.take();
         }
         None
     }
@@ -65,14 +69,53 @@ where
     /// Checks if an interval in the map overlaps with the given interval.
     #[inline]
     pub fn overlap(&self, interval: &Interval<T>) -> bool {
-        let node = self.search(interval);
-        !node.is_sentinel()
+        let node_idx = self.search(interval);
+        !self.nref(node_idx, Node::is_sentinel)
     }
 
     /// Finds all intervals in the map that overlaps with the given interval.
     #[inline]
-    pub fn find_all_overlap(&self, interval: &Interval<T>) -> Vec<Interval<T>> {
-        Self::find_all_overlap_inner(&self.root, interval)
+    pub fn find_all_overlap(&self, interval: &Interval<T>) -> Vec<&Interval<T>> {
+        self.find_all_overlap_inner(self.root, interval)
+    }
+
+    /// Returns a reference to the value corresponding to the key.
+    #[inline]
+    pub fn get(&self, interval: &Interval<T>) -> Option<&V> {
+        self.search_exact(interval)
+            .map(|idx| self.nref(idx, Node::value))
+    }
+
+    /// Returns a reference to the value corresponding to the key.
+    #[inline]
+    pub fn get_mut(&mut self, interval: &Interval<T>) -> Option<&mut V> {
+        self.search_exact(interval)
+            .map(|idx| self.nmut(idx, Node::value_mut))
+    }
+
+    /// Gets an iterator over the entries of the map, sorted by key.
+    #[inline]
+    #[must_use]
+    pub fn iter(&self) -> Iter<'_, T, V, Ix> {
+        Iter {
+            map_ref: self,
+            stack: None,
+        }
+    }
+
+    /// Gets the given key's corresponding entry in the map for in-place manipulation.
+    #[inline]
+    pub fn entry(&mut self, interval: Interval<T>) -> Entry<'_, T, V, Ix> {
+        match self.search_exact(&interval) {
+            Some(node) => Entry::Occupied(OccupiedEntry {
+                map_ref: self,
+                node,
+            }),
+            None => Entry::Vacant(VacantEntry {
+                map_ref: self,
+                interval,
+            }),
+        }
     }
 
     /// Returns the number of elements in the map.
@@ -86,39 +129,43 @@ where
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 }
 
-impl<T, V> IntervalMap<T, V> {
-    // TODO: lazy evaluation
-    /// Gets an iterator over the entries of the map, sorted by key.
-    #[inline]
+impl<T, V> IntervalMap<T, V>
+where
+    T: Clone + Ord,
+{
+    /// Creates an empty `IntervalMap`
     #[must_use]
-    pub fn iter(&self) -> Iter<'_, T, V> {
-        Iter {
-            map_ref: self,
-            stack: Iter::left_tree(self.root.clone_rc()),
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            nodes: vec![Self::new_sentinel()],
+            root: Self::sentinel(),
+            len: 0,
         }
     }
 }
 
 impl<T, V> Default for IntervalMap<T, V>
 where
-    T: Ord + Clone,
+    T: Clone + Ord,
 {
     #[inline]
     fn default() -> Self {
-        Self::new()
+        Self::with_capacity(0)
     }
 }
 
-impl<T, V> IntervalMap<T, V>
+impl<T, V, Ix> IntervalMap<T, V, Ix>
 where
-    T: Clone,
+    T: Clone + Ord,
+    Ix: IndexType,
 {
     /// Creates a new sentinel node
-    fn new_sentinel() -> NodeRef<T, V> {
+    fn new_sentinel() -> Node<T, V, Ix> {
         Node {
             interval: None,
             value: None,
@@ -128,90 +175,97 @@ where
             parent: None,
             color: Color::Black,
         }
-        .into_ref()
     }
 
     /// Creates a new tree node
-    fn new_node(&self, interval: Interval<T>, value: V) -> NodeRef<T, V> {
+    fn new_node(interval: Interval<T>, value: V) -> Node<T, V, Ix> {
         Node {
             max: Some(interval.high.clone()),
             interval: Some(interval),
             value: Some(value),
-            left: Some(self.sentinel.clone_rc()),
-            right: Some(self.sentinel.clone_rc()),
-            parent: Some(self.sentinel.clone_rc()),
+            left: Some(Self::sentinel()),
+            right: Some(Self::sentinel()),
+            parent: Some(Self::sentinel()),
             color: Color::Red,
         }
-        .into_ref()
+    }
+
+    /// Gets the sentinel node index
+    fn sentinel() -> NodeIndex<Ix> {
+        NodeIndex::new(0)
     }
 }
 
-impl<T, V> IntervalMap<T, V>
+impl<T, V, Ix> IntervalMap<T, V, Ix>
 where
     T: Ord + Clone,
+    Ix: IndexType,
 {
     /// Inserts a node into the tree.
-    fn insert_inner(&mut self, z: NodeRef<T, V>) -> Option<V> {
-        let mut y = self.sentinel.clone_rc();
-        let mut x = self.root.clone_rc();
-        while !x.is_sentinel() {
-            y = x.clone_rc();
-            if z.interval(|zi| y.interval(|yi| zi == yi)) {
-                let old_value = y.set_value(z.take_value());
+    fn insert_inner(&mut self, z: NodeIndex<Ix>) -> Option<V> {
+        let mut y = Self::sentinel();
+        let mut x = self.root;
+
+        while !self.nref(x, Node::is_sentinel) {
+            y = x;
+            if self.nref(z, Node::interval) == self.nref(y, Node::interval) {
+                let zval = self.nmut(z, Node::take_value);
+                let old_value = self.nmut(y, Node::set_value(zval));
                 return Some(old_value);
             }
-            if z.interval(|zi| x.interval(|xi| zi < xi)) {
-                x = x.left_owned();
+            if self.nref(z, Node::interval) < self.nref(x, Node::interval) {
+                x = self.nref(x, Node::left);
             } else {
-                x = x.right_owned();
+                x = self.nref(x, Node::right);
             }
         }
-        z.set_parent(y.clone_rc());
-        if y.is_sentinel() {
-            self.root = z.clone_rc();
+        self.nmut(z, Node::set_parent(y));
+        if self.nref(y, Node::is_sentinel) {
+            self.root = z;
         } else {
-            if z.interval(|zi| y.interval(|yi| zi < yi)) {
-                y.set_left(z.clone_rc());
+            if self.nref(z, Node::interval) < self.nref(y, Node::interval) {
+                self.nmut(y, Node::set_left(z));
             } else {
-                y.set_right(z.clone_rc());
+                self.nmut(y, Node::set_right(z));
             }
-            Self::update_max_bottom_up(&y);
+            self.update_max_bottom_up(y);
         }
-        z.set_color(Color::Red);
+        self.nmut(z, Node::set_color(Color::Red));
 
-        self.insert_fixup(z.clone_rc());
+        self.insert_fixup(z);
 
         self.len = self.len.wrapping_add(1);
         None
     }
 
     /// Removes a node from the tree.
-    fn remove_inner(&mut self, z: &NodeRef<T, V>) {
-        let mut y = z.clone_rc();
-        let mut y_orig_color = y.color();
+    fn remove_inner(&mut self, z: NodeIndex<Ix>) {
+        let mut y = z;
+        let mut y_orig_color = self.nref(y, Node::color);
         let x;
-        if z.left(NodeRef::is_sentinel) {
-            x = z.right_owned();
-            self.transplant(z, &x);
-        } else if z.right(NodeRef::is_sentinel) {
-            x = z.left_owned();
-            self.transplant(z, &x);
+        if self.left_ref(z, Node::is_sentinel) {
+            x = self.nref(z, Node::right);
+            self.transplant(z, x);
+        } else if self.right_ref(z, Node::is_sentinel) {
+            x = self.nref(z, Node::left);
+            self.transplant(z, x);
         } else {
-            y = Self::tree_minimum(z.right_owned());
-            y_orig_color = y.color();
-            x = y.right_owned();
-            if y.parent(|p| p == z) {
-                x.set_parent(y.clone_rc());
+            y = self.tree_minimum(self.nref(z, Node::right));
+            y_orig_color = self.nref(y, Node::color);
+            x = self.nref(y, Node::right);
+            if self.nref(y, Node::parent) == z {
+                self.nmut(x, Node::set_parent(y));
             } else {
-                self.transplant(&y, &x);
-                y.set_right(z.right_owned());
-                y.right(|r| r.set_parent(y.clone_rc()));
+                self.transplant(y, x);
+                self.nmut(y, Node::set_right(self.nref(z, Node::right)));
+                self.right_mut(y, Node::set_parent(y));
             }
-            self.transplant(z, &y);
-            y.set_left(z.left_owned());
-            y.left(|l| l.set_parent(y.clone_rc()));
-            y.set_color(z.color());
-            Self::update_max_bottom_up(&y);
+            self.transplant(z, y);
+            self.nmut(y, Node::set_left(self.nref(z, Node::left)));
+            self.left_mut(y, Node::set_parent(y));
+            self.nmut(y, Node::set_color(self.nref(z, Node::color)));
+
+            self.update_max_bottom_up(y);
         }
 
         if matches!(y_orig_color, Color::Black) {
@@ -222,324 +276,558 @@ where
     }
 
     /// Finds all intervals in the map that overlaps with the given interval.
-    fn find_all_overlap_inner(x: &NodeRef<T, V>, i: &Interval<T>) -> Vec<Interval<T>> {
+    fn find_all_overlap_inner(
+        &self,
+        x: NodeIndex<Ix>,
+        interval: &Interval<T>,
+    ) -> Vec<&Interval<T>> {
         let mut list = vec![];
-        if x.interval(|xi| xi.overlap(i)) {
-            list.push(x.interval(Clone::clone));
+        if self.nref(x, Node::interval).overlap(interval) {
+            list.push(self.nref(x, Node::interval));
         }
-        if !x.left(NodeRef::is_sentinel) && x.left(|l| l.max(|m| *m > i.low)) {
-            list.extend(Self::find_all_overlap_inner(&x.left_owned(), i));
-        }
-        if !x.right(NodeRef::is_sentinel)
-            && Interval::new(
-                x.interval(|xi| xi.low.clone()),
-                x.right(|r| r.max(Clone::clone)),
-            )
-            .overlap(i)
+        if self
+            .left_ref(x, Node::sentinel)
+            .map(Node::max)
+            .is_some_and(|lm| lm >= &interval.low)
         {
-            list.extend(Self::find_all_overlap_inner(&x.right_owned(), i));
+            list.extend(self.find_all_overlap_inner(self.nref(x, Node::left), interval));
+        }
+        if self
+            .right_ref(x, Node::sentinel)
+            .map(|r| IntervalRef::new(&self.nref(x, Node::interval).low, r.max()))
+            .is_some_and(|i| i.overlap(interval))
+        {
+            list.extend(self.find_all_overlap_inner(self.nref(x, Node::right), interval));
         }
         list
     }
 
     /// Search for an interval that overlaps with the given interval.
-    fn search(&self, interval: &Interval<T>) -> NodeRef<T, V> {
-        let mut x = self.root.clone_rc();
-        while !x.is_sentinel() && x.interval(|xi| !xi.overlap(interval)) {
-            if !x.left(NodeRef::is_sentinel) && x.left(|l| l.max(|lm| lm > &interval.low)) {
-                x = x.left_owned();
+    fn search(&self, interval: &Interval<T>) -> NodeIndex<Ix> {
+        let mut x = self.root;
+        while self
+            .nref(x, Node::sentinel)
+            .map(Node::interval)
+            .is_some_and(|xi| !xi.overlap(interval))
+        {
+            if self
+                .left_ref(x, Node::sentinel)
+                .map(Node::max)
+                .is_some_and(|lm| lm > &interval.low)
+            {
+                x = self.nref(x, Node::left);
             } else {
-                x = x.right_owned();
+                x = self.nref(x, Node::right);
             }
         }
         x
     }
 
     /// Search for the node with exact the given interval
-    fn search_exact(&self, interval: &Interval<T>) -> Option<NodeRef<T, V>> {
-        let mut x = self.root.clone_rc();
-        while !x.is_sentinel() {
-            if x.interval(|xi| xi == interval) {
+    fn search_exact(&self, interval: &Interval<T>) -> Option<NodeIndex<Ix>> {
+        let mut x = self.root;
+        while !self.nref(x, Node::is_sentinel) {
+            if self.nref(x, Node::interval) == interval {
                 return Some(x);
             }
-            if x.max(|max| max < &interval.high) {
+            if self.nref(x, Node::max) < &interval.high {
                 return None;
             }
-            if x.interval(|xi| xi > interval) {
-                x = x.left_owned();
+            if self.nref(x, Node::interval) > interval {
+                x = self.nref(x, Node::left);
             } else {
-                x = x.right_owned();
+                x = self.nref(x, Node::right);
             }
         }
         None
     }
 
     /// Restores red-black tree properties after an insert.
-    fn insert_fixup(&mut self, mut z: NodeRef<T, V>) {
-        while z.parent(NodeRef::is_red) {
-            if z.grand_parent(NodeRef::is_sentinel) {
+    fn insert_fixup(&mut self, mut z: NodeIndex<Ix>) {
+        while self.parent_ref(z, Node::is_red) {
+            if self.grand_parent_ref(z, Node::is_sentinel) {
                 break;
             }
-            if z.parent(Self::is_left_child) {
-                let y = z.grand_parent(NodeRef::right_owned);
-                if y.is_red() {
-                    z.parent(NodeRef::set_color_fn(Color::Black));
-                    y.set_color(Color::Black);
-                    z.grand_parent(NodeRef::set_color_fn(Color::Red));
-                    z = z.grand_parent_owned();
+            if self.is_left_child(self.nref(z, Node::parent)) {
+                let y = self.grand_parent_ref(z, Node::right);
+                if self.nref(y, Node::is_red) {
+                    self.parent_mut(z, Node::set_color(Color::Black));
+                    self.nmut(y, Node::set_color(Color::Black));
+                    self.grand_parent_mut(z, Node::set_color(Color::Red));
+                    z = self.parent_ref(z, Node::parent);
                 } else {
-                    if Self::is_right_child(&z) {
-                        z = z.parent_owned();
-                        self.left_rotate(&z);
+                    if self.is_right_child(z) {
+                        z = self.nref(z, Node::parent);
+                        self.left_rotate(z);
                     }
-                    z.parent(NodeRef::set_color_fn(Color::Black));
-                    z.grand_parent(NodeRef::set_color_fn(Color::Red));
-                    z.grand_parent(|gp| self.right_rotate(gp));
+                    self.parent_mut(z, Node::set_color(Color::Black));
+                    self.grand_parent_mut(z, Node::set_color(Color::Red));
+                    self.right_rotate(self.parent_ref(z, Node::parent));
                 }
             } else {
-                let y = z.grand_parent(NodeRef::left_owned);
-                if y.is_red() {
-                    z.parent(NodeRef::set_color_fn(Color::Black));
-                    y.set_color(Color::Black);
-                    z.grand_parent(NodeRef::set_color_fn(Color::Red));
-                    z = z.grand_parent_owned();
+                let y = self.grand_parent_ref(z, Node::left);
+                if self.nref(y, Node::is_red) {
+                    self.parent_mut(z, Node::set_color(Color::Black));
+                    self.nmut(y, Node::set_color(Color::Black));
+                    self.grand_parent_mut(z, Node::set_color(Color::Red));
+                    z = self.parent_ref(z, Node::parent);
                 } else {
-                    if Self::is_left_child(&z) {
-                        z = z.parent_owned();
-                        self.right_rotate(&z);
+                    if self.is_left_child(z) {
+                        z = self.nref(z, Node::parent);
+                        self.right_rotate(z);
                     }
-                    z.parent(NodeRef::set_color_fn(Color::Black));
-                    z.grand_parent(NodeRef::set_color_fn(Color::Red));
-                    z.grand_parent(|gp| self.left_rotate(gp));
+                    self.parent_mut(z, Node::set_color(Color::Black));
+                    self.grand_parent_mut(z, Node::set_color(Color::Red));
+                    self.left_rotate(self.parent_ref(z, Node::parent));
                 }
             }
         }
-        self.root.set_color(Color::Black);
+        self.nmut(self.root, Node::set_color(Color::Black));
     }
 
     /// Restores red-black tree properties after a remove.
-    fn remove_fixup(&mut self, mut x: NodeRef<T, V>) {
-        while x != self.root && x.is_black() {
+    fn remove_fixup(&mut self, mut x: NodeIndex<Ix>) {
+        while x != self.root && self.nref(x, Node::is_black) {
             let mut w;
-            if Self::is_left_child(&x) {
-                w = x.parent(NodeRef::right_owned);
-                if w.is_red() {
-                    w.set_color(Color::Black);
-                    x.parent(NodeRef::set_color_fn(Color::Red));
-                    x.parent(|p| self.left_rotate(p));
-                    w = x.parent(NodeRef::right_owned);
+            if self.is_left_child(x) {
+                w = self.parent_ref(x, Node::right);
+                if self.nref(w, Node::is_red) {
+                    self.nmut(w, Node::set_color(Color::Black));
+                    self.parent_mut(x, Node::set_color(Color::Red));
+                    self.left_rotate(self.nref(x, Node::parent));
+                    w = self.parent_ref(x, Node::right);
                 }
-                if w.is_sentinel() {
+                if self.nref(w, Node::is_sentinel) {
                     break;
                 }
-                if w.left(NodeRef::is_black) && w.right(NodeRef::is_black) {
-                    w.set_color(Color::Red);
-                    x = x.parent_owned();
+                if self.left_ref(w, Node::is_black) && self.right_ref(w, Node::is_black) {
+                    self.nmut(w, Node::set_color(Color::Red));
+                    x = self.nref(x, Node::parent);
                 } else {
-                    if w.right(NodeRef::is_black) {
-                        w.left(NodeRef::set_color_fn(Color::Black));
-                        w.set_color(Color::Red);
-                        self.right_rotate(&w);
-                        w = x.parent(NodeRef::right_owned);
+                    if self.right_ref(w, Node::is_black) {
+                        self.left_mut(w, Node::set_color(Color::Black));
+                        self.nmut(w, Node::set_color(Color::Red));
+                        self.right_rotate(w);
+                        w = self.parent_ref(x, Node::right);
                     }
-                    w.set_color(x.parent(NodeRef::color));
-                    x.parent(NodeRef::set_color_fn(Color::Black));
-                    w.right(NodeRef::set_color_fn(Color::Black));
-                    x.parent(|p| self.left_rotate(p));
-                    x = self.root.clone_rc();
+                    self.nmut(w, Node::set_color(self.parent_ref(x, Node::color)));
+                    self.parent_mut(x, Node::set_color(Color::Black));
+                    self.right_mut(w, Node::set_color(Color::Black));
+                    self.left_rotate(self.nref(x, Node::parent));
+                    x = self.root;
                 }
             } else {
-                w = x.parent(NodeRef::left_owned);
-                if w.is_red() {
-                    w.set_color(Color::Black);
-                    x.parent(NodeRef::set_color_fn(Color::Red));
-                    x.parent(|p| self.right_rotate(p));
-                    w = x.parent(NodeRef::left_owned);
+                w = self.parent_ref(x, Node::left);
+                if self.nref(w, Node::is_red) {
+                    self.nmut(w, Node::set_color(Color::Black));
+                    self.parent_mut(x, Node::set_color(Color::Red));
+                    self.right_rotate(self.nref(x, Node::parent));
+                    w = self.parent_ref(x, Node::left);
                 }
-                if w.is_sentinel() {
+                if self.nref(w, Node::is_sentinel) {
                     break;
                 }
-                if w.left(NodeRef::is_black) && w.right(NodeRef::is_black) {
-                    w.set_color(Color::Red);
-                    x = x.parent_owned();
+                if self.right_ref(w, Node::is_black) && self.left_ref(w, Node::is_black) {
+                    self.nmut(w, Node::set_color(Color::Red));
+                    x = self.nref(x, Node::parent);
                 } else {
-                    if w.left(NodeRef::is_black) {
-                        w.right(NodeRef::set_color_fn(Color::Black));
-                        w.set_color(Color::Red);
-                        self.left_rotate(&w);
-                        w = x.parent(NodeRef::left_owned);
+                    if self.left_ref(w, Node::is_black) {
+                        self.right_mut(w, Node::set_color(Color::Black));
+                        self.nmut(w, Node::set_color(Color::Red));
+                        self.left_rotate(w);
+                        w = self.parent_ref(x, Node::left);
                     }
-                    w.set_color(x.parent(NodeRef::color));
-                    x.parent(NodeRef::set_color_fn(Color::Black));
-                    w.left(NodeRef::set_color_fn(Color::Black));
-                    x.parent(|p| self.right_rotate(p));
-                    x = self.root.clone_rc();
+                    self.nmut(w, Node::set_color(self.parent_ref(x, Node::color)));
+                    self.parent_mut(x, Node::set_color(Color::Black));
+                    self.left_mut(w, Node::set_color(Color::Black));
+                    self.right_rotate(self.nref(x, Node::parent));
+                    x = self.root;
                 }
             }
         }
-        x.set_color(Color::Black);
+        self.nmut(x, Node::set_color(Color::Black));
     }
 
     /// Binary tree left rotate.
-    fn left_rotate(&mut self, x: &NodeRef<T, V>) {
-        if x.right(NodeRef::is_sentinel) {
+    fn left_rotate(&mut self, x: NodeIndex<Ix>) {
+        if self.right_ref(x, Node::is_sentinel) {
             return;
         }
-        let y = x.right_owned();
-        x.set_right(y.left_owned());
-        if !y.left(NodeRef::is_sentinel) {
-            y.left(|l| l.set_parent(x.clone_rc()));
+        let y = self.nref(x, Node::right);
+        self.nmut(x, Node::set_right(self.nref(y, Node::left)));
+        if !self.left_ref(y, Node::is_sentinel) {
+            self.left_mut(y, Node::set_parent(x));
         }
 
-        self.replace_parent(x, &y);
-        y.set_left(x.clone_rc());
+        self.replace_parent(x, y);
+        self.nmut(y, Node::set_left(x));
 
-        Self::rotate_update_max(x, &y);
+        self.rotate_update_max(x, y);
     }
 
     /// Binary tree right rotate.
-    fn right_rotate(&mut self, x: &NodeRef<T, V>) {
-        if x.left(NodeRef::is_sentinel) {
+    fn right_rotate(&mut self, x: NodeIndex<Ix>) {
+        if self.left_ref(x, Node::is_sentinel) {
             return;
         }
-        let y = x.left_owned();
-        x.set_left(y.right_owned());
-        if !y.right(NodeRef::is_sentinel) {
-            y.right(|r| r.set_parent(x.clone_rc()));
+        let y = self.nref(x, Node::left);
+        self.nmut(x, Node::set_left(self.nref(y, Node::right)));
+        if !self.right_ref(y, Node::is_sentinel) {
+            self.right_mut(y, Node::set_parent(x));
         }
 
-        self.replace_parent(x, &y);
-        y.set_right(x.clone_rc());
+        self.replace_parent(x, y);
+        self.nmut(y, Node::set_right(x));
 
-        Self::rotate_update_max(x, &y);
+        self.rotate_update_max(x, y);
     }
 
     /// Replaces parent during a rotation.
-    fn replace_parent(&mut self, x: &NodeRef<T, V>, y: &NodeRef<T, V>) {
-        y.set_parent(x.parent_owned());
-        if x.parent(NodeRef::is_sentinel) {
-            self.root = y.clone_rc();
-        } else if x.parent(|p| p.left(|l| l.eq(x))) {
-            x.parent(|p| p.set_left(y.clone_rc()));
+    fn replace_parent(&mut self, x: NodeIndex<Ix>, y: NodeIndex<Ix>) {
+        self.nmut(y, Node::set_parent(self.nref(x, Node::parent)));
+        if self.parent_ref(x, Node::is_sentinel) {
+            self.root = y;
+        } else if self.is_left_child(x) {
+            self.parent_mut(x, Node::set_left(y));
         } else {
-            x.parent(|p| p.set_right(y.clone_rc()));
+            self.parent_mut(x, Node::set_right(y));
         }
-        x.set_parent(y.clone_rc());
+        self.nmut(x, Node::set_parent(y));
     }
 
     /// Updates the max value after a rotation.
-    fn rotate_update_max(x: &NodeRef<T, V>, y: &NodeRef<T, V>) {
-        y.set_max(x.max_owned());
-        let mut max = x.interval(|i| i.high.clone());
-        if !x.left(NodeRef::is_sentinel) {
-            max = max.max(x.left(NodeRef::max_owned));
+    fn rotate_update_max(&mut self, x: NodeIndex<Ix>, y: NodeIndex<Ix>) {
+        self.nmut(y, Node::set_max(self.nref(x, Node::max_owned)));
+        let mut max = &self.nref(x, Node::interval).high;
+        if let Some(lmax) = self.left_ref(x, Node::sentinel).map(Node::max) {
+            max = max.max(lmax);
         }
-        if !x.right(NodeRef::is_sentinel) {
-            max = max.max(x.right(NodeRef::max_owned));
+        if let Some(rmax) = self.right_ref(x, Node::sentinel).map(Node::max) {
+            max = max.max(rmax);
         }
-        x.set_max(max);
+        self.nmut(x, Node::set_max(max.clone()));
     }
 
     /// Updates the max value towards the root
-    fn update_max_bottom_up(x: &NodeRef<T, V>) {
-        let mut p = x.clone_rc();
-        while !p.is_sentinel() {
-            p.set_max(p.interval(|i| i.high.clone()));
-            Self::max_from(&p, &p.left_owned());
-            Self::max_from(&p, &p.right_owned());
-            p = p.parent_owned();
+    fn update_max_bottom_up(&mut self, x: NodeIndex<Ix>) {
+        let mut p = x;
+        while !self.nref(p, Node::is_sentinel) {
+            self.nmut(p, Node::set_max(self.nref(p, Node::interval).high.clone()));
+            self.max_from(p, self.nref(p, Node::left));
+            self.max_from(p, self.nref(p, Node::right));
+            p = self.nref(p, Node::parent);
         }
     }
 
     /// Updates a nodes value from a child node.
-    fn max_from(x: &NodeRef<T, V>, c: &NodeRef<T, V>) {
-        if !c.is_sentinel() && x.max(|xm| c.max(|cm| xm < cm)) {
-            x.set_max(c.max_owned());
+    fn max_from(&mut self, x: NodeIndex<Ix>, c: NodeIndex<Ix>) {
+        if let Some(cmax) = self.nref(c, Node::sentinel).map(Node::max) {
+            let max = self.nref(x, Node::max).max(cmax).clone();
+            self.nmut(x, Node::set_max(max));
         }
     }
 
     /// Finds the node with the minimum interval.
-    fn tree_minimum(mut x: NodeRef<T, V>) -> NodeRef<T, V> {
-        loop {
-            let left = x.left_owned();
-            if left.is_sentinel() {
-                return x;
-            }
-            x = left;
+    fn tree_minimum(&self, mut x: NodeIndex<Ix>) -> NodeIndex<Ix> {
+        while !self.left_ref(x, Node::is_sentinel) {
+            x = self.nref(x, Node::left);
         }
+        x
     }
 
     /// Replaces one subtree as a child of its parent with another subtree.
-    fn transplant(&mut self, u: &NodeRef<T, V>, v: &NodeRef<T, V>) {
-        if u.parent(NodeRef::is_sentinel) {
-            self.root = v.clone_rc();
+    fn transplant(&mut self, u: NodeIndex<Ix>, v: NodeIndex<Ix>) {
+        if self.parent_ref(u, Node::is_sentinel) {
+            self.root = v;
         } else {
-            if u.parent(|p| p.left(|l| l == u)) {
-                u.parent(|p| p.set_left(v.clone_rc()));
+            if self.is_left_child(u) {
+                self.parent_mut(u, Node::set_left(v));
             } else {
-                u.parent(|p| p.set_right(v.clone_rc()));
+                self.parent_mut(u, Node::set_right(v));
             }
-            u.parent(Self::update_max_bottom_up);
+            self.update_max_bottom_up(self.nref(u, Node::parent));
         }
-        v.set_parent(u.parent_owned());
+        self.nmut(v, Node::set_parent(self.nref(u, Node::parent)));
     }
 
     /// Checks if a node is a left child of its parent.
-    fn is_left_child(node: &NodeRef<T, V>) -> bool {
-        node.parent(|p| p.left(|l| l.eq(node)))
+    fn is_left_child(&self, node: NodeIndex<Ix>) -> bool {
+        self.parent_ref(node, Node::left) == node
     }
 
     /// Checks if a node is a right child of its parent.
-    fn is_right_child(node: &NodeRef<T, V>) -> bool {
-        node.parent(|p| p.right(|r| r.eq(node)))
+    fn is_right_child(&self, node: NodeIndex<Ix>) -> bool {
+        self.parent_ref(node, Node::right) == node
+    }
+
+    /// Updates nodes index after remove
+    fn update_idx(&mut self, old: NodeIndex<Ix>, new: NodeIndex<Ix>) {
+        if self.root == old {
+            self.root = new;
+        }
+        if self.nodes.get(new.index()).is_some() {
+            if !self.parent_ref(new, Node::is_sentinel) {
+                if self.parent_ref(new, Node::left) == old {
+                    self.parent_mut(new, Node::set_left(new));
+                } else {
+                    self.parent_mut(new, Node::set_right(new));
+                }
+            }
+            self.left_mut(new, Node::set_parent(new));
+            self.right_mut(new, Node::set_parent(new));
+        }
     }
 }
 
-impl<T, V> std::fmt::Debug for IntervalMap<T, V> {
-    #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IntervalMap")
-            .field("len", &self.len)
-            .finish()
+#[allow(clippy::missing_docs_in_private_items)]
+#[allow(clippy::indexing_slicing)]
+impl<'a, T, V, Ix> IntervalMap<T, V, Ix>
+where
+    Ix: IndexType,
+{
+    fn nref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a Node<T, V, Ix>) -> R,
+    {
+        op(&self.nodes[node.index()])
+    }
+
+    fn nmut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
+    {
+        op(&mut self.nodes[node.index()])
+    }
+
+    fn left_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a Node<T, V, Ix>) -> R,
+    {
+        let idx = self.nodes[node.index()].left().index();
+        op(&self.nodes[idx])
+    }
+
+    fn right_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a Node<T, V, Ix>) -> R,
+    {
+        let idx = self.nodes[node.index()].right().index();
+        op(&self.nodes[idx])
+    }
+
+    fn parent_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a Node<T, V, Ix>) -> R,
+    {
+        let idx = self.nodes[node.index()].parent().index();
+        op(&self.nodes[idx])
+    }
+
+    fn grand_parent_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a Node<T, V, Ix>) -> R,
+    {
+        let parent_idx = self.nodes[node.index()].parent().index();
+        let grand_parent_idx = self.nodes[parent_idx].parent().index();
+        op(&self.nodes[grand_parent_idx])
+    }
+
+    fn left_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
+    {
+        let idx = self.nodes[node.index()].left().index();
+        op(&mut self.nodes[idx])
+    }
+
+    fn right_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
+    {
+        let idx = self.nodes[node.index()].right().index();
+        op(&mut self.nodes[idx])
+    }
+
+    fn parent_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
+    {
+        let idx = self.nodes[node.index()].parent().index();
+        op(&mut self.nodes[idx])
+    }
+
+    fn grand_parent_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    where
+        R: 'a,
+        F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
+    {
+        let parent_idx = self.nodes[node.index()].parent().index();
+        let grand_parent_idx = self.nodes[parent_idx].parent().index();
+        op(&mut self.nodes[grand_parent_idx])
     }
 }
 
-impl<T, V> Drop for IntervalMap<T, V> {
+/// An iterator over the entries of a `IntervalMap`.
+#[allow(missing_debug_implementations)]
+pub struct Iter<'a, T, V, Ix> {
+    /// Reference to the map
+    map_ref: &'a IntervalMap<T, V, Ix>,
+    /// Stack for iteration
+    stack: Option<Vec<NodeIndex<Ix>>>,
+}
+
+impl<T, V, Ix> Iter<'_, T, V, Ix>
+where
+    Ix: IndexType,
+{
+    /// Initiliazes the stack
+    fn init_stack(&mut self) {
+        self.stack = Some(Self::left_tree(self.map_ref, self.map_ref.root));
+    }
+
+    /// Pushes x and x's left sub tree to stack.
+    fn left_tree(map_ref: &IntervalMap<T, V, Ix>, mut x: NodeIndex<Ix>) -> Vec<NodeIndex<Ix>> {
+        let mut nodes = vec![];
+        while !map_ref.nref(x, Node::is_sentinel) {
+            nodes.push(x);
+            x = map_ref.nref(x, Node::left);
+        }
+        nodes
+    }
+}
+
+impl<'a, T, V, Ix> Iterator for Iter<'a, T, V, Ix>
+where
+    Ix: IndexType,
+{
+    type Item = (&'a Interval<T>, &'a V);
+
+    #[allow(clippy::unwrap_used, clippy::unwrap_in_result)]
     #[inline]
-    fn drop(&mut self) {
-        // Removes circular references.
-        for entry in self.iter() {
-            drop(entry.node.borrow_mut().parent.take());
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stack.is_none() {
+            self.init_stack();
+        }
+        let stack = self.stack.as_mut().unwrap();
+        if stack.is_empty() {
+            return None;
+        }
+        let x = stack.pop().unwrap();
+        stack.extend(Self::left_tree(
+            self.map_ref,
+            self.map_ref.nref(x, Node::right),
+        ));
+        Some(self.map_ref.nref(x, |x| (x.interval(), x.value())))
+    }
+}
+
+/// A view into a single entry in a map, which may either be vacant or occupied.
+#[allow(missing_debug_implementations, clippy::exhaustive_enums)]
+pub enum Entry<'a, T, V, Ix> {
+    /// An occupied entry.
+    Occupied(OccupiedEntry<'a, T, V, Ix>),
+    /// A vacant entry.
+    Vacant(VacantEntry<'a, T, V, Ix>),
+}
+
+/// A view into an occupied entry in a `IntervalMap`.
+/// It is part of the [`Entry`] enum.
+#[allow(missing_debug_implementations)]
+pub struct OccupiedEntry<'a, T, V, Ix> {
+    /// Reference to the map
+    map_ref: &'a mut IntervalMap<T, V, Ix>,
+    /// The entry node
+    node: NodeIndex<Ix>,
+}
+
+/// A view into a vacant entry in a `IntervalMap`.
+/// It is part of the [`Entry`] enum.
+#[allow(missing_debug_implementations)]
+pub struct VacantEntry<'a, T, V, Ix> {
+    /// Mutable reference to the map
+    map_ref: &'a mut IntervalMap<T, V, Ix>,
+    /// The interval of this entry
+    interval: Interval<T>,
+}
+
+impl<'a, T, V, Ix> Entry<'a, T, V, Ix>
+where
+    T: Ord + Clone,
+    Ix: IndexType,
+{
+    /// Ensures a value is in the entry by inserting the default if empty, and returns
+    /// a mutable reference to the value in the entry.
+    #[inline]
+    pub fn or_insert(self, default: V) -> &'a mut V {
+        match self {
+            Entry::Occupied(entry) => entry.map_ref.nmut(entry.node, Node::value_mut),
+            Entry::Vacant(entry) => {
+                let _ignore = entry.map_ref.insert(entry.interval, default);
+                let entry_idx = NodeIndex::new(entry.map_ref.len().wrapping_sub(1));
+                entry.map_ref.nmut(entry_idx, Node::value_mut)
+            }
+        }
+    }
+
+    /// Provides in-place mutable access to an occupied entry before any
+    /// potential inserts into the map.
+    ///
+    /// # Panics
+    ///
+    /// This method panics when the node is a sentinel node
+    #[allow(clippy::unwrap_used)]
+    #[inline]
+    #[must_use]
+    pub fn and_modify<F>(self, f: F) -> Self
+    where
+        F: FnOnce(&mut V),
+    {
+        match self {
+            Entry::Occupied(entry) => {
+                f(entry.map_ref.nmut(entry.node, Node::value_mut));
+                Self::Occupied(entry)
+            }
+            Entry::Vacant(entry) => Self::Vacant(entry),
         }
     }
 }
 
 // TODO: better typed `Node`
 /// Node of the interval tree
-struct Node<T, V> {
-    /// Interval of the node
-    interval: Option<Interval<T>>,
-    /// Value of the node
-    value: Option<V>,
-    /// Max value of the sub-tree of the node
-    max: Option<T>,
-
+#[derive(Debug)]
+pub struct Node<T, V, Ix> {
     /// Left children
-    left: Option<NodeRef<T, V>>,
+    left: Option<NodeIndex<Ix>>,
     /// Right children
-    right: Option<NodeRef<T, V>>,
+    right: Option<NodeIndex<Ix>>,
     /// Parent
-    parent: Option<NodeRef<T, V>>,
+    parent: Option<NodeIndex<Ix>>,
     /// Color of the node
     color: Color,
+
+    /// Interval of the node
+    interval: Option<Interval<T>>,
+    /// Max value of the sub-tree of the node
+    max: Option<T>,
+    /// Value of the node
+    value: Option<V>,
 }
 
-#[allow(clippy::missing_docs_in_private_items, clippy::unwrap_used)]
-impl<T, V> Node<T, V> {
-    fn into_ref(self) -> NodeRef<T, V> {
-        NodeRef(Rc::new(RefCell::new(self)))
-    }
-
+#[allow(clippy::missing_docs_in_private_items)]
+#[allow(clippy::unwrap_used)]
+impl<T, V, Ix> Node<T, V, Ix>
+where
+    Ix: IndexType,
+{
     fn color(&self) -> Color {
         self.color
     }
@@ -548,244 +836,90 @@ impl<T, V> Node<T, V> {
         self.interval.as_ref().unwrap()
     }
 
-    fn value(&self) -> &V {
-        self.value.as_ref().unwrap()
-    }
-
     fn max(&self) -> &T {
         self.max.as_ref().unwrap()
-    }
-
-    fn left(&self) -> &NodeRef<T, V> {
-        self.left.as_ref().unwrap()
-    }
-
-    fn right(&self) -> &NodeRef<T, V> {
-        self.right.as_ref().unwrap()
-    }
-
-    fn parent(&self) -> &NodeRef<T, V> {
-        self.parent.as_ref().unwrap()
-    }
-
-    fn left_owned(&self) -> NodeRef<T, V> {
-        self.left.as_ref().unwrap().clone_rc()
-    }
-
-    fn right_owned(&self) -> NodeRef<T, V> {
-        self.right.as_ref().unwrap().clone_rc()
-    }
-
-    fn parent_owned(&self) -> NodeRef<T, V> {
-        self.parent.as_ref().unwrap().clone_rc()
-    }
-
-    fn set_color(&mut self, color: Color) {
-        self.color = color;
-    }
-}
-
-/// `RefCell` reference to `Node`
-struct NodeRef<T, V>(Rc<RefCell<Node<T, V>>>);
-
-impl<T, V> Deref for NodeRef<T, V> {
-    type Target = Rc<RefCell<Node<T, V>>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T, V> PartialEq for NodeRef<T, V> {
-    fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(self, other)
-    }
-}
-
-impl<T, V> Eq for NodeRef<T, V> {}
-
-#[allow(clippy::missing_docs_in_private_items)]
-impl<T, V> NodeRef<T, V> {
-    fn clone_rc(&self) -> Self {
-        Self(Rc::clone(self))
-    }
-}
-
-#[allow(clippy::missing_docs_in_private_items, clippy::unwrap_used)]
-impl<T, V> NodeRef<T, V> {
-    fn is_sentinel(&self) -> bool {
-        self.borrow().interval.is_none()
-    }
-
-    fn is_black(&self) -> bool {
-        matches!(self.borrow().color, Color::Black)
-    }
-
-    fn is_red(&self) -> bool {
-        matches!(self.borrow().color, Color::Red)
-    }
-
-    fn color(&self) -> Color {
-        self.borrow().color()
     }
 
     fn max_owned(&self) -> T
     where
         T: Clone,
     {
-        self.borrow().max().clone()
+        self.max().clone()
     }
 
-    fn left_owned(&self) -> NodeRef<T, V> {
-        self.borrow().left_owned()
+    fn left(&self) -> NodeIndex<Ix> {
+        self.left.unwrap()
     }
 
-    fn right_owned(&self) -> NodeRef<T, V> {
-        self.borrow().right_owned()
+    fn right(&self) -> NodeIndex<Ix> {
+        self.right.unwrap()
     }
 
-    fn parent_owned(&self) -> NodeRef<T, V> {
-        self.borrow().parent_owned()
+    fn parent(&self) -> NodeIndex<Ix> {
+        self.parent.unwrap()
     }
 
-    fn grand_parent_owned(&self) -> NodeRef<T, V> {
-        self.borrow().parent().parent_owned()
+    fn is_sentinel(&self) -> bool {
+        self.interval.is_none()
     }
 
-    fn take_value(self) -> V {
-        self.borrow_mut().value.take().unwrap()
+    fn sentinel(&self) -> Option<&Self> {
+        self.interval.is_some().then_some(self)
     }
 
-    fn set_value(&self, new_value: V) -> V {
-        self.borrow_mut().value.replace(new_value).unwrap()
+    fn is_black(&self) -> bool {
+        matches!(self.color, Color::Black)
     }
 
-    fn set_color(&self, color: Color) {
-        self.borrow_mut().set_color(color);
+    fn is_red(&self) -> bool {
+        matches!(self.color, Color::Red)
     }
 
-    fn set_color_fn(color: Color) -> impl FnOnce(&NodeRef<T, V>) {
-        move |node: &NodeRef<T, V>| {
-            node.borrow_mut().set_color(color);
+    fn value(&self) -> &V {
+        self.value.as_ref().unwrap()
+    }
+
+    fn value_mut(&mut self) -> &mut V {
+        self.value.as_mut().unwrap()
+    }
+
+    fn take_value(&mut self) -> V {
+        self.value.take().unwrap()
+    }
+
+    fn set_value(value: V) -> impl FnOnce(&mut Node<T, V, Ix>) -> V {
+        move |node: &mut Node<T, V, Ix>| node.value.replace(value).unwrap()
+    }
+
+    fn set_color(color: Color) -> impl FnOnce(&mut Node<T, V, Ix>) {
+        move |node: &mut Node<T, V, Ix>| {
+            node.color = color;
         }
     }
 
-    fn set_right(&self, node: NodeRef<T, V>) {
-        let _ignore = self.borrow_mut().right.replace(node);
-    }
-
-    fn set_max(&self, max: T) {
-        let _ignore = self.borrow_mut().max.replace(max);
-    }
-
-    fn set_left(&self, node: NodeRef<T, V>) {
-        let _ignore = self.borrow_mut().left.replace(node);
-    }
-
-    fn set_parent(&self, node: NodeRef<T, V>) {
-        let _ignore = self.borrow_mut().parent.replace(node);
-    }
-}
-
-#[allow(clippy::missing_docs_in_private_items)]
-impl<T, V> NodeRef<T, V> {
-    fn max<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&T) -> R,
-    {
-        op(self.borrow().max())
-    }
-
-    fn interval<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&Interval<T>) -> R,
-    {
-        op(self.borrow().interval())
-    }
-
-    fn value<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&V) -> R,
-    {
-        op(self.borrow().value())
-    }
-
-    fn left<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&NodeRef<T, V>) -> R,
-    {
-        op(self.borrow().left())
-    }
-
-    fn right<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&NodeRef<T, V>) -> R,
-    {
-        op(self.borrow().right())
-    }
-
-    fn parent<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&NodeRef<T, V>) -> R,
-    {
-        op(self.borrow().parent())
-    }
-
-    fn grand_parent<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&NodeRef<T, V>) -> R,
-    {
-        let mut grand_parent = self.borrow().parent().borrow().parent_owned();
-        op(&mut grand_parent)
-    }
-}
-
-/// An iterator over the entries of a `IntervalMap`.
-#[allow(missing_debug_implementations)]
-pub struct Iter<'a, T, V> {
-    /// Reference to the map
-    map_ref: &'a IntervalMap<T, V>,
-    /// Stack for iteration
-    stack: Vec<NodeRef<T, V>>,
-}
-
-impl<T, V> Iter<'_, T, V> {
-    /// Pushes x and x's left sub tree to stack.
-    fn left_tree(mut x: NodeRef<T, V>) -> Vec<NodeRef<T, V>> {
-        let mut nodes = vec![];
-        while !x.is_sentinel() {
-            nodes.push(x.clone_rc());
-            x = x.left_owned();
+    fn set_max(max: T) -> impl FnOnce(&mut Node<T, V, Ix>) {
+        move |node: &mut Node<T, V, Ix>| {
+            let _ignore = node.max.replace(max);
         }
-        nodes
     }
-}
 
-impl<'a, T, V> Iterator for Iter<'a, T, V> {
-    type Item = OccupiedEntry<'a, T, V>;
-
-    #[allow(clippy::unwrap_used, clippy::unwrap_in_result)]
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.stack.is_empty() {
-            return None;
+    fn set_left(left: NodeIndex<Ix>) -> impl FnOnce(&mut Node<T, V, Ix>) {
+        move |node: &mut Node<T, V, Ix>| {
+            let _ignore = node.left.replace(left);
         }
-        let x = self.stack.pop().unwrap();
-        self.stack.extend(Self::left_tree(x.right_owned()));
-        Some(OccupiedEntry {
-            _map_ref: self.map_ref,
-            node: x,
-        })
     }
-}
 
-/// The color of the node
-#[derive(Debug, Clone, Copy)]
-enum Color {
-    /// Red node
-    Red,
-    /// Black node
-    Black,
+    fn set_right(right: NodeIndex<Ix>) -> impl FnOnce(&mut Node<T, V, Ix>) {
+        move |node: &mut Node<T, V, Ix>| {
+            let _ignore = node.right.replace(right);
+        }
+    }
+
+    fn set_parent(parent: NodeIndex<Ix>) -> impl FnOnce(&mut Node<T, V, Ix>) {
+        move |node: &mut Node<T, V, Ix>| {
+            let _ignore = node.parent.replace(parent);
+        }
+    }
 }
 
 /// The Interval stored in `IntervalMap`
@@ -811,92 +945,44 @@ impl<T: Ord> Interval<T> {
     }
 
     /// Checks if self overlaps with other interval
-    fn overlap(&self, other: &Self) -> bool {
+    #[inline]
+    pub fn overlap(&self, other: &Self) -> bool {
         self.high > other.low && other.high > self.low
     }
 }
 
-/// A view into a single entry in a map, which may either be vacant or occupied.
-#[allow(missing_debug_implementations, clippy::exhaustive_enums)]
-pub enum Entry<'a, T, V> {
-    /// An occupied entry.
-    Occupied(OccupiedEntry<'a, T, V>),
-    /// A vacant entry.
-    Vacant(VacantEntry<'a, T, V>),
+/// Reference type of `Interval`
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct IntervalRef<'a, T> {
+    /// Low value
+    low: &'a T,
+    /// high value
+    high: &'a T,
 }
 
-/// A view into an occupied entry in a `IntervalMap`.
-/// It is part of the [`Entry`] enum.
-#[allow(missing_debug_implementations)]
-pub struct OccupiedEntry<'a, T, V> {
-    /// Reference to the map
-    _map_ref: &'a IntervalMap<T, V>,
-    /// The entry node
-    node: NodeRef<T, V>,
-}
-
-/// A view into a vacant entry in a `IntervalMap`.
-/// It is part of the [`Entry`] enum.
-#[allow(missing_debug_implementations)]
-pub struct VacantEntry<'a, T, V> {
-    /// Mutable reference to the map
-    map_ref: &'a mut IntervalMap<T, V>,
-    /// The interval of this entry
-    interval: Interval<T>,
-}
-
-impl<T, V> Entry<'_, T, V>
-where
-    T: Ord + Clone,
-{
-    /// Ensures a value is in the entry by inserting the default if empty, and returns
-    /// a mutable reference to the value in the entry.
-    #[inline]
-    pub fn or_insert(self, default: V) {
-        if let Entry::Vacant(entry) = self {
-            let _ignore = entry.map_ref.insert(entry.interval, default);
-        }
-    }
-
-    /// Provides in-place mutable access to an occupied entry before any
-    /// potential inserts into the map.
+impl<'a, T: Ord> IntervalRef<'a, T> {
+    /// Creates a new `IntervalRef`
     ///
     /// # Panics
     ///
-    /// This method panics when the node is a sentinel node
-    #[allow(clippy::unwrap_used)]
+    /// This method panics when low is greater than high
     #[inline]
-    #[must_use]
-    pub fn and_modify<F>(self, f: F) -> Self
-    where
-        F: FnOnce(&mut V),
-    {
-        match self {
-            Entry::Occupied(entry) => {
-                f(entry.node.borrow_mut().value.as_mut().unwrap());
-                Self::Occupied(entry)
-            }
-            Entry::Vacant(entry) => Self::Vacant(entry),
-        }
+    fn new(low: &'a T, high: &'a T) -> Self {
+        assert!(low < high, "invalid range");
+        Self { low, high }
+    }
+
+    /// Checks if self overlaps with a `Interval<T>`
+    fn overlap(&self, other: &Interval<T>) -> bool {
+        self.high > &other.low && &other.high > self.low
     }
 }
 
-impl<T, V> OccupiedEntry<'_, T, V> {
-    /// Maps on the interval of this entry
-    #[inline]
-    pub fn map_interval<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&Interval<T>) -> R,
-    {
-        self.node.interval(op)
-    }
-
-    /// Maps on the value of this entry
-    #[inline]
-    pub fn map_value<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&V) -> R,
-    {
-        self.node.value(op)
-    }
+/// The color of the node
+#[derive(Debug, Clone, Copy)]
+enum Color {
+    /// Red node
+    Red,
+    /// Black node
+    Black,
 }

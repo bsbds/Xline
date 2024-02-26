@@ -46,17 +46,17 @@ impl IntervalGenerator {
 
 impl<V> IntervalMap<i32, V> {
     fn check_max(&self) {
-        let _ignore = Self::check_max_inner(&self.root);
+        let _ignore = self.check_max_inner(self.root);
     }
 
-    fn check_max_inner(x: &NodeRef<i32, V>) -> i32 {
-        if x.is_sentinel() {
+    fn check_max_inner(&self, x: NodeIndex<u32>) -> i32 {
+        if self.nref(x, Node::is_sentinel) {
             return 0;
         }
-        let l_max = Self::check_max_inner(&x.left_owned());
-        let r_max = Self::check_max_inner(&x.right_owned());
-        let max = x.interval(|i| i.high.max(l_max).max(r_max));
-        assert_eq!(x.max_owned(), max);
+        let l_max = self.check_max_inner(self.nref(x, Node::left));
+        let r_max = self.check_max_inner(self.nref(x, Node::right));
+        let max = self.nref(x, |x| x.interval().high.max(l_max).max(r_max));
+        assert_eq!(self.nref(x, Node::max_owned), max);
         max
     }
 
@@ -67,31 +67,31 @@ impl<V> IntervalMap<i32, V> {
     /// 5. For each node, all simple paths from the node to descendant leaves contain the
     /// same number of black nodes.
     fn check_rb_properties(&self) {
-        assert!(matches!(self.root.color(), Color::Black));
-        Self::check_children_color(&self.root);
-        Self::check_black_height(&self.root);
+        assert!(matches!(self.nref(self.root, Node::color), Color::Black));
+        self.check_children_color(self.root);
+        self.check_black_height(self.root);
     }
 
-    fn check_children_color(x: &NodeRef<i32, V>) {
-        if x.is_sentinel() {
+    fn check_children_color(&self, x: NodeIndex<u32>) {
+        if self.nref(x, Node::is_sentinel) {
             return;
         }
-        Self::check_children_color(&x.left_owned());
-        Self::check_children_color(&x.right_owned());
-        if x.is_red() {
-            assert!(x.left(|l| matches!(l.color(), Color::Black)));
-            assert!(x.right(|r| matches!(r.color(), Color::Black)));
+        self.check_children_color(self.nref(x, Node::left));
+        self.check_children_color(self.nref(x, Node::right));
+        if self.nref(x, Node::is_red) {
+            assert!(matches!(self.left_ref(x, Node::color), Color::Black));
+            assert!(matches!(self.right_ref(x, Node::color), Color::Black));
         }
     }
 
-    fn check_black_height(x: &NodeRef<i32, V>) -> usize {
-        if x.is_sentinel() {
+    fn check_black_height(&self, x: NodeIndex<u32>) -> usize {
+        if self.nref(x, Node::is_sentinel) {
             return 0;
         }
-        let lefth = Self::check_black_height(&x.left_owned());
-        let righth = Self::check_black_height(&x.right_owned());
+        let lefth = self.check_black_height(self.nref(x, Node::left));
+        let righth = self.check_black_height(self.nref(x, Node::right));
         assert_eq!(lefth, righth);
-        if x.is_black() {
+        if self.nref(x, Node::is_black) {
             return lefth + 1;
         }
         lefth
@@ -257,7 +257,7 @@ fn find_all_overlap() {
             expect.sort_unstable();
             result.sort_unstable();
             assert_eq!(expect.len(), result.len());
-            for (e, r) in expect.into_iter().zip(result.iter()) {
+            for (e, r) in expect.into_iter().zip(result.into_iter()) {
                 assert_eq!(e, r);
             }
         }
@@ -267,20 +267,21 @@ fn find_all_overlap() {
 #[test]
 fn entry_modify() {
     let mut map = IntervalMap::new();
-    map.insert(Interval::new(1, 3), 0);
-    map.insert(Interval::new(2, 4), 0);
-    map.insert(Interval::new(6, 7), 0);
-    map.insert(Interval::new(7, 11), 0);
+    map.insert(Interval::new(1, 3), 1);
+    map.insert(Interval::new(2, 4), 2);
+    map.insert(Interval::new(6, 7), 3);
+    map.insert(Interval::new(7, 11), 4);
     let _ignore = map.entry(Interval::new(6, 7)).and_modify(|v| *v += 1);
-    let _ignore = map
-        .entry(Interval::new(6, 7))
-        .and_modify(|v| assert_eq!(*v, 1));
+    assert_eq!(map.get(&Interval::new(1, 3)), Some(&1));
+    assert_eq!(map.get(&Interval::new(2, 4)), Some(&2));
+    assert_eq!(map.get(&Interval::new(6, 7)), Some(&4));
+    assert_eq!(map.get(&Interval::new(7, 11)), Some(&4));
+    assert_eq!(map.get(&Interval::new(5, 17)), None);
     map.entry(Interval::new(3, 5))
         .and_modify(|v| *v += 1)
         .or_insert(0);
-    let _ignore = map
-        .entry(Interval::new(3, 5))
-        .and_modify(|v| assert_eq!(*v, 0));
+    let _ignore = map.get_mut(&Interval::new(3, 5)).map(|v| *v += 1);
+    assert_eq!(map.get(&Interval::new(3, 5)), Some(&1));
 }
 
 #[test]
@@ -296,9 +297,9 @@ fn iterate_through_map() {
         intervals.sort_unstable_by(|a, b| a.1.cmp(&b.1));
 
         #[allow(clippy::pattern_type_mismatch)]
-        for (entry, (v, i)) in map.iter().zip(intervals.iter()) {
-            entry.map_interval(|ei| assert_eq!(ei, i));
-            entry.map_value(|ev| assert_eq!(ev, v));
+        for ((ei, ev), (v, i)) in map.iter().zip(intervals.iter()) {
+            assert_eq!(ei, i);
+            assert_eq!(ev, v);
         }
     });
 }
