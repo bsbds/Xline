@@ -258,7 +258,7 @@ fn find_all_overlap() {
             result.sort_unstable();
             assert_eq!(expect.len(), result.len());
             for (e, r) in expect.into_iter().zip(result.into_iter()) {
-                assert_eq!(e, r);
+                assert_eq!(e, r.0);
             }
         }
     });

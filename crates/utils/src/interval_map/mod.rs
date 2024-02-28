@@ -77,11 +77,11 @@ where
 
     /// Finds all intervals in the map that overlaps with the given interval.
     #[inline]
-    pub fn find_all_overlap(&self, interval: &Interval<T>) -> Vec<&Interval<T>> {
-        if !self.nref(self.root, Node::is_sentinel) {
-            self.find_all_overlap_inner(self.root, interval)
-        } else {
+    pub fn find_all_overlap(&self, interval: &Interval<T>) -> Vec<(&Interval<T>, &V)> {
+        if self.nref(self.root, Node::is_sentinel) {
             Vec::new()
+        } else {
+            self.find_all_overlap_inner(self.root, interval)
         }
     }
 
@@ -286,10 +286,10 @@ where
         &self,
         x: NodeIndex<Ix>,
         interval: &Interval<T>,
-    ) -> Vec<&Interval<T>> {
+    ) -> Vec<(&Interval<T>, &V)> {
         let mut list = vec![];
         if self.nref(x, Node::interval).overlap(interval) {
-            list.push(self.nref(x, Node::interval));
+            list.push(self.nref(x, |nx| (nx.interval(), nx.value())));
         }
         if self
             .left_ref(x, Node::sentinel)
