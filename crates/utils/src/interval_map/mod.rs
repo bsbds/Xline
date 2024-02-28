@@ -78,7 +78,11 @@ where
     /// Finds all intervals in the map that overlaps with the given interval.
     #[inline]
     pub fn find_all_overlap(&self, interval: &Interval<T>) -> Vec<&Interval<T>> {
-        self.find_all_overlap_inner(self.root, interval)
+        if !self.nref(self.root, Node::is_sentinel) {
+            self.find_all_overlap_inner(self.root, interval)
+        } else {
+            Vec::new()
+        }
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -775,8 +779,8 @@ where
         match self {
             Entry::Occupied(entry) => entry.map_ref.nmut(entry.node, Node::value_mut),
             Entry::Vacant(entry) => {
+                let entry_idx = NodeIndex::new(entry.map_ref.nodes.len());
                 let _ignore = entry.map_ref.insert(entry.interval, default);
-                let entry_idx = NodeIndex::new(entry.map_ref.len().wrapping_sub(1));
                 entry.map_ref.nmut(entry_idx, Node::value_mut)
             }
         }
