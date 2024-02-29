@@ -124,6 +124,15 @@ where
         }
     }
 
+    /// Removes all elements from the map
+    #[inline]
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.nodes.push(Self::new_sentinel());
+        self.root = Self::sentinel();
+        self.len = 0;
+    }
+
     /// Returns the number of elements in the map.
     #[inline]
     #[must_use]
