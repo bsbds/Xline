@@ -11,7 +11,7 @@ use crate::{
     memory_engine::{MemoryEngine, MemorySnapshot, MemoryTransaction},
     metrics,
     rocksdb_engine::RocksTransaction,
-    SnapshotApi, StorageEngine, TransactionApi, WriteOperation,
+    SnapshotApi, StorageEngine, StorageOps, TransactionApi, WriteOperation,
 };
 
 #[derive(Debug)]
@@ -81,38 +81,10 @@ impl StorageEngine for Engine {
     }
 
     #[inline]
-    fn get(&self, table: &str, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, EngineError> {
-        match *self {
-            Engine::Memory(ref e) => e.get(table, key),
-            Engine::Rocks(ref e) => e.get(table, key),
-        }
-    }
-
-    #[inline]
-    fn get_multi(
-        &self,
-        table: &str,
-        keys: &[impl AsRef<[u8]>],
-    ) -> Result<Vec<Option<Vec<u8>>>, EngineError> {
-        match *self {
-            Engine::Memory(ref e) => e.get_multi(table, keys),
-            Engine::Rocks(ref e) => e.get_multi(table, keys),
-        }
-    }
-
-    #[inline]
     fn get_all(&self, table: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, EngineError> {
         match *self {
             Engine::Memory(ref e) => e.get_all(table),
             Engine::Rocks(ref e) => e.get_all(table),
-        }
-    }
-
-    #[inline]
-    fn write_batch(&self, wr_ops: Vec<WriteOperation<'_>>, sync: bool) -> Result<(), EngineError> {
-        match *self {
-            Engine::Memory(ref e) => e.write_batch(wr_ops, sync),
-            Engine::Rocks(ref e) => e.write_batch(wr_ops, sync),
         }
     }
 
@@ -163,6 +135,44 @@ impl StorageEngine for Engine {
     }
 }
 
+impl StorageOps for Engine {
+    #[inline]
+    fn write(&self, op: WriteOperation<'_>, sync: bool) -> Result<(), EngineError> {
+        match *self {
+            Engine::Memory(ref e) => e.write(op, sync),
+            Engine::Rocks(ref e) => e.write(op, sync),
+        }
+    }
+
+    #[inline]
+    fn write_multi(&self, ops: Vec<WriteOperation<'_>>, sync: bool) -> Result<(), EngineError> {
+        match *self {
+            Engine::Memory(ref e) => e.write_multi(ops, sync),
+            Engine::Rocks(ref e) => e.write_multi(ops, sync),
+        }
+    }
+
+    #[inline]
+    fn get(&self, table: &str, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, EngineError> {
+        match *self {
+            Engine::Memory(ref e) => e.get(table, key),
+            Engine::Rocks(ref e) => e.get(table, key),
+        }
+    }
+
+    #[inline]
+    fn get_multi(
+        &self,
+        table: &str,
+        keys: &[impl AsRef<[u8]>],
+    ) -> Result<Vec<Option<Vec<u8>>>, EngineError> {
+        match *self {
+            Engine::Memory(ref e) => e.get_multi(table, keys),
+            Engine::Rocks(ref e) => e.get_multi(table, keys),
+        }
+    }
+}
+
 /// `Transaction` is designed to mask the different type of `MemoryTransaction` and `RocksTransaction`
 /// and provides an uniform type to the upper layer.
 /// NOTE: Currently multiple concurrent transactions is not supported
@@ -173,6 +183,44 @@ pub enum Transaction {
     Memory(MemoryTransaction),
     /// Rocks snapshot
     Rocks(metrics::Layer<RocksTransaction>),
+}
+
+impl StorageOps for Transaction {
+    #[inline]
+    fn write(&self, op: WriteOperation<'_>, sync: bool) -> Result<(), EngineError> {
+        match *self {
+            Transaction::Memory(ref t) => t.write(op, sync),
+            Transaction::Rocks(ref t) => t.write(op, sync),
+        }
+    }
+
+    #[inline]
+    fn write_multi(&self, ops: Vec<WriteOperation<'_>>, sync: bool) -> Result<(), EngineError> {
+        match *self {
+            Transaction::Memory(ref t) => t.write_multi(ops, sync),
+            Transaction::Rocks(ref t) => t.write_multi(ops, sync),
+        }
+    }
+
+    #[inline]
+    fn get(&self, table: &str, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, EngineError> {
+        match *self {
+            Transaction::Memory(ref t) => t.get(table, key),
+            Transaction::Rocks(ref t) => t.get(table, key),
+        }
+    }
+
+    #[inline]
+    fn get_multi(
+        &self,
+        table: &str,
+        keys: &[impl AsRef<[u8]>],
+    ) -> Result<Vec<Option<Vec<u8>>>, EngineError> {
+        match *self {
+            Transaction::Memory(ref t) => t.get_multi(table, keys),
+            Transaction::Rocks(ref t) => t.get_multi(table, keys),
+        }
+    }
 }
 
 impl TransactionApi for Transaction {
@@ -297,13 +345,13 @@ mod test {
                 "hello".as_bytes().to_vec(),
                 "world".as_bytes().to_vec(),
             );
-            assert!(engine.write_batch(vec![put], false).is_err());
+            assert!(engine.write_multi(vec![put], false).is_err());
 
             let delete = WriteOperation::new_delete("hello", b"hello");
-            assert!(engine.write_batch(vec![delete], false).is_err());
+            assert!(engine.write_multi(vec![delete], false).is_err());
 
             let delete_range = WriteOperation::new_delete_range("hello", b"hello", b"world");
-            assert!(engine.write_batch(vec![delete_range], false).is_err());
+            assert!(engine.write_multi(vec![delete_range], false).is_err());
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -326,7 +374,7 @@ mod test {
                 .map(|(k, v)| WriteOperation::new_put("kv", k, v))
                 .collect::<Vec<WriteOperation<'_>>>();
 
-            assert!(engine.write_batch(puts, false).is_ok());
+            assert!(engine.write_multi(puts, false).is_ok());
 
             let res_1 = engine.get_multi("kv", &origin_set).unwrap();
             assert_eq!(res_1.iter().filter(|v| v.is_some()).count(), 10);
@@ -334,7 +382,7 @@ mod test {
             let delete_key: Vec<u8> = vec![1, 1, 1, 1];
             let delete = WriteOperation::new_delete("kv", &delete_key);
 
-            let res_2 = engine.write_batch(vec![delete], false);
+            let res_2 = engine.write_multi(vec![delete], false);
             assert!(res_2.is_ok());
 
             let res_3 = engine.get("kv", &delete_key).unwrap();
@@ -343,7 +391,7 @@ mod test {
             let delete_start: Vec<u8> = vec![2, 2, 2, 2];
             let delete_end: Vec<u8> = vec![5, 5, 5, 5];
             let delete_range = WriteOperation::new_delete_range("kv", &delete_start, &delete_end);
-            let res_4 = engine.write_batch(vec![delete_range], false);
+            let res_4 = engine.write_multi(vec![delete_range], false);
             assert!(res_4.is_ok());
 
             let get_key_1: Vec<u8> = vec![5, 5, 5, 5];
@@ -367,7 +415,7 @@ mod test {
             let batch = test_set.iter().map(|&(key, value)| {
                 WriteOperation::new_put("kv", key.as_bytes().to_vec(), value.as_bytes().to_vec())
             });
-            let res = engine.write_batch(batch.collect(), false);
+            let res = engine.write_multi(batch.collect(), false);
             assert!(res.is_ok());
 
             let res_1 = engine.get("kv", "hello").unwrap();
@@ -421,14 +469,14 @@ mod test {
             .zip(recover_engines)
         {
             let put_kv = WriteOperation::new_put("kv", "key".into(), "value".into());
-            assert!(engine.write_batch(vec![put_kv], false).is_ok());
+            assert!(engine.write_multi(vec![put_kv], false).is_ok());
 
             let put_lease = WriteOperation::new_put("lease", "lease_id".into(), "lease".into());
-            assert!(engine.write_batch(vec![put_lease], false).is_ok());
+            assert!(engine.write_multi(vec![put_lease], false).is_ok());
 
             let mut snapshot = engine.get_snapshot(&snapshot_dir, &TESTTABLES).unwrap();
             let put = WriteOperation::new_put("kv", "key2".into(), "value2".into());
-            assert!(engine.write_batch(vec![put], false).is_ok());
+            assert!(engine.write_multi(vec![put], false).is_ok());
 
             let mut buf = BytesMut::with_capacity(snapshot.size().numeric_cast());
             snapshot.read_buf_exact(&mut buf).await.unwrap();
