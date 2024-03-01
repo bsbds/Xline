@@ -341,7 +341,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
             RequestBackend::Kv => self.kv_storage.after_sync(wrapper, txn_db).await?,
             RequestBackend::Auth | RequestBackend::Lease | RequestBackend::Alarm => {
                 let (res, wr_ops) = match wrapper.backend() {
-                    RequestBackend::Auth => self.auth_storage.after_sync(wrapper, revision)?,
+                    RequestBackend::Auth => self.auth_storage.after_sync(wrapper)?,
                     RequestBackend::Lease => self.lease_storage.after_sync(wrapper).await?,
                     RequestBackend::Alarm => self.alarm_storage.after_sync(wrapper, revision),
                     RequestBackend::Kv => unreachable!(),
