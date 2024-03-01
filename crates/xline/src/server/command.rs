@@ -328,7 +328,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         &self,
         cmd: &Command,
         index: LogIndex,
-        revision: i64,
+        _revision: i64,
     ) -> Result<<Command as CurpCommand>::ASR, <Command as CurpCommand>::Error> {
         let quota_enough = self.quota_checker.check(cmd);
         let wrapper = cmd.request();
@@ -343,7 +343,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
                 let (res, wr_ops) = match wrapper.backend() {
                     RequestBackend::Auth => self.auth_storage.after_sync(wrapper)?,
                     RequestBackend::Lease => self.lease_storage.after_sync(wrapper).await?,
-                    RequestBackend::Alarm => self.alarm_storage.after_sync(wrapper, revision),
+                    RequestBackend::Alarm => self.alarm_storage.after_sync(wrapper),
                     RequestBackend::Kv => unreachable!(),
                 };
                 txn_db.write_ops(wr_ops)?;
