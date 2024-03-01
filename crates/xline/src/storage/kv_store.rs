@@ -778,10 +778,10 @@ impl KvStore {
         sub_revision: i64,
     ) -> Result<(Vec<WriteOp>, Vec<Event>), ExecuteError> {
         let mut ops = Vec::new();
-        let new_rev = self
-            .inner
-            .index
-            .register_revision(&req.key, revision, sub_revision);
+        let (new_rev, _prev_rev) =
+            self.inner
+                .index
+                .register_revision(req.key.clone(), revision, sub_revision);
         let mut kv = KeyValue {
             key: req.key.clone(),
             value: req.value.clone(),
