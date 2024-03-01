@@ -354,7 +354,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
             }
         };
         ops.append(&mut wr_ops);
-        let key_revisions = self.persistent.flush_ops(ops)?;
+        let key_revisions = self.persistent.write_ops(ops)?;
         if !key_revisions.is_empty() {
             self.kv_storage.insert_index(key_revisions);
         }
@@ -381,7 +381,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         let s = if let Some((snapshot, index)) = snapshot {
             _ = self
                 .persistent
-                .flush_ops(vec![WriteOp::PutAppliedIndex(index)])?;
+                .write_ops(vec![WriteOp::PutAppliedIndex(index)])?;
             Some(snapshot)
         } else {
             None
@@ -397,7 +397,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
     fn set_last_applied(&self, index: LogIndex) -> Result<(), <Command as CurpCommand>::Error> {
         _ = self
             .persistent
-            .flush_ops(vec![WriteOp::PutAppliedIndex(index)])?;
+            .write_ops(vec![WriteOp::PutAppliedIndex(index)])?;
         Ok(())
     }
 
