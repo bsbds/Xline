@@ -338,15 +338,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         txn_db.write_op(WriteOp::PutAppliedIndex(index))?;
 
         let res = match wrapper.backend() {
-            RequestBackend::Kv => {
-                // TODO: pass txn into kv storage
-                let (res, wr_ops) = self.kv_storage.after_sync(wrapper, revision).await?;
-                txn_db.write_ops(wr_ops)?;
-                txn_db
-                    .commit()
-                    .map_err(|e| ExecuteError::DbError(e.to_string()))?;
-                res
-            }
+            RequestBackend::Kv => self.kv_storage.after_sync(wrapper, txn_db).await?,
             RequestBackend::Auth | RequestBackend::Lease | RequestBackend::Alarm => {
                 let (res, wr_ops) = match wrapper.backend() {
                     RequestBackend::Auth => self.auth_storage.after_sync(wrapper, revision)?,
