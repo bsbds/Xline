@@ -2,6 +2,7 @@ use xlineapi::execute_error::ExecuteError;
 
 use super::db::WriteOp;
 
+/// Storage operations in xline
 pub(crate) trait XlineStorageOps {
     /// Write an operation to the transaction
     fn write_op(&self, op: WriteOp) -> Result<(), ExecuteError>;

@@ -24,7 +24,6 @@ use super::{
     index::{Index, IndexOperate},
     lease_store::LeaseCollection,
     revision::{KeyRevision, Revision},
-    storage_api::StorageApi,
 };
 use crate::{
     header_gen::HeaderGenerator,
@@ -36,7 +35,10 @@ use crate::{
         PutResponse, RangeRequest, RangeResponse, Request, RequestWrapper, ResponseWrapper,
         SortOrder, SortTarget, TargetUnion, TxnRequest, TxnResponse,
     },
-    storage::db::{WriteOp, FINISHED_COMPACT_REVISION},
+    storage::{
+        db::{WriteOp, FINISHED_COMPACT_REVISION},
+        storage_api::XlineStorageOps,
+    },
 };
 
 /// KV store
@@ -480,14 +482,14 @@ impl KvStore {
         revisions
             .iter()
             .for_each(|rev| ops.push(WriteOp::DeleteKeyValue(rev.as_ref())));
-        _ = self.inner.db.write_ops(ops)?;
+        self.inner.db.write_ops(ops)?;
         Ok(())
     }
 
     /// Compact kv storage
     pub(crate) fn compact_finished(&self, revision: i64) -> Result<(), ExecuteError> {
         let ops = vec![WriteOp::PutFinishedCompactRevision(revision)];
-        _ = self.inner.db.write_ops(ops)?;
+        self.inner.db.write_ops(ops)?;
         self.update_compacted_revision(revision);
         Ok(())
     }
@@ -903,6 +905,7 @@ impl KvStore {
 
     /// Insert the given pairs (key, `KeyRevision`) into the index
     #[inline]
+    #[allow(unused)]
     pub(crate) fn insert_index(&self, key_revisions: Vec<(Vec<u8>, KeyRevision)>) {
         self.inner.index.insert(key_revisions);
     }

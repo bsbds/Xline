@@ -7,7 +7,7 @@ use curp::{
     InflightId, LogIndex,
 };
 use dashmap::DashMap;
-use engine::Snapshot;
+use engine::{Snapshot, TransactionApi};
 use event_listener::Event;
 use parking_lot::RwLock;
 use tracing::warn;
@@ -24,7 +24,7 @@ use crate::{
     rpc::{RequestBackend, RequestWrapper},
     storage::{
         db::{WriteOp, DB},
-        storage_api::StorageApi,
+        storage_api::XlineStorageOps,
         AlarmStore, AuthStore, KvStore, LeaseStore,
     },
 };
@@ -331,19 +331,36 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         revision: i64,
     ) -> Result<<Command as CurpCommand>::ASR, <Command as CurpCommand>::Error> {
         let quota_enough = self.quota_checker.check(cmd);
-        let mut ops = vec![WriteOp::PutAppliedIndex(index)];
         let wrapper = cmd.request();
-        let (res, mut wr_ops) = match wrapper.backend() {
-            RequestBackend::Kv => self.kv_storage.after_sync(wrapper, revision).await?,
-            RequestBackend::Auth => self.auth_storage.after_sync(wrapper, revision)?,
-            RequestBackend::Lease => self.lease_storage.after_sync(wrapper, revision).await?,
-            RequestBackend::Alarm => self.alarm_storage.after_sync(wrapper, revision),
-        };
-        if let RequestWrapper::CompactionRequest(ref compact_req) = *wrapper {
-            if compact_req.physical {
-                if let Some(n) = self.compact_events.get(&cmd.compact_id()) {
-                    n.notify(usize::MAX);
-                }
+        let auth_info = cmd.auth_info();
+        self.auth_storage.check_permission(wrapper, auth_info)?;
+        let txn_db = self.persistent.transaction();
+        txn_db.write_op(WriteOp::PutAppliedIndex(index))?;
+
+        let res = match wrapper.backend() {
+            RequestBackend::Kv => {
+                // TODO: pass txn into kv storage
+                let (res, wr_ops) = self.kv_storage.after_sync(wrapper, revision).await?;
+                txn_db.write_ops(wr_ops)?;
+                txn_db
+                    .commit()
+                    .map_err(|e| ExecuteError::DbError(e.to_string()))?;
+                res
+            }
+            RequestBackend::Auth | RequestBackend::Lease | RequestBackend::Alarm => {
+                let (res, wr_ops) = match wrapper.backend() {
+                    RequestBackend::Auth => self.auth_storage.after_sync(wrapper, revision)?,
+                    RequestBackend::Lease => {
+                        self.lease_storage.after_sync(wrapper, revision).await?
+                    }
+                    RequestBackend::Alarm => self.alarm_storage.after_sync(wrapper, revision),
+                    RequestBackend::Kv => unreachable!(),
+                };
+                txn_db.write_ops(wr_ops)?;
+                txn_db
+                    .commit()
+                    .map_err(|e| ExecuteError::DbError(e.to_string()))?;
+                res
             }
         };
         if let RequestWrapper::CompactionRequest(ref compact_req) = *wrapper {
@@ -353,11 +370,14 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
                 }
             }
         };
-        ops.append(&mut wr_ops);
-        let key_revisions = self.persistent.write_ops(ops)?;
-        if !key_revisions.is_empty() {
-            self.kv_storage.insert_index(key_revisions);
-        }
+        if let RequestWrapper::CompactionRequest(ref compact_req) = *wrapper {
+            if compact_req.physical {
+                if let Some(n) = self.compact_events.get(&cmd.compact_id()) {
+                    n.notify(usize::MAX);
+                }
+            }
+        };
+
         self.lease_storage.mark_lease_synced(wrapper);
         if !quota_enough {
             if let Some(alarmer) = self.alarmer.read().clone() {
@@ -395,8 +415,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
     }
 
     fn set_last_applied(&self, index: LogIndex) -> Result<(), <Command as CurpCommand>::Error> {
-        _ = self
-            .persistent
+        self.persistent
             .write_ops(vec![WriteOp::PutAppliedIndex(index)])?;
         Ok(())
     }
