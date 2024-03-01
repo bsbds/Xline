@@ -198,7 +198,7 @@ impl KvStore {
         &self,
         request: &RequestWrapper,
     ) -> Result<CommandResponse, ExecuteError> {
-        self.execute_request(&request).map(CommandResponse::new)
+        self.execute_request(request).map(CommandResponse::new)
     }
 
     /// After-Syncs a request
@@ -210,7 +210,7 @@ impl KvStore {
     where
         T: XlineStorageOps + TransactionApi,
     {
-        self.sync_request(&request, txn_db).await
+        self.sync_request(request, txn_db).await
     }
 
     /// Recover data from persistent storage

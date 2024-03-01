@@ -1,4 +1,5 @@
 #![allow(clippy::multiple_inherent_impl)]
+#![allow(unused)]
 
 use std::{
     collections::{BTreeMap, HashSet},
