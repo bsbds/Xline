@@ -526,6 +526,29 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         Ok(true)
     }
 
+    /// Handles record
+    pub(super) fn follower_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
+        self.ctx
+            .new_sp
+            .lock()
+            .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)))
+            .is_some()
+    }
+
+    /// Handles record
+    pub(super) fn leader_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
+        self.ctx
+            .new_sp
+            .lock()
+            .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)))
+            .is_some()
+            || self
+                .ctx
+                .new_ucp
+                .lock()
+                .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)))
+    }
+
     /// Handle `shutdown` request
     pub(super) fn handle_shutdown(&self, propose_id: ProposeId) -> Result<(), CurpError> {
         let st_r = self.st.read();

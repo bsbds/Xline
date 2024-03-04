@@ -27,6 +27,7 @@ use utils::{
 
 use super::{
     cmd_board::{CmdBoardRef, CommandBoard},
+    cmd_worker::execute,
     conflict::spec_pool_new::{SpObject, SpecPool},
     conflict::uncommitted_pool::{UcpObject, UncomPool},
     gc::gc_cmd_board,
@@ -82,21 +83,74 @@ pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
     cmd_executor: Arc<CE>,
     /// Tx to send entries to after_sync
     as_tx: flume::Sender<TaskType<C>>,
+    /// Tx to send to propose task
+    propose_tx: flume::Sender<(
+        ProposeRequest,
+        oneshot::Sender<Result<Option<Arc<LogEntry<C>>>, CurpError>>,
+        Arc<ResponseSender>,
+    )>,
 }
 
 /// Handlers for clients
 impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
+    // TODO: Add term to req
     /// Handle `ProposeStream` requests
     pub(super) async fn propose_stream(
         &self,
-        _req: ProposeRequest,
-        _resp_tx: Arc<ResponseSender>,
+        req: ProposeRequest,
+        resp_tx: Arc<ResponseSender>,
     ) -> Result<(), CurpError> {
-        todo!()
+        if self.curp.is_shutdown() {
+            return Err(CurpError::shutting_down());
+        }
+        self.check_cluster_version(req.cluster_version)?;
+
+        let (wait_tx, wait_rx) = oneshot::channel();
+        let _ignore = self.propose_tx.send((req, wait_tx, Arc::clone(&resp_tx)));
+        let to_execute = wait_rx.await??;
+
+        if let Some(entry) = to_execute {
+            let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref()).await;
+            let resp = ProposeResponse::new_result::<C>(&er_res, false);
+            resp_tx.send_propose(resp);
+        }
+
+        Ok(())
     }
 
     /// Handle `Record` requests
-    pub(super) async fn record(&self, _req: RecordRequest) -> Result<RecordResponse, CurpError> {
+    pub(super) async fn record(&self, req: RecordRequest) -> Result<RecordResponse, CurpError> {
+        if self.curp.is_shutdown() {
+            return Err(CurpError::shutting_down());
+        }
+        let id = req.propose_id();
+        let cmd: Arc<C> = Arc::new(req.cmd()?);
+        let conflict = self.curp.follower_record(id, cmd);
+
+        Ok(RecordResponse { conflict })
+    }
+
+    async fn handle_propose_task(
+        curp: Arc<RawCurp<C, RC>>,
+        rx: flume::Receiver<(
+            ProposeRequest,
+            oneshot::Sender<Result<Option<Arc<LogEntry<C>>>, CurpError>>,
+            Arc<ResponseSender>,
+        )>,
+    ) {
+        while let Ok((req, wait_tx, resp_tx)) = rx.recv_async().await {
+            let result = Self::handle_propose_inner(req, Arc::clone(&curp), resp_tx).await;
+            if let Err(_) = wait_tx.send(result) {
+                error!("wait_rx accidentally dropped");
+            }
+        }
+    }
+
+    async fn handle_propose_inner(
+        req: ProposeRequest,
+        curp: Arc<RawCurp<C, RC>>,
+        resp_tx: Arc<ResponseSender>,
+    ) -> Result<Option<Arc<LogEntry<C>>>, CurpError> {
         todo!()
     }
 
@@ -658,6 +712,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             .map_err(|e| CurpError::internal(format!("get applied index error, {e}")))?;
         // TODO: after sync task
         let (as_tx, _as_rx) = flume::unbounded();
+        let (propose_tx, propose_rx) = flume::unbounded();
 
         // create curp state machine
         let (voted_for, entries) = storage.recover().await?;
@@ -699,6 +754,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             snapshot_allocator,
             cmd_executor,
             as_tx,
+            propose_tx,
         })
     }
 
