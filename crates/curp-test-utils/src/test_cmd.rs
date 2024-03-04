@@ -195,10 +195,12 @@ impl Command for TestCommand {
     }
 
     fn is_read_only(&self) -> bool {
-        match self.cmd_type {
-            TestCommandType::Get => true,
-            TestCommandType::Put(_) => false,
-        }
+        false
+        // TODO: enable when trigger is implemented
+        // match self.cmd_type {
+        //     TestCommandType::Get => true,
+        //     TestCommandType::Put(_) => false,
+        // }
     }
 }
 

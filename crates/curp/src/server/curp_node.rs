@@ -47,11 +47,11 @@ use crate::{
         AppendEntriesRequest, AppendEntriesResponse, ConfChange, ConfChangeType, CurpError,
         FetchClusterRequest, FetchClusterResponse, FetchReadStateRequest, FetchReadStateResponse,
         InstallSnapshotRequest, InstallSnapshotResponse, LeaseKeepAliveMsg, MoveLeaderRequest,
-        MoveLeaderResponse, ProposeConfChangeRequest, ProposeConfChangeResponse, ProposeRequest,
-        ProposeResponse, PublishRequest, PublishResponse, RecordRequest, RecordResponse,
-        ShutdownRequest, ShutdownResponse, TriggerShutdownRequest, TriggerShutdownResponse,
-        TryBecomeLeaderNowRequest, TryBecomeLeaderNowResponse, VoteRequest, VoteResponse,
-        WaitSyncedRequest, WaitSyncedResponse,
+        MoveLeaderResponse, PoolEntry, ProposeConfChangeRequest, ProposeConfChangeResponse,
+        ProposeId, ProposeRequest, ProposeResponse, PublishRequest, PublishResponse, RecordRequest,
+        RecordResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
+        TriggerShutdownResponse, TryBecomeLeaderNowRequest, TryBecomeLeaderNowResponse,
+        VoteRequest, VoteResponse, WaitSyncedRequest, WaitSyncedResponse,
     },
     server::{
         cmd_worker::{after_sync, worker_reset, worker_snapshot},
@@ -150,10 +150,25 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                     break;
                 }
                 Ok((req, wait_tx, resp_tx)) = rx.recv_async() => {
-                    let result = Self::handle_propose_inner(req, Arc::clone(&curp), resp_tx).await;
-                    if let Err(_) = wait_tx.send(result) {
-                        error!("wait_rx accidentally dropped");
-                    }
+                    let id = req.propose_id();
+                    let cmd: Arc<C> = match req.cmd() {
+                        Ok(c) => Arc::new(c),
+                        Err(e) => {
+                            if let Err(_) = wait_tx.send(Err(e.into())) {
+                                error!("wait_rx accidentally dropped");
+                            }
+                            continue;
+                        }
+                    };
+                    Self::handle_propose_inner(
+                        cmd,
+                        req.propose_id(),
+                        req.term,
+                        &curp,
+                        resp_tx,
+                        wait_tx,
+                    )
+                    .await;
                 }
             }
         }
@@ -161,16 +176,32 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     }
 
     async fn handle_propose_inner(
-        req: ProposeRequest,
-        curp: Arc<RawCurp<C, RC>>,
+        cmd: Arc<C>,
+        id: ProposeId,
+        term: u64,
+        curp: &RawCurp<C, RC>,
         resp_tx: Arc<ResponseSender>,
-    ) -> Result<Option<Arc<LogEntry<C>>>, CurpError> {
-        let id = req.propose_id();
-        let cmd: Arc<C> = Arc::new(req.cmd()?);
-        debug_assert_eq!(req.term, curp.term());
-        let conflict = curp.leader_record(id, Arc::clone(&cmd));
-        resp_tx.set_conflict(conflict);
-        curp.push_log(id, cmd, req.term, resp_tx)
+        wait_tx: oneshot::Sender<Result<Option<Arc<LogEntry<C>>>, CurpError>>,
+    ) {
+        debug_assert_eq!(term, curp.term());
+        if cmd.is_read_only() {
+            // Use default value for the entry as we don't need to put it into curp log
+            let entry = Arc::new(LogEntry::new(0, 0, ProposeId::default(), Arc::clone(&cmd)));
+            let _conflict_cmds = curp.conflict_cmds_uncommitted(PoolEntry::new(id, cmd));
+            let _ignore = tokio::spawn(async move {
+                // TODO: wait for conflict cmds
+                if let Err(_) = wait_tx.send(Ok(Some(entry))) {
+                    error!("wait_rx accidentally dropped");
+                }
+            });
+        } else {
+            let conflict = curp.leader_record(id, Arc::clone(&cmd));
+            resp_tx.set_conflict(conflict);
+            let entry_res = curp.push_log(id, cmd, term, resp_tx);
+            if let Err(_) = wait_tx.send(entry_res) {
+                error!("wait_rx accidentally dropped");
+            }
+        }
     }
 
     /// Handle `Propose` requests

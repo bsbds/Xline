@@ -2,7 +2,7 @@ use std::{cmp::Ordering, marker::PhantomData, ops::AddAssign, sync::Arc, time::D
 
 use async_trait::async_trait;
 use curp_external_api::cmd::Command;
-use futures::{future, Future, StreamExt};
+use futures::{future, stream::FuturesUnordered, Future, Stream, StreamExt};
 use tonic::Response;
 use tracing::{debug, warn};
 
@@ -13,9 +13,9 @@ use crate::{
     response::ResponseReceiver,
     rpc::{
         connect::ConnectApi, ConfChange, CurpError, FetchClusterRequest, FetchClusterResponse,
-        FetchReadStateRequest, Member, MoveLeaderRequest, ProposeConfChangeRequest, ProposeId,
-        ProposeRequest, PublishRequest, ReadState, RecordRequest, ShutdownRequest,
-        WaitSyncedRequest,
+        FetchReadStateRequest, Member, MoveLeaderRequest, OpResponse, ProposeConfChangeRequest,
+        ProposeId, ProposeRequest, PublishRequest, ReadState, RecordRequest, RecordResponse,
+        ShutdownRequest, WaitSyncedRequest,
     },
     super_quorum,
 };
@@ -98,6 +98,62 @@ impl<C: Command> Unary<C> {
     #[allow(clippy::unused_self)] // TODO: implement request tracker
     fn new_seq_num(&self) -> u64 {
         rand::random()
+    }
+}
+
+impl<C: Command> Unary<C> {
+    /// Propose for read only commands
+    ///
+    /// For read-only commands, we only need to send propose to leader
+    async fn propose_read_only<PF>(propose_fut: PF) -> Result<ProposeResponse<C>, CurpError>
+    where
+        PF: Future<
+            Output = Result<
+                Response<Box<dyn Stream<Item = tonic::Result<OpResponse>> + Send>>,
+                CurpError,
+            >,
+        >,
+    {
+        let propose_res = propose_fut.await;
+        let resp_stream = propose_res?.into_inner();
+        let mut response_rx = ResponseReceiver::new(resp_stream);
+        let (er_result, _) = response_rx.recv_er::<C>().await?;
+        Ok(er_result.map(|er| (er, None)))
+    }
+
+    /// Propose for mutative commands
+    async fn propose_mutative<PF, RF>(
+        propose_fut: PF,
+        record_futs: FuturesUnordered<RF>,
+        use_fast_path: bool,
+        superquorum: usize,
+    ) -> Result<ProposeResponse<C>, CurpError>
+    where
+        PF: Future<
+            Output = Result<
+                Response<Box<dyn Stream<Item = tonic::Result<OpResponse>> + Send>>,
+                CurpError,
+            >,
+        >,
+        RF: Future<Output = Result<Response<RecordResponse>, CurpError>>,
+    {
+        let record_futs_filtered = record_futs
+            .filter_map(|res| future::ready(res.ok()))
+            .filter(|resp| future::ready(!resp.get_ref().conflict))
+            .take(superquorum.wrapping_sub(1))
+            .collect::<Vec<_>>();
+        let (propose_res, record_resps) = tokio::join!(propose_fut, record_futs_filtered);
+
+        let resp_stream = propose_res?.into_inner();
+        let mut response_rx = ResponseReceiver::new(resp_stream);
+
+        let (er_result, conflict) = response_rx.recv_er::<C>().await?;
+        let fast_path_failed = conflict || record_resps.len() < superquorum.wrapping_sub(1);
+        if !use_fast_path || fast_path_failed {
+            let asr_result = response_rx.recv_asr::<C>().await?;
+            return Ok(er_result.and_then(|er| asr_result.map(|asr| (er, Some(asr)))));
+        }
+        Ok(er_result.map(|er| (er, None)))
     }
 }
 
@@ -319,30 +375,19 @@ impl<C: Command> RepeatableClientApi for Unary<C> {
             conn.propose_stream(propose_req, token.cloned(), timeout)
                 .await
         });
-        let record_stream = self
+        let record_futs = self
             .state
             .for_each_follower(leader_id, |conn| {
                 let record_req_c = record_req.clone();
                 async move { conn.record(record_req_c, timeout).await }
             })
             .await;
-        let record_futs = record_stream
-            .filter_map(|res| future::ready(res.ok()))
-            .filter(|resp| future::ready(!resp.get_ref().conflict))
-            .take(superquorum.wrapping_sub(1))
-            .collect::<Vec<_>>();
-        let (propose_res, record_resps) = tokio::join!(propose_fut, record_futs);
 
-        let resp_stream = propose_res?.into_inner();
-        let mut response_rx = ResponseReceiver::new(resp_stream);
-
-        let (er_result, conflict) = response_rx.recv_er::<C>().await?;
-        let fast_path_failed = conflict || record_resps.len() < superquorum.wrapping_sub(1);
-        if !use_fast_path || fast_path_failed {
-            let asr_result = response_rx.recv_asr::<C>().await?;
-            return Ok(er_result.and_then(|er| asr_result.map(|asr| (er, Some(asr)))));
+        if cmd.is_read_only() {
+            Self::propose_read_only(propose_fut).await
+        } else {
+            Self::propose_mutative(propose_fut, record_futs, use_fast_path, superquorum).await
         }
-        Ok(er_result.map(|er| (er, None)))
     }
 
     /// Send propose configuration changes to the cluster

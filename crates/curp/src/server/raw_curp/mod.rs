@@ -1958,4 +1958,15 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             self.apply(&mut *log_w);
         }
     }
+
+    /// Returns all uncommitted commands that conflict with current command
+    pub(super) fn conflict_cmds_uncommitted(&self, entry: PoolEntry<C>) -> Vec<ProposeId> {
+        self.ctx
+            .new_ucp
+            .lock()
+            .all_conflict(entry)
+            .into_iter()
+            .map(|e| e.id)
+            .collect()
+    }
 }
