@@ -5,10 +5,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_stream::StreamExt;
 use tonic::Status;
 
-use crate::{
-    error::ClientError,
-    rpc::{OpResponse, ProposeResponse, ResponseOp, SyncedResponse},
-};
+use crate::rpc::{CurpError, OpResponse, ProposeResponse, ResponseOp, SyncedResponse};
 
 /// The response sender
 #[derive(Debug)]
@@ -68,40 +65,37 @@ impl ResponseReceiver {
         Self { resp_stream }
     }
 
-    pub(crate) async fn recv_er<C: Command>(&mut self) -> Result<(C::ER, bool), ClientError<C>> {
-        let op = self.recv_resp().await?;
+    pub(crate) async fn recv_er<C: Command>(
+        &mut self,
+    ) -> Result<(Result<C::ER, C::Error>, bool), CurpError> {
+        let op = self.recv_resp::<C>().await?;
         // TODO: replace unreachable with error
         let ResponseOp::Propose(resp)  = op else { unreachable!("op: {op:?}") };
 
         let conflict = resp.conflict;
-        let er = resp.map_result::<C, _, Result<<C as Command>::ER, ClientError<C>>>(|res| {
-            res.unwrap_or_else(|| unreachable!())
-                .map_err(|e| ClientError::CommandError::<C>(e))
-        })??;
+        let er =
+            resp.map_result::<C, _, _>(|res| res.map(|er| er.unwrap_or_else(|| unreachable!())))?;
 
         Ok((er, conflict))
     }
 
-    pub(crate) async fn recv_asr<C: Command>(&mut self) -> Result<C::ASR, ClientError<C>> {
-        let op = self.recv_resp().await?;
+    pub(crate) async fn recv_asr<C: Command>(
+        &mut self,
+    ) -> Result<Result<C::ASR, C::Error>, CurpError> {
+        let op = self.recv_resp::<C>().await?;
         // TODO: replace unreachable with error
         let ResponseOp::Synced(resp)  = op else { unreachable!() };
 
-        resp.map_result::<C, _, Result<<C as Command>::ASR, ClientError<C>>>(|res| {
-            res.unwrap_or_else(|| unreachable!())
-                .map_err(|e| ClientError::CommandError::<C>(e))
-        })?
-        .map_err(Into::into)
+        resp.map_result::<C, _, _>(|res| res.unwrap_or_else(|| unreachable!()))
+            .map_err(Into::into)
     }
 
-    async fn recv_resp<C: Command>(&mut self) -> Result<ResponseOp, ClientError<C>> {
+    async fn recv_resp<C: Command>(&mut self) -> Result<ResponseOp, CurpError> {
         let resp = self
             .resp_stream
             .next()
             .await
-            .ok_or(ClientError::InternalError(
-                "stream reaches on an end".to_owned(),
-            ))??;
+            .ok_or(CurpError::internal("stream reaches on an end".to_owned()))??;
         Ok(resp
             .op
             .unwrap_or_else(|| unreachable!("op should always exist")))
