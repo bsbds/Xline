@@ -110,6 +110,11 @@ impl State {
         self.mutable.read().await.leader
     }
 
+    /// Get term of the cluster
+    pub(super) async fn term(&self) -> u64 {
+        self.mutable.read().await.term
+    }
+
     /// Take an async function and map to the dedicated server, return `Err(CurpError:WrongClusterVersion(()))`
     /// if the server can not found in local state
     pub(super) async fn map_server<R, F: Future<Output = Result<R, CurpError>>>(
