@@ -528,25 +528,39 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
     /// Handles record
     pub(super) fn follower_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
-        self.ctx
+        let conflict = self
+            .ctx
             .new_sp
             .lock()
             .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)))
-            .is_some()
+            .is_some();
+        if conflict {
+            metrics::get()
+                .proposals_failed
+                .add(1, &[KeyValue::new("reason", "follower key conflict")]);
+        }
+        conflict
     }
 
     /// Handles record
     pub(super) fn leader_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
-        self.ctx
+        let mut conflict = self
+            .ctx
             .new_sp
             .lock()
             .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)))
-            .is_some()
-            || self
-                .ctx
-                .new_ucp
-                .lock()
-                .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)))
+            .is_some();
+        conflict |= self
+            .ctx
+            .new_ucp
+            .lock()
+            .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)));
+        if conflict {
+            metrics::get()
+                .proposals_failed
+                .add(1, &[KeyValue::new("reason", "leader key conflict")]);
+        }
+        conflict
     }
 
     /// Handles leader propose
@@ -559,7 +573,12 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     ) -> Result<Option<Arc<LogEntry<C>>>, CurpError> {
         let mut log_w = self.log.write();
         // TODO: WAL with fsync
-        let entry = log_w.push(term, propose_id, cmd)?;
+        let entry = log_w.push(term, propose_id, cmd).map_err(|e| {
+            metrics::get()
+                .proposals_failed
+                .add(1, &[KeyValue::new("reason", "log serialize failed")]);
+            e
+        })?;
         let index = entry.index;
         let conflict = resp_tx.is_conflict();
         let _ignore = self.ctx.resp_txs.lock().insert(index, resp_tx);
