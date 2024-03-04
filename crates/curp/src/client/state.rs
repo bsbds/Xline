@@ -132,6 +132,11 @@ impl State {
         f(conn).await
     }
 
+    /// Returns the number of members in the cluster
+    pub(super) async fn connects_len(&self) -> usize {
+        self.mutable.read().await.connects.len()
+    }
+
     /// Take an async function and map to all server, returning `FuturesUnordered<F>`
     pub(super) async fn for_each_server<R, F: Future<Output = R>>(
         &self,
@@ -142,6 +147,22 @@ impl State {
             .await
             .connects
             .values()
+            .map(Arc::clone)
+            .map(f)
+            .collect()
+    }
+
+    /// Take an async function and map to all server, returning `FuturesUnordered<F>`
+    pub(super) async fn for_each_follower<R, F: Future<Output = R>>(
+        &self,
+        leader_id: u64,
+        f: impl FnMut(Arc<dyn ConnectApi>) -> F,
+    ) -> FuturesUnordered<F> {
+        let mutable_r = self.mutable.read().await;
+        mutable_r
+            .connects
+            .iter()
+            .filter_map(|(id, conn)| (*id != leader_id).then_some(conn))
             .map(Arc::clone)
             .map(f)
             .collect()

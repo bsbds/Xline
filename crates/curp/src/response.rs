@@ -1,6 +1,10 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use curp_external_api::cmd::Command;
+use futures::Stream;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::StreamExt;
 use tonic::Status;
@@ -57,12 +61,16 @@ impl ResponseSender {
 }
 
 pub(crate) struct ResponseReceiver {
-    resp_stream: tonic::Streaming<OpResponse>,
+    resp_stream: Pin<Box<dyn Stream<Item = tonic::Result<OpResponse>> + Send>>,
 }
 
 impl ResponseReceiver {
-    pub(crate) fn new(resp_stream: tonic::Streaming<OpResponse>) -> Self {
-        Self { resp_stream }
+    pub(crate) fn new(
+        resp_stream: Box<dyn Stream<Item = tonic::Result<OpResponse>> + Send>,
+    ) -> Self {
+        Self {
+            resp_stream: Box::into_pin(resp_stream),
+        }
     }
 
     pub(crate) async fn recv_er<C: Command>(

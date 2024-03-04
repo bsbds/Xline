@@ -208,6 +208,29 @@ impl ProposeResponse {
     }
 }
 
+impl RecordRequest {
+    /// Creates a new `RecordRequest`
+    pub(crate) fn new<C: Command>(propose_id: ProposeId, command: &C) -> Self {
+        RecordRequest {
+            propose_id: Some(propose_id.into()),
+            command: command.encode(),
+        }
+    }
+
+    /// Get the propose id
+    pub(crate) fn propose_id(&self) -> ProposeId {
+        self.propose_id
+            .clone()
+            .unwrap_or_else(|| unreachable!("propose id must be set in ProposeRequest"))
+            .into()
+    }
+
+    /// Get command
+    pub(crate) fn cmd<C: Command>(&self) -> Result<C, PbSerializeError> {
+        C::decode(&self.command)
+    }
+}
+
 impl SyncedResponse {
     /// Create a new response from `after_sync` result
     pub(crate) fn new_result<C: Command>(result: &Result<C::ASR, C::Error>) -> Self {
