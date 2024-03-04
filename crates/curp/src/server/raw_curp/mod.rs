@@ -549,6 +549,25 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)))
     }
 
+    /// Handles leader propose
+    pub(super) fn push_log(
+        &self,
+        propose_id: ProposeId,
+        cmd: Arc<C>,
+        term: u64,
+        resp_tx: Arc<ResponseSender>,
+    ) -> Result<Option<Arc<LogEntry<C>>>, CurpError> {
+        let mut log_w = self.log.write();
+        // TODO: WAL with fsync
+        let entry = log_w.push(term, propose_id, cmd)?;
+        let index = entry.index;
+        let conflict = resp_tx.is_conflict();
+        let _ignore = self.ctx.resp_txs.lock().insert(index, resp_tx);
+        self.entry_process(&mut log_w, Arc::clone(&entry), true, term);
+
+        Ok((!conflict).then_some(entry))
+    }
+
     /// Handle `shutdown` request
     pub(super) fn handle_shutdown(&self, propose_id: ProposeId) -> Result<(), CurpError> {
         let st_r = self.st.read();
