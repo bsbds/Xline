@@ -116,8 +116,6 @@ pub(super) struct RawCurpArgs<C: Command, RC: RoleChange> {
     lease_manager: LeaseManagerRef,
     /// Config
     cfg: Arc<CurpConfig>,
-    /// Tx to send cmds to execute and do after sync
-    cmd_tx: Arc<dyn CEEventTxApi<C>>,
     /// Tx to send log entries
     log_tx: mpsc::UnboundedSender<Arc<LogEntry<C>>>,
     /// Role change callback

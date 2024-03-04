@@ -172,7 +172,7 @@ impl ProposeRequest {
 
 impl ProposeResponse {
     /// Create an ok propose response
-    pub(crate) fn new_result<C: Command>(result: &Result<C::ER, C::Error>) -> Self {
+    pub(crate) fn new_result<C: Command>(result: &Result<C::ER, C::Error>, conflict: bool) -> Self {
         let result = match *result {
             Ok(ref er) => Some(CmdResult {
                 result: Some(CmdResultInner::Ok(er.encode())),
@@ -181,12 +181,15 @@ impl ProposeResponse {
                 result: Some(CmdResultInner::Error(e.encode())),
             }),
         };
-        Self { result }
+        Self { result, conflict }
     }
 
     /// Create an empty propose response
     pub(crate) fn new_empty() -> Self {
-        Self { result: None }
+        Self {
+            result: None,
+            conflict: false,
+        }
     }
 
     /// Deserialize result in response and take a map function
@@ -202,6 +205,39 @@ impl ProposeResponse {
             CmdResultInner::Error(ref buf) => Err(<C as Command>::Error::decode(buf)?),
         };
         Ok(f(res.map(Some)))
+    }
+}
+
+impl SyncedResponse {
+    /// Create a new response from `after_sync` result
+    pub(crate) fn new_result<C: Command>(result: &Result<C::ASR, C::Error>) -> Self {
+        match *result {
+            Ok(ref asr) => SyncedResponse {
+                after_sync_result: Some(CmdResult {
+                    result: Some(CmdResultInner::Ok(asr.encode())),
+                }),
+            },
+            Err(ref e) => SyncedResponse {
+                after_sync_result: Some(CmdResult {
+                    result: Some(CmdResultInner::Error(e.encode())),
+                }),
+            },
+        }
+    }
+
+    /// Deserialize result in response and take a map function
+    pub(crate) fn map_result<C: Command, F, R>(self, f: F) -> Result<R, PbSerializeError>
+    where
+        F: FnOnce(Option<Result<C::ASR, C::Error>>) -> R,
+    {
+        let Some(res) = self.after_sync_result.and_then(|res| res.result) else {
+            return Ok(f(None));
+        };
+        let res = match res {
+            CmdResultInner::Ok(ref buf) => Ok(<C as Command>::ASR::decode(buf)?),
+            CmdResultInner::Error(ref buf) => Err(<C as Command>::Error::decode(buf)?),
+        };
+        Ok(f(Some(res)))
     }
 }
 

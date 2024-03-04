@@ -27,7 +27,6 @@ use utils::{
 
 use super::{
     cmd_board::{CmdBoardRef, CommandBoard},
-    cmd_worker::{conflict_checked_mpmc, start_cmd_workers},
     conflict::spec_pool_new::{SpObject, SpecPool},
     conflict::uncommitted_pool::{UcpObject, UncomPool},
     gc::gc_cmd_board,
@@ -52,7 +51,7 @@ use crate::{
         TryBecomeLeaderNowResponse, VoteRequest, VoteResponse, WaitSyncedRequest,
         WaitSyncedResponse,
     },
-    server::{cmd_worker::CEEventTxApi, metrics, raw_curp::SyncAction, storage::db::DB},
+    server::{metrics, raw_curp::SyncAction, storage::db::DB},
     snapshot::{Snapshot, SnapshotMeta},
 };
 
@@ -62,8 +61,6 @@ pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
     curp: Arc<RawCurp<C, RC>>,
     /// Cmd watch board for tracking the cmd sync results
     cmd_board: CmdBoardRef<C>,
-    /// CE event tx,
-    ce_event_tx: Arc<dyn CEEventTxApi<C>>,
     /// Storage
     storage: Arc<dyn StorageApi<Command = C>>,
     /// Snapshot allocator
@@ -89,7 +86,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         // if speculatively executed, wait for the result and return
         if sp_exec {
             let er_res = CommandBoard::wait_for_er(&self.cmd_board, id).await;
-            return Ok(ProposeResponse::new_result::<C>(&er_res));
+            return Ok(ProposeResponse::new_result::<C>(&er_res, false));
         }
 
         Ok(ProposeResponse::new_empty())
@@ -993,10 +990,7 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::{
-        rpc::{connect::MockInnerConnectApi, ConfChange},
-        server::cmd_worker::MockCEEventTxApi,
-    };
+    use crate::rpc::{connect::MockInnerConnectApi, ConfChange};
 
     #[traced_test]
     #[tokio::test]
@@ -1004,7 +998,6 @@ mod tests {
         let task_manager = Arc::new(TaskManager::new());
         let curp = Arc::new(RawCurp::new_test(
             3,
-            MockCEEventTxApi::<TestCommand>::default(),
             mock_role_change(),
             Arc::clone(&task_manager),
         ));
@@ -1034,10 +1027,8 @@ mod tests {
     async fn tick_task_will_bcast_votes() {
         let task_manager = Arc::new(TaskManager::new());
         let curp = {
-            let exe_tx = MockCEEventTxApi::<TestCommand>::default();
             Arc::new(RawCurp::new_test(
                 3,
-                exe_tx,
                 mock_role_change(),
                 Arc::clone(&task_manager),
             ))
@@ -1084,10 +1075,8 @@ mod tests {
     async fn vote_will_not_send_to_learner_during_election() {
         let task_manager = Arc::new(TaskManager::new());
         let curp = {
-            let exe_tx = MockCEEventTxApi::<TestCommand>::default();
             Arc::new(RawCurp::new_test(
                 3,
-                exe_tx,
                 mock_role_change(),
                 Arc::clone(&task_manager),
             ))

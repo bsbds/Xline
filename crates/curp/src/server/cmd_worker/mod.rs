@@ -10,8 +10,9 @@ use super::raw_curp::RawCurp;
 use crate::{
     cmd::{Command, CommandExecutor},
     log_entry::{EntryData, LogEntry},
+    response::ResponseSender,
     role_change::RoleChange,
-    rpc::{ConfChangeType, ProposeResponse},
+    rpc::{ConfChangeType, ProposeResponse, SyncedResponse},
     snapshot::{Snapshot, SnapshotMeta},
 };
 
