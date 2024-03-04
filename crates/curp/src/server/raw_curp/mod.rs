@@ -568,6 +568,14 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         Ok((!conflict).then_some(entry))
     }
 
+    /// Returns `CurpError::LeaderTransfer` if the leadership is transferring
+    pub(super) fn check_leader_transfer(&self) -> Result<(), CurpError> {
+        if self.lst.get_transferee().is_some() {
+            return Err(CurpError::LeaderTransfer("leader transferring".to_owned()));
+        }
+        Ok(())
+    }
+
     /// Handle `shutdown` request
     pub(super) fn handle_shutdown(&self, propose_id: ProposeId) -> Result<(), CurpError> {
         let st_r = self.st.read();

@@ -108,6 +108,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         if self.curp.is_shutdown() {
             return Err(CurpError::shutting_down());
         }
+        self.curp.check_leader_transfer()?;
         self.check_cluster_version(req.cluster_version)?;
 
         let (wait_tx, wait_rx) = oneshot::channel();
