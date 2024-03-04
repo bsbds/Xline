@@ -47,14 +47,15 @@ use self::{
     state::{CandidateState, LeaderState, State},
 };
 use super::{
-    cmd_worker::CEEventTxApi, conflict::spec_pool_new::SpecPool,
-    conflict::uncommitted_pool::UncomPool, lease_manager::LeaseManagerRef, storage::StorageApi, DB,
+    conflict::spec_pool_new::SpecPool, conflict::uncommitted_pool::UncomPool, curp_node::TaskType,
+    lease_manager::LeaseManagerRef, storage::StorageApi, DB,
 };
 use crate::{
     cmd::Command,
     log_entry::{EntryData, LogEntry},
     members::{ClusterInfo, ServerId},
     quorum, recover_quorum,
+    response::ResponseSender,
     role_change::RoleChange,
     rpc::{
         connect::{InnerConnectApi, InnerConnectApiWrapper},
@@ -144,6 +145,10 @@ pub(super) struct RawCurpArgs<C: Command, RC: RoleChange> {
     new_sp: Arc<Mutex<SpecPool<C>>>,
     /// Uncommitted pool
     new_ucp: Arc<Mutex<UncomPool<C>>>,
+    /// Tx to send entries to after_sync
+    as_tx: flume::Sender<TaskType<C>>,
+    /// Response Senders
+    resp_txs: Arc<Mutex<HashMap<LogIndex, Arc<ResponseSender>>>>,
 }
 
 impl<C: Command, RC: RoleChange> RawCurpBuilder<C, RC> {
@@ -168,7 +173,6 @@ impl<C: Command, RC: RoleChange> RawCurpBuilder<C, RC> {
             .cb(args.cmd_board)
             .lm(args.lease_manager)
             .cfg(args.cfg)
-            .cmd_tx(args.cmd_tx)
             .sync_events(args.sync_events)
             .role_change(args.role_change)
             .connects(args.connects)
@@ -306,8 +310,6 @@ struct Context<C: Command, RC: RoleChange> {
     /// Election tick
     #[builder(setter(skip))]
     election_tick: AtomicU8,
-    /// Tx to send cmds to execute and do after sync
-    cmd_tx: Arc<dyn CEEventTxApi<C>>,
     /// Followers sync event trigger
     sync_events: DashMap<ServerId, Arc<Event>>,
     /// Become leader event
@@ -332,6 +334,10 @@ struct Context<C: Command, RC: RoleChange> {
     new_sp: Arc<Mutex<SpecPool<C>>>,
     /// Uncommitted pool
     new_ucp: Arc<Mutex<UncomPool<C>>>,
+    /// Tx to send entries to after_sync
+    as_tx: flume::Sender<TaskType<C>>,
+    /// Response Senders
+    resp_txs: Arc<Mutex<HashMap<LogIndex, Arc<ResponseSender>>>>,
 }
 
 impl<C: Command, RC: RoleChange> Context<C, RC> {
@@ -364,10 +370,6 @@ impl<C: Command, RC: RoleChange> ContextBuilder<C, RC> {
             },
             leader_tx: broadcast::channel(1).0,
             election_tick: AtomicU8::new(0),
-            cmd_tx: match self.cmd_tx.take() {
-                Some(value) => value,
-                None => return Err(ContextBuilderError::UninitializedField("cmd_tx")),
-            },
             sync_events: match self.sync_events.take() {
                 Some(value) => value,
                 None => return Err(ContextBuilderError::UninitializedField("sync_events")),
@@ -399,6 +401,14 @@ impl<C: Command, RC: RoleChange> ContextBuilder<C, RC> {
             new_ucp: match self.new_ucp.take() {
                 Some(value) => value,
                 None => return Err(ContextBuilderError::UninitializedField("new_ucp")),
+            },
+            as_tx: match self.as_tx.take() {
+                Some(value) => value,
+                None => return Err(ContextBuilderError::UninitializedField("as_tx")),
+            },
+            resp_txs: match self.resp_txs.take() {
+                Some(value) => value,
+                None => return Err(ContextBuilderError::UninitializedField("resp_txs")),
             },
         })
     }
@@ -1191,12 +1201,15 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             // the leader will take a snapshot itself every time `sync` is called in effort to
             // calibrate it. Since taking a snapshot will block the leader's execute workers, we should
             // not take snapshot so often. A better solution would be to keep a snapshot cache.
-            Some(SyncAction::Snapshot(self.ctx.cmd_tx.send_snapshot(
-                SnapshotMeta {
-                    last_included_index: entry.index,
-                    last_included_term: entry.term,
-                },
-            )))
+            let meta = SnapshotMeta {
+                last_included_index: entry.index,
+                last_included_term: entry.term,
+            };
+            let (tx, rx) = oneshot::channel();
+            if let Err(e) = self.ctx.as_tx.send(TaskType::Snapshot(meta, tx)) {
+                error!("failed to send task to after sync: {e}");
+            }
+            Some(SyncAction::Snapshot(rx))
         } else {
             let (prev_log_index, prev_log_term) = log_r.get_prev_entry_info(next_index);
             let entries = log_r.get_from(next_index);
@@ -1767,7 +1780,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                     log.last_log_index()
                 )
             });
-            self.ctx.cmd_tx.send_after_sync(Arc::clone(entry));
+            let tx = self.ctx.resp_txs.lock().remove(&i);
+            let task = TaskType::Entry((Arc::clone(entry), tx));
+            if let Err(e) = self.ctx.as_tx.send(task) {
+                error!("send after sync error: {e}");
+            }
             log.last_as = i;
             if log.last_exe < log.last_as {
                 log.last_exe = log.last_as;
@@ -1879,7 +1896,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let index = entry.index;
         if !conflict {
             log_w.last_exe = index;
-            self.ctx.cmd_tx.send_sp_exe(entry);
         }
         self.ctx.sync_events.iter().for_each(|e| {
             if let Some(next) = self.lst.get_next_index(*e.key()) {

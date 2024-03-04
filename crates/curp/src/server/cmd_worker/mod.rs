@@ -3,18 +3,39 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
-use super::raw_curp::RawCurp;
+use super::{
+    conflict::{spec_pool_new::SpecPool, uncommitted_pool::UncomPool},
+    raw_curp::RawCurp,
+};
 use crate::{
     cmd::{Command, CommandExecutor},
     log_entry::{EntryData, LogEntry},
     response::ResponseSender,
     role_change::RoleChange,
-    rpc::{ConfChangeType, ProposeResponse, SyncedResponse},
+    rpc::{ConfChangeType, PoolEntry, ProposeResponse, SyncedResponse},
     snapshot::{Snapshot, SnapshotMeta},
 };
+
+/// Removes an entry from sp and ucp
+fn remove_from_sp_ucp<C: Command>(
+    sp: &Mutex<SpecPool<C>>,
+    ucp: &Mutex<UncomPool<C>>,
+    entry: &LogEntry<C>,
+) {
+    let pool_entry = match entry.entry_data {
+        EntryData::Command(ref c) => PoolEntry::new(entry.propose_id, Arc::clone(c)),
+        EntryData::ConfChange(ref c) => PoolEntry::new(entry.propose_id, c.clone()),
+        EntryData::Empty | EntryData::Shutdown | EntryData::SetNodeState(_, _, _) => {
+            unreachable!()
+        }
+    };
+    sp.lock().remove(pool_entry.clone());
+    ucp.lock().remove(pool_entry);
+}
 
 /// Cmd worker execute handler
 pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
@@ -22,14 +43,13 @@ pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     ce: &CE,
     curp: &RawCurp<C, RC>,
 ) -> Result<<C as Command>::ER, <C as Command>::Error> {
-    let (sp, ucp) = (curp.spec_pool(), curp.uncommitted_pool());
+    let (sp, ucp) = (curp.new_spec_pool(), curp.new_uncommitted_pool());
     let id = curp.id();
     match entry.entry_data {
         EntryData::Command(ref cmd) => {
             let er = ce.execute(cmd).await;
             if er.is_err() {
-                sp.lock().remove(&entry.propose_id);
-                let _ig = ucp.lock().remove(&entry.propose_id);
+                remove_from_sp_ucp(&sp, &ucp, &entry);
                 ce.trigger(entry.inflight_id(), entry.index);
             }
             debug!(
@@ -55,12 +75,12 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
     ce: &CE,
     curp: &RawCurp<C, RC>,
 ) {
-    let (cb, sp, ucp) = (curp.cmd_board(), curp.spec_pool(), curp.uncommitted_pool());
+    let (cb, sp, ucp) = (
+        curp.cmd_board(),
+        curp.new_spec_pool(),
+        curp.new_uncommitted_pool(),
+    );
     let id = curp.id();
-    let remove_from_sp_ucp = || {
-        sp.lock().remove(&entry.propose_id);
-        let _ig = ucp.lock().remove(&entry.propose_id);
-    };
     #[allow(clippy::pattern_type_mismatch)]
     match (&entry.entry_data, resp_tx) {
         // Leader
@@ -70,18 +90,18 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
                 tx.send_propose(ProposeResponse::new_result::<C>(&er, true));
                 if er.is_err() {
                     ce.trigger(entry.inflight_id(), entry.index);
-                    remove_from_sp_ucp();
+                    remove_from_sp_ucp(&sp, &ucp, &entry);
                     return;
                 }
             }
             let asr = ce.after_sync(cmd.as_ref(), entry.index).await;
             tx.send_synced(SyncedResponse::new_result::<C>(&asr));
-            remove_from_sp_ucp();
+            remove_from_sp_ucp(&sp, &ucp, &entry);
         }
         // Follower
         (EntryData::Command(ref cmd), None) => {
             let _ignore = ce.after_sync(cmd.as_ref(), entry.index).await;
-            remove_from_sp_ucp();
+            remove_from_sp_ucp(&sp, &ucp, &entry);
         }
         (EntryData::Shutdown, _) => {
             curp.task_manager().cluster_shutdown();
@@ -104,7 +124,7 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
             let shutdown_self =
                 change.change_type() == ConfChangeType::Remove && change.node_id == id;
             cb.write().insert_conf(entry.propose_id);
-            remove_from_sp_ucp();
+            remove_from_sp_ucp(&sp, &ucp, &entry);
             if shutdown_self {
                 if let Some(maybe_new_leader) = curp.pick_new_leader() {
                     info!(
@@ -141,13 +161,13 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
                 curp.task_manager().shutdown(false).await;
             }
         }
-        EntryData::SetNodeState(node_id, ref name, ref client_urls) => {
+        (EntryData::SetNodeState(node_id, ref name, ref client_urls), _) => {
             if let Err(e) = ce.set_last_applied(entry.index) {
                 error!("failed to set last_applied, {e}");
                 return;
             }
             curp.cluster()
-                .set_node_state(node_id, name.clone(), client_urls.clone());
+                .set_node_state(*node_id, name.clone(), client_urls.clone());
         }
         (EntryData::Empty, _) => {}
     };

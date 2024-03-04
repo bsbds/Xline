@@ -265,9 +265,10 @@ async fn test_unary_fast_round_works() {
         conn.expect_propose()
             .return_once(move |_req, _token, _timeout| {
                 let resp = match id {
-                    0 => ProposeResponse::new_result::<TestCommand>(&Ok(
-                        TestCommandResult::default(),
-                    )),
+                    0 => ProposeResponse::new_result::<TestCommand>(
+                        &Ok(TestCommandResult::default()),
+                        false,
+                    ),
                     1 | 2 | 3 => ProposeResponse::new_empty(),
                     4 => return Err(CurpError::key_conflict()),
                     _ => unreachable!("there are only 5 nodes"),
@@ -326,9 +327,10 @@ async fn test_unary_fast_round_less_quorum() {
         conn.expect_propose()
             .return_once(move |_req, _token, _timeout| {
                 let resp = match id {
-                    0 => ProposeResponse::new_result::<TestCommand>(&Ok(
-                        TestCommandResult::default(),
-                    )),
+                    0 => ProposeResponse::new_result::<TestCommand>(
+                        &Ok(TestCommandResult::default()),
+                        false,
+                    ),
                     1 | 2 => ProposeResponse::new_empty(),
                     3 | 4 => return Err(CurpError::key_conflict()),
                     _ => unreachable!("there are only 5 nodes"),
@@ -353,20 +355,21 @@ async fn test_unary_fast_round_with_two_leader() {
     let connects = init_mocked_connects(5, |id, conn| {
         conn.expect_propose()
             .return_once(move |_req, _token, _timeout| {
-                let resp =
-                    match id {
-                        // The execution result has been returned, indicating that server(0) has also recorded the command.
-                        0 => ProposeResponse::new_result::<TestCommand>(&Ok(
-                            TestCommandResult::new(vec![1], vec![1]),
-                        )),
-                        // imagine that server(1) is the new leader
-                        1 => ProposeResponse::new_result::<TestCommand>(&Ok(
-                            TestCommandResult::new(vec![2], vec![2]),
-                        )),
-                        2 | 3 => ProposeResponse::new_empty(),
-                        4 => return Err(CurpError::key_conflict()),
-                        _ => unreachable!("there are only 5 nodes"),
-                    };
+                let resp = match id {
+                    // The execution result has been returned, indicating that server(0) has also recorded the command.
+                    0 => ProposeResponse::new_result::<TestCommand>(
+                        &Ok(TestCommandResult::new(vec![1], vec![1])),
+                        false,
+                    ),
+                    // imagine that server(1) is the new leader
+                    1 => ProposeResponse::new_result::<TestCommand>(
+                        &Ok(TestCommandResult::new(vec![2], vec![2])),
+                        false,
+                    ),
+                    2 | 3 => ProposeResponse::new_empty(),
+                    4 => return Err(CurpError::key_conflict()),
+                    _ => unreachable!("there are only 5 nodes"),
+                };
                 Ok(tonic::Response::new(resp))
             });
     });
@@ -455,9 +458,10 @@ async fn test_unary_propose_fast_path_works() {
         conn.expect_propose()
             .return_once(move |_req, _token, _timeout| {
                 let resp = match id {
-                    0 => ProposeResponse::new_result::<TestCommand>(&Ok(
-                        TestCommandResult::default(),
-                    )),
+                    0 => ProposeResponse::new_result::<TestCommand>(
+                        &Ok(TestCommandResult::default()),
+                        false,
+                    ),
                     1 | 2 | 3 => ProposeResponse::new_empty(),
                     4 => return Err(CurpError::key_conflict()),
                     _ => unreachable!("there are only 5 nodes"),
@@ -492,9 +496,10 @@ async fn test_unary_propose_slow_path_works() {
         conn.expect_propose()
             .return_once(move |_req, _token, _timeout| {
                 let resp = match id {
-                    0 => ProposeResponse::new_result::<TestCommand>(&Ok(
-                        TestCommandResult::default(),
-                    )),
+                    0 => ProposeResponse::new_result::<TestCommand>(
+                        &Ok(TestCommandResult::default()),
+                        false,
+                    ),
                     1 | 2 | 3 => ProposeResponse::new_empty(),
                     4 => return Err(CurpError::key_conflict()),
                     _ => unreachable!("there are only 5 nodes"),
@@ -542,9 +547,10 @@ async fn test_unary_propose_fast_path_fallback_slow_path() {
                 counter_c.lock().unwrap().add_assign(1);
                 // insufficient quorum
                 let resp = match id {
-                    0 => ProposeResponse::new_result::<TestCommand>(&Ok(
-                        TestCommandResult::default(),
-                    )),
+                    0 => ProposeResponse::new_result::<TestCommand>(
+                        &Ok(TestCommandResult::default()),
+                        false,
+                    ),
                     1 | 2 => ProposeResponse::new_empty(),
                     3 | 4 => return Err(CurpError::key_conflict()),
                     _ => unreachable!("there are only 5 nodes"),

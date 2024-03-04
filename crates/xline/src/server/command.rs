@@ -20,7 +20,6 @@ use xlineapi::{
 
 use super::barriers::{IdBarrier, IndexBarrier};
 use crate::{
-    revision_number::RevisionNumberGenerator,
     rpc::{RequestBackend, RequestWrapper},
     storage::{
         db::{WriteOp, DB},
@@ -78,10 +77,6 @@ pub(crate) struct CommandExecutor {
     index_barrier: Arc<IndexBarrier>,
     /// Barrier for propose id
     id_barrier: Arc<IdBarrier>,
-    /// Revision Number generator for KV request and Lease request
-    general_rev: Arc<RevisionNumberGenerator>,
-    /// Revision Number generator for Auth request
-    auth_rev: Arc<RevisionNumberGenerator>,
     /// Compact events
     compact_events: Arc<DashMap<u64, Arc<Event>>>,
     /// Quota checker
@@ -228,8 +223,6 @@ impl CommandExecutor {
         persistent: Arc<DB>,
         index_barrier: Arc<IndexBarrier>,
         id_barrier: Arc<IdBarrier>,
-        general_rev: Arc<RevisionNumberGenerator>,
-        auth_rev: Arc<RevisionNumberGenerator>,
         compact_events: Arc<DashMap<u64, Arc<Event>>>,
         quota: u64,
     ) -> Self {
@@ -243,8 +236,6 @@ impl CommandExecutor {
             persistent,
             index_barrier,
             id_barrier,
-            general_rev,
-            auth_rev,
             compact_events,
             quota_checker,
             alarmer,
@@ -283,38 +274,11 @@ impl CommandExecutor {
 
 #[async_trait::async_trait]
 impl CurpCommandExecutor<Command> for CommandExecutor {
-    fn prepare(
-        &self,
-        cmd: &Command,
-    ) -> Result<<Command as CurpCommand>::PR, <Command as CurpCommand>::Error> {
-        self.check_alarm(cmd)?;
-        let wrapper = cmd.request();
-        let auth_info = cmd.auth_info();
-        self.auth_storage.check_permission(wrapper, auth_info)?;
-        let revision = match wrapper.backend() {
-            RequestBackend::Auth => {
-                if wrapper.skip_auth_revision() {
-                    -1
-                } else {
-                    self.auth_rev.next()
-                }
-            }
-            RequestBackend::Kv | RequestBackend::Lease => {
-                if wrapper.skip_general_revision() {
-                    -1
-                } else {
-                    self.general_rev.next()
-                }
-            }
-            RequestBackend::Alarm => -1,
-        };
-        Ok(revision)
-    }
-
     async fn execute(
         &self,
         cmd: &Command,
     ) -> Result<<Command as CurpCommand>::ER, <Command as CurpCommand>::Error> {
+        self.check_alarm(cmd)?;
         let wrapper = cmd.request();
         match wrapper.backend() {
             RequestBackend::Kv => self.kv_storage.execute(wrapper),
@@ -328,8 +292,8 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         &self,
         cmd: &Command,
         index: LogIndex,
-        _revision: i64,
     ) -> Result<<Command as CurpCommand>::ASR, <Command as CurpCommand>::Error> {
+        self.check_alarm(cmd)?;
         let quota_enough = self.quota_checker.check(cmd);
         let wrapper = cmd.request();
         let auth_info = cmd.auth_info();

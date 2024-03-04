@@ -2,6 +2,7 @@ use std::{fmt::Debug, sync::Arc};
 
 use engine::SnapshotAllocator;
 use tokio::sync::broadcast;
+use tokio_stream::wrappers::ReceiverStream;
 #[cfg(not(madsim))]
 use tonic::transport::ClientTlsConfig;
 use tracing::instrument;
@@ -12,6 +13,8 @@ use utils::{config::CurpConfig, task_manager::TaskManager, tracing::Extract};
 use self::curp_node::CurpNode;
 pub use self::raw_curp::RawCurp;
 pub use self::{conflict::spec_pool_new::SpObject, conflict::uncommitted_pool::UcpObject};
+use crate::response::ResponseSender;
+use crate::rpc::{OpResponse, RecordRequest, RecordResponse};
 use crate::{
     cmd::{Command, CommandExecutor},
     members::{ClusterInfo, ServerId},
@@ -75,6 +78,34 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> Clone for Rpc<C, CE, RC
 
 #[tonic::async_trait]
 impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol for Rpc<C, CE, RC> {
+    type ProposeStreamStream = ReceiverStream<Result<OpResponse, tonic::Status>>;
+
+    #[instrument(skip_all, name = "curp_propose_stream")]
+    async fn propose_stream(
+        &self,
+        request: tonic::Request<ProposeRequest>,
+    ) -> Result<tonic::Response<Self::ProposeStreamStream>, tonic::Status> {
+        request.metadata().extract_span();
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let resp_tx = Arc::new(ResponseSender::new(tx));
+        self.inner
+            .propose_stream(request.into_inner(), resp_tx)
+            .await?;
+
+        Ok(tonic::Response::new(ReceiverStream::new(rx)))
+    }
+
+    #[instrument(skip_all, name = "curp_record")]
+    async fn record(
+        &self,
+        request: tonic::Request<RecordRequest>,
+    ) -> Result<tonic::Response<RecordResponse>, tonic::Status> {
+        request.metadata().extract_span();
+        Ok(tonic::Response::new(
+            self.inner.record(request.into_inner()).await?,
+        ))
+    }
+
     #[instrument(skip_all, name = "curp_propose")]
     async fn propose(
         &self,

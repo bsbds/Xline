@@ -12,7 +12,7 @@ use futures::{pin_mut, stream::FuturesUnordered, Stream, StreamExt};
 use madsim::rand::{thread_rng, Rng};
 use parking_lot::{Mutex, RwLock};
 use tokio::{
-    sync::{broadcast, mpsc},
+    sync::{broadcast, mpsc, oneshot},
     time::MissedTickBehavior,
 };
 #[cfg(not(madsim))]
@@ -38,6 +38,7 @@ use crate::{
     cmd::{Command, CommandExecutor},
     log_entry::{EntryData, LogEntry},
     members::{ClusterInfo, ServerId},
+    response::ResponseSender,
     role_change::RoleChange,
     rpc::{
         self,
@@ -46,14 +47,25 @@ use crate::{
         FetchClusterRequest, FetchClusterResponse, FetchReadStateRequest, FetchReadStateResponse,
         InstallSnapshotRequest, InstallSnapshotResponse, LeaseKeepAliveMsg, MoveLeaderRequest,
         MoveLeaderResponse, ProposeConfChangeRequest, ProposeConfChangeResponse, ProposeRequest,
-        ProposeResponse, PublishRequest, PublishResponse, ShutdownRequest, ShutdownResponse,
-        TriggerShutdownRequest, TriggerShutdownResponse, TryBecomeLeaderNowRequest,
-        TryBecomeLeaderNowResponse, VoteRequest, VoteResponse, WaitSyncedRequest,
-        WaitSyncedResponse,
+        ProposeResponse, PublishRequest, PublishResponse, RecordRequest, RecordResponse,
+        ShutdownRequest, ShutdownResponse, TriggerShutdownRequest, TriggerShutdownResponse,
+        TryBecomeLeaderNowRequest, TryBecomeLeaderNowResponse, VoteRequest, VoteResponse,
+        WaitSyncedRequest, WaitSyncedResponse,
     },
     server::{metrics, raw_curp::SyncAction, storage::db::DB},
     snapshot::{Snapshot, SnapshotMeta},
 };
+
+/// The after sync task type
+#[derive(Debug)]
+pub(super) enum TaskType<C: Command> {
+    /// After sync an entry
+    Entry((Arc<LogEntry<C>>, Option<Arc<ResponseSender>>)),
+    /// Reset the CE
+    Reset(Option<Snapshot>, oneshot::Sender<()>),
+    /// Snapshot
+    Snapshot(SnapshotMeta, oneshot::Sender<Snapshot>),
+}
 
 /// `CurpNode` represents a single node of curp cluster
 pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
@@ -68,10 +80,26 @@ pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
     /// Command Executor
     #[allow(unused)]
     cmd_executor: Arc<CE>,
+    /// Tx to send entries to after_sync
+    as_tx: flume::Sender<TaskType<C>>,
 }
 
 /// Handlers for clients
 impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
+    /// Handle `ProposeStream` requests
+    pub(super) async fn propose_stream(
+        &self,
+        _req: ProposeRequest,
+        _resp_tx: Arc<ResponseSender>,
+    ) -> Result<(), CurpError> {
+        todo!()
+    }
+
+    /// Handle `Record` requests
+    pub(super) async fn record(&self, _req: RecordRequest) -> Result<RecordResponse, CurpError> {
+        todo!()
+    }
+
     /// Handle `Propose` requests
     pub(super) async fn propose(&self, req: ProposeRequest) -> Result<ProposeResponse, CurpError> {
         if self.curp.is_shutdown() {
@@ -306,15 +334,14 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                     "{} successfully received a snapshot, {snapshot:?}",
                     self.curp.id(),
                 );
-                self.ce_event_tx
-                    .send_reset(Some(snapshot))
-                    .await
-                    .map_err(|err| {
-                        error!("failed to reset the command executor by snapshot, {err}");
-                        CurpError::internal(format!(
-                            "failed to reset the command executor by snapshot, {err}"
-                        ))
-                    })?;
+                let (tx, rx) = oneshot::channel();
+                self.as_tx.send(TaskType::Reset(Some(snapshot), tx))?;
+                rx.await.map_err(|err| {
+                    error!("failed to reset the command executor by snapshot, {err}");
+                    CurpError::internal(format!(
+                        "failed to reset the command executor by snapshot, {err}"
+                    ))
+                })?;
                 metrics::get().apply_snapshot_in_progress.observe(0, &[]);
                 metrics::get()
                     .snapshot_install_total_duration_seconds
@@ -629,9 +656,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let last_applied = cmd_executor
             .last_applied()
             .map_err(|e| CurpError::internal(format!("get applied index error, {e}")))?;
-        let (ce_event_tx, task_rx, done_tx) =
-            conflict_checked_mpmc::channel(Arc::clone(&cmd_executor), Arc::clone(&task_manager));
-        let ce_event_tx: Arc<dyn CEEventTxApi<C>> = Arc::new(ce_event_tx);
+        // TODO: after sync task
+        let (as_tx, _as_rx) = flume::unbounded();
 
         // create curp state machine
         let (voted_for, entries) = storage.recover().await?;
@@ -642,7 +668,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 .cmd_board(Arc::clone(&cmd_board))
                 .lease_manager(lease_manager)
                 .cfg(Arc::clone(&curp_cfg))
-                .cmd_tx(Arc::clone(&ce_event_tx))
                 .sync_events(sync_events)
                 .log_tx(log_tx)
                 .role_change(role_change)
@@ -661,13 +686,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
 
         metrics::Metrics::register_callback(Arc::clone(&curp))?;
 
-        start_cmd_workers(
-            Arc::clone(&cmd_executor),
-            Arc::clone(&curp),
-            task_rx,
-            done_tx,
-        );
-
         task_manager.spawn(TaskName::GcCmdBoard, |n| {
             gc_cmd_board(Arc::clone(&cmd_board), curp_cfg.gc_interval, n)
         });
@@ -677,10 +695,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         Ok(Self {
             curp,
             cmd_board,
-            ce_event_tx,
             storage,
             snapshot_allocator,
             cmd_executor,
+            as_tx,
         })
     }
 
