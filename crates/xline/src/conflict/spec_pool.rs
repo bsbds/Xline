@@ -1,11 +1,14 @@
-use std::collections::{hash_map, HashMap};
+use std::collections::HashMap;
 
 use curp::server::conflict::CommandEntry;
 use curp_external_api::conflict::SpeculativePool;
 use utils::interval_map::IntervalMap;
-use xlineapi::{command::Command, interval::BytesAffine};
+use xlineapi::{
+    command::{get_lease_ids, Command},
+    interval::BytesAffine,
+};
 
-use super::{filter_kv, intervals, is_xor_cmd, lease_id};
+use super::{filter_kv, intervals, is_xor_cmd};
 
 /// Speculative pool for KV commands.
 #[derive(Debug, Default)]
@@ -69,14 +72,16 @@ impl SpeculativePool for LeaseSpecPool {
 
     // TODO: fix lease leases command
     fn insert(&mut self, entry: Self::Entry) -> Option<Self::Entry> {
-        let id = lease_id(&entry)?;
-        match self.leases.entry(id) {
-            hash_map::Entry::Occupied(_) => Some(entry),
-            hash_map::Entry::Vacant(e) => {
-                let _ignore = e.insert(entry);
-                None
+        let ids = get_lease_ids(entry.request());
+        for id in ids.clone() {
+            if self.leases.contains_key(&id) {
+                return Some(entry);
             }
         }
+        for id in ids {
+            let _ignore = self.leases.insert(id, entry.clone());
+        }
+        None
     }
 
     fn is_empty(&self) -> bool {
@@ -84,7 +89,8 @@ impl SpeculativePool for LeaseSpecPool {
     }
 
     fn remove(&mut self, entry: Self::Entry) {
-        if let Some(id) = lease_id(&entry) {
+        let ids = get_lease_ids(entry.request());
+        for id in ids {
             let _ignore = self.leases.remove(&id);
         }
     }
