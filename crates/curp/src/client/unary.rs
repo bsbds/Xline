@@ -117,8 +117,7 @@ impl<C: Command> Unary<C> {
         let propose_res = propose_fut.await;
         let resp_stream = propose_res?.into_inner();
         let mut response_rx = ResponseReceiver::new(resp_stream);
-        let (er_result, _) = response_rx.recv_er::<C>().await?;
-        Ok(er_result.map(|er| (er, None)))
+        response_rx.recv::<C>(false).await
     }
 
     /// Propose for mutative commands
@@ -146,14 +145,10 @@ impl<C: Command> Unary<C> {
 
         let resp_stream = propose_res?.into_inner();
         let mut response_rx = ResponseReceiver::new(resp_stream);
-
-        let (er_result, conflict) = response_rx.recv_er::<C>().await?;
-        let fast_path_failed = conflict || record_resps.len() < superquorum.wrapping_sub(1);
-        if !use_fast_path || fast_path_failed {
-            let asr_result = response_rx.recv_asr::<C>().await?;
-            return Ok(er_result.and_then(|er| asr_result.map(|asr| (er, Some(asr)))));
-        }
-        Ok(er_result.map(|er| (er, None)))
+        let fast_path_failed = record_resps.len() < superquorum.wrapping_sub(1);
+        response_rx
+            .recv::<C>(fast_path_failed || !use_fast_path)
+            .await
     }
 }
 

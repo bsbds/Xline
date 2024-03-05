@@ -73,29 +73,38 @@ impl ResponseReceiver {
         }
     }
 
-    pub(crate) async fn recv_er<C: Command>(
+    pub(crate) async fn recv<C: Command>(
         &mut self,
-    ) -> Result<(Result<C::ER, C::Error>, bool), CurpError> {
-        let op = self.recv_resp::<C>().await?;
-        // TODO: replace unreachable with error
-        let ResponseOp::Propose(resp)  = op else { unreachable!("op: {op:?}") };
+        both: bool,
+    ) -> Result<Result<(C::ER, Option<C::ASR>), C::Error>, CurpError> {
+        let fst = self.recv_resp::<C>().await?;
 
-        let conflict = resp.conflict;
-        let er =
-            resp.map_result::<C, _, _>(|res| res.map(|er| er.unwrap_or_else(|| unreachable!())))?;
-
-        Ok((er, conflict))
-    }
-
-    pub(crate) async fn recv_asr<C: Command>(
-        &mut self,
-    ) -> Result<Result<C::ASR, C::Error>, CurpError> {
-        let op = self.recv_resp::<C>().await?;
-        // TODO: replace unreachable with error
-        let ResponseOp::Synced(resp)  = op else { unreachable!() };
-
-        resp.map_result::<C, _, _>(|res| res.unwrap_or_else(|| unreachable!()))
-            .map_err(Into::into)
+        match fst {
+            ResponseOp::Propose(propose_resp) => {
+                let conflict = propose_resp.conflict;
+                let er_result = propose_resp.map_result::<C, _, _>(|res| {
+                    res.map(|er| er.unwrap_or_else(|| unreachable!()))
+                })?;
+                if conflict || both {
+                    let snd = self.recv_resp::<C>().await?;
+                    let ResponseOp::Synced(synced_resp)  = snd else { unreachable!() };
+                    let asr_result = synced_resp
+                        .map_result::<C, _, _>(|res| res.unwrap_or_else(|| unreachable!()))?;
+                    return Ok(er_result.and_then(|er| asr_result.map(|asr| (er, Some(asr)))));
+                }
+                Ok(er_result.map(|er| (er, None)))
+            }
+            ResponseOp::Synced(synced_resp) => {
+                let snd = self.recv_resp::<C>().await?;
+                let ResponseOp::Propose(propose_resp) = snd else { unreachable!("op: {snd:?}") };
+                let er_result = propose_resp.map_result::<C, _, _>(|res| {
+                    res.map(|er| er.unwrap_or_else(|| unreachable!()))
+                })?;
+                let asr_result = synced_resp
+                    .map_result::<C, _, _>(|res| res.unwrap_or_else(|| unreachable!()))?;
+                Ok(er_result.and_then(|er| asr_result.map(|asr| (er, Some(asr)))))
+            }
+        }
     }
 
     async fn recv_resp<C: Command>(&mut self) -> Result<ResponseOp, CurpError> {
