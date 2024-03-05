@@ -1805,9 +1805,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             });
             let tx = self.ctx.resp_txs.lock().remove(&i);
             let task = TaskType::Entry((Arc::clone(entry), tx));
-            if let Err(e) = self.ctx.as_tx.send(task) {
-                error!("send after sync error: {e}");
-            }
+            let _ignore = self.ctx.as_tx.send(task);
             log.last_as = i;
             if log.last_exe < log.last_as {
                 log.last_exe = log.last_as;
