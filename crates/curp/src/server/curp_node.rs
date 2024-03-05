@@ -110,6 +110,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         }
         self.curp.check_leader_transfer()?;
         self.check_cluster_version(req.cluster_version)?;
+        self.curp.check_term(req.term)?;
 
         let (wait_tx, wait_rx) = oneshot::channel();
         let _ignore = self.propose_tx.send((req, wait_tx, Arc::clone(&resp_tx)));
@@ -781,6 +782,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 .client_tls_config(client_tls_config)
                 .new_sp(Arc::new(Mutex::new(SpecPool::new(sps))))
                 .new_ucp(Arc::new(Mutex::new(UncomPool::new(ucps))))
+                .as_tx(as_tx.clone())
+                .resp_txs(Arc::new(Mutex::default()))
                 .build_raw_curp()
                 .map_err(|e| CurpError::internal(format!("build raw curp failed, {e}")))?,
         );

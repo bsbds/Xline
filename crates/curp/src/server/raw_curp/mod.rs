@@ -10,7 +10,7 @@
 #![allow(clippy::arithmetic_side_effects)] // u64 is large enough and won't overflow
 
 use std::{
-    cmp::min,
+    cmp::{self, min},
     collections::{HashMap, HashSet},
     fmt::Debug,
     sync::{
@@ -60,7 +60,7 @@ use crate::{
     rpc::{
         connect::{InnerConnectApi, InnerConnectApiWrapper},
         ConfChange, ConfChangeType, CurpError, IdSet, Member, PoolEntry, ProposeId, PublishRequest,
-        ReadState,
+        ReadState, Redirect,
     },
     server::{
         cmd_board::CmdBoardRef,
@@ -462,6 +462,24 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
 // Curp handlers
 impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
+    /// Checks the if term are up-to-date
+    pub(super) fn check_term(&self, term: u64) -> Result<(), CurpError> {
+        let st_r = self.st.read();
+
+        // Rejects the request
+        // When `st_r.term > term`, the client is using an outdated leader
+        // When `st_r.term < term`, the current node is a zombie
+        match st_r.term.cmp(&term) {
+            // Current node is a zombie
+            cmp::Ordering::Less => Err(CurpError::Zombie(())),
+            cmp::Ordering::Greater => Err(CurpError::Redirect(Redirect {
+                leader_id: st_r.leader_id,
+                term: st_r.term,
+            })),
+            cmp::Ordering::Equal => Ok(()),
+        }
+    }
+
     /// Handles record
     pub(super) fn follower_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
         let conflict = self

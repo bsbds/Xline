@@ -672,7 +672,8 @@ impl CurpError {
             | CurpError::LearnerNotCatchUp(_)
             | CurpError::ExpiredClientId(_)
             | CurpError::Redirect(_)
-            | CurpError::WrongClusterVersion(_) => CurpErrorPriority::High,
+            | CurpError::WrongClusterVersion(_)
+            | CurpError::Zombie(_) => CurpErrorPriority::High,
             CurpError::RpcTransport(_)
             | CurpError::Internal(_)
             | CurpError::KeyConflict(_)
@@ -774,6 +775,10 @@ impl From<CurpError> for tonic::Status {
             CurpError::LeaderTransfer(_) => (
                 tonic::Code::FailedPrecondition,
                 "Leader transfer error: A leader transfer error occurred.",
+            ),
+            CurpError::Zombie(_) => (
+                tonic::Code::FailedPrecondition,
+                "Zombie leader error: The leader is a zombie with outdated term.",
             ),
         };
 
