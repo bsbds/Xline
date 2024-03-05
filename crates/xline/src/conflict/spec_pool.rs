@@ -67,6 +67,7 @@ pub(crate) struct LeaseSpecPool {
 impl SpeculativePool for LeaseSpecPool {
     type Entry = CommandEntry<Command>;
 
+    // TODO: fix lease leases command
     fn insert(&mut self, entry: Self::Entry) -> Option<Self::Entry> {
         let id = lease_id(&entry)?;
         match self.leases.entry(id) {

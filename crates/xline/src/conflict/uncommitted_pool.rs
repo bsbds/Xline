@@ -92,6 +92,7 @@ pub(crate) struct LeaseUncomPool {
 impl UncommittedPool for LeaseUncomPool {
     type Entry = CommandEntry<Command>;
 
+    // TODO: fix lease leases command
     fn insert(&mut self, entry: Self::Entry) -> bool {
         let Some(id) = lease_id(&entry) else {
             return false;
