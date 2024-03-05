@@ -279,7 +279,9 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         cmd: &Command,
     ) -> Result<<Command as CurpCommand>::ER, <Command as CurpCommand>::Error> {
         self.check_alarm(cmd)?;
+        let auth_info = cmd.auth_info();
         let wrapper = cmd.request();
+        self.auth_storage.check_permission(wrapper, auth_info)?;
         match wrapper.backend() {
             RequestBackend::Kv => self.kv_storage.execute(wrapper),
             RequestBackend::Auth => self.auth_storage.execute(wrapper),
