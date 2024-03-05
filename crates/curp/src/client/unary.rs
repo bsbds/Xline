@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, marker::PhantomData, ops::AddAssign, sync::Arc, time::Duration};
+use std::{cmp::Ordering, marker::PhantomData, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use curp_external_api::cmd::Command;
@@ -15,7 +15,7 @@ use crate::{
         connect::ConnectApi, ConfChange, CurpError, FetchClusterRequest, FetchClusterResponse,
         FetchReadStateRequest, Member, MoveLeaderRequest, OpResponse, ProposeConfChangeRequest,
         ProposeId, ProposeRequest, PublishRequest, ReadState, RecordRequest, RecordResponse,
-        ShutdownRequest, WaitSyncedRequest,
+        ShutdownRequest,
     },
     super_quorum,
 };

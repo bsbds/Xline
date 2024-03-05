@@ -51,7 +51,7 @@ use crate::{
         ProposeId, ProposeRequest, ProposeResponse, PublishRequest, PublishResponse, RecordRequest,
         RecordResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
         TriggerShutdownResponse, TryBecomeLeaderNowRequest, TryBecomeLeaderNowResponse,
-        VoteRequest, VoteResponse, WaitSyncedRequest, WaitSyncedResponse,
+        VoteRequest, VoteResponse,
     },
     server::{
         cmd_worker::{after_sync, worker_reset, worker_snapshot},
@@ -143,7 +143,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             oneshot::Sender<Result<Option<Arc<LogEntry<C>>>, CurpError>>,
             Arc<ResponseSender>,
         )>,
-        mut shutdown_listener: Listener,
+        shutdown_listener: Listener,
     ) {
         loop {
             tokio::select! {
@@ -151,7 +151,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                     break;
                 }
                 Ok((req, wait_tx, resp_tx)) = rx.recv_async() => {
-                    let id = req.propose_id();
                     let cmd: Arc<C> = match req.cmd() {
                         Ok(c) => Arc::new(c),
                         Err(e) => {
@@ -203,26 +202,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 error!("wait_rx accidentally dropped");
             }
         }
-    }
-
-    /// Handle `Propose` requests
-    pub(super) async fn propose(&self, req: ProposeRequest) -> Result<ProposeResponse, CurpError> {
-        if self.curp.is_shutdown() {
-            return Err(CurpError::shutting_down());
-        }
-        let id = req.propose_id();
-        self.check_cluster_version(req.cluster_version)?;
-        let cmd: Arc<C> = Arc::new(req.cmd()?);
-        // handle proposal
-        let sp_exec = self.curp.handle_propose(id, Arc::clone(&cmd))?;
-
-        // if speculatively executed, wait for the result and return
-        if sp_exec {
-            let er_res = CommandBoard::wait_for_er(&self.cmd_board, id).await;
-            return Ok(ProposeResponse::new_result::<C>(&er_res, false));
-        }
-
-        Ok(ProposeResponse::new_empty())
     }
 
     /// Handle `Shutdown` requests
@@ -345,25 +324,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     ) -> TriggerShutdownResponse {
         self.curp.task_manager().mark_leader_notified();
         TriggerShutdownResponse::default()
-    }
-
-    /// handle `WaitSynced` requests
-    pub(super) async fn wait_synced(
-        &self,
-        req: WaitSyncedRequest,
-    ) -> Result<WaitSyncedResponse, CurpError> {
-        if self.curp.is_shutdown() {
-            return Err(CurpError::shutting_down());
-        }
-        self.check_cluster_version(req.cluster_version)?;
-        let id = req.propose_id();
-        debug!("{} get wait synced request for cmd({id})", self.curp.id());
-        if self.curp.get_transferee().is_some() {
-            return Err(CurpError::leader_transfer("leader transferring"));
-        }
-        let (er, asr) = CommandBoard::wait_for_er_asr(&self.cmd_board, id).await;
-        debug!("{} wait synced for cmd({id}) finishes", self.curp.id());
-        Ok(WaitSyncedResponse::new_from_result::<C>(er, asr))
     }
 
     /// Handle `FetchCluster` requests
@@ -732,7 +692,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         curp: Arc<RawCurp<C, RC>>,
         cmd_executor: Arc<CE>,
         as_rx: flume::Receiver<TaskType<C>>,
-        mut shutdown_listener: Listener,
+        shutdown_listener: Listener,
     ) {
         loop {
             tokio::select! {

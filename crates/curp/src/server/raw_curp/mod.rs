@@ -180,6 +180,8 @@ impl<C: Command, RC: RoleChange> RawCurpBuilder<C, RC> {
             .client_tls_config(args.client_tls_config)
             .new_sp(args.new_sp)
             .new_ucp(args.new_ucp)
+            .as_tx(args.as_tx)
+            .resp_txs(args.resp_txs)
             .build()
             .map_err(|e| match e {
                 ContextBuilderError::UninitializedField(s) => {
@@ -460,72 +462,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
 // Curp handlers
 impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
-    /// Handle `propose` request
-    /// Return `true` if the leader speculatively executed the command
-    pub(super) fn handle_propose(
-        &self,
-        propose_id: ProposeId,
-        cmd: Arc<C>,
-    ) -> Result<bool, CurpError> {
-        debug!("{} gets proposal for cmd({})", self.id(), propose_id);
-        let mut conflict = self
-            .ctx
-            .new_sp
-            .map_lock(|mut sp_l| sp_l.insert(PoolEntry::new(propose_id, Arc::clone(&cmd))))
-            .is_some();
-
-        let st_r = self.st.read();
-        // Non-leader doesn't need to sync or execute
-        if st_r.role != Role::Leader {
-            if conflict {
-                metrics::get()
-                    .proposals_failed
-                    .add(1, &[KeyValue::new("reason", "follower key conflict")]);
-                return Err(CurpError::key_conflict());
-            }
-            return Ok(false);
-        }
-        if self.lst.get_transferee().is_some() {
-            return Err(CurpError::LeaderTransfer("leader transferring".to_owned()));
-        }
-        if !self
-            .ctx
-            .cb
-            .map_write(|mut cb_w| cb_w.sync.insert(propose_id))
-        {
-            metrics::get()
-                .proposals_failed
-                .add(1, &[KeyValue::new("reason", "duplicated proposal")]);
-            return Err(CurpError::duplicated());
-        }
-
-        // leader also needs to check if the cmd conflicts un-synced commands
-        conflict |= self
-            .ctx
-            .new_ucp
-            .map_lock(|mut ucp_l| ucp_l.insert(PoolEntry::new(propose_id, Arc::clone(&cmd))));
-
-        let mut log_w = self.log.write();
-        let entry = log_w.push(st_r.term, propose_id, cmd).map_err(|e| {
-            metrics::get()
-                .proposals_failed
-                .add(1, &[KeyValue::new("reason", "log serialize failed")]);
-            e
-        })?;
-        debug!("{} gets new log[{}]", self.id(), entry.index);
-
-        self.entry_process(&mut log_w, entry, conflict, st_r.term);
-
-        if conflict {
-            metrics::get()
-                .proposals_failed
-                .add(1, &[KeyValue::new("reason", "leader key conflict")]);
-            return Err(CurpError::key_conflict());
-        }
-
-        Ok(true)
-    }
-
     /// Handles record
     pub(super) fn follower_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
         let conflict = self

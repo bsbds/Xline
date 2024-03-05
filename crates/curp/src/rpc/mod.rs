@@ -191,6 +191,7 @@ impl ProposeResponse {
     }
 
     /// Create an empty propose response
+    #[allow(unused)]
     pub(crate) fn new_empty() -> Self {
         Self {
             result: None,
@@ -267,122 +268,6 @@ impl SyncedResponse {
             CmdResultInner::Error(ref buf) => Err(<C as Command>::Error::decode(buf)?),
         };
         Ok(f(Some(res)))
-    }
-}
-
-impl WaitSyncedRequest {
-    /// Create a `WaitSynced` request
-    pub(crate) fn new(id: ProposeId, cluster_version: u64) -> Self {
-        Self {
-            propose_id: Some(id.into()),
-            cluster_version,
-        }
-    }
-
-    /// Get the `propose_id` reference
-    pub(crate) fn propose_id(&self) -> ProposeId {
-        self.propose_id
-            .clone()
-            .unwrap_or_else(|| {
-                unreachable!("propose id should be set in propose wait synced request")
-            })
-            .into()
-    }
-}
-
-impl WaitSyncedResponse {
-    /// Create a success response
-    fn new_success<C: Command>(asr: &C::ASR, er: &C::ER) -> Self {
-        Self {
-            after_sync_result: Some(CmdResult {
-                result: Some(CmdResultInner::Ok(asr.encode())),
-            }),
-            exe_result: Some(CmdResult {
-                result: Some(CmdResultInner::Ok(er.encode())),
-            }),
-        }
-    }
-
-    /// Create an error response which includes an execution error
-    fn new_er_error<C: Command>(er: &C::Error) -> Self {
-        Self {
-            after_sync_result: None,
-            exe_result: Some(CmdResult {
-                result: Some(CmdResultInner::Error(er.encode())),
-            }),
-        }
-    }
-
-    /// Create an error response which includes an `after_sync` error
-    fn new_asr_error<C: Command>(er: &C::ER, asr_err: &C::Error) -> Self {
-        Self {
-            after_sync_result: Some(CmdResult {
-                result: Some(CmdResultInner::Error(asr_err.encode())),
-            }),
-            exe_result: Some(CmdResult {
-                result: Some(CmdResultInner::Ok(er.encode())),
-            }),
-        }
-    }
-
-    /// Create a new response from execution result and `after_sync` result
-    pub(crate) fn new_from_result<C: Command>(
-        er: Result<C::ER, C::Error>,
-        asr: Option<Result<C::ASR, C::Error>>,
-    ) -> Self {
-        match (er, asr) {
-            (Ok(ref er), Some(Err(ref asr_err))) => {
-                WaitSyncedResponse::new_asr_error::<C>(er, asr_err)
-            }
-            (Ok(ref er), Some(Ok(ref asr))) => WaitSyncedResponse::new_success::<C>(asr, er),
-            (Ok(ref _er), None) => unreachable!("can't get after sync result"),
-            (Err(ref err), _) => WaitSyncedResponse::new_er_error::<C>(err),
-        }
-    }
-
-    /// Similar to `ProposeResponse::map_result`
-    pub(crate) fn map_result<C: Command, F, R>(self, f: F) -> Result<R, PbSerializeError>
-    where
-        F: FnOnce(Result<(C::ASR, C::ER), C::Error>) -> R,
-    {
-        // according to the above methods, we can only get the following response union
-        // ER: Some(OK), ASR: Some(OK)  <-  WaitSyncedResponse::new_success
-        // ER: Some(Err), ASR: None     <-  WaitSyncedResponse::new_er_error
-        // ER: Some(OK), ASR: Some(Err) <- WaitSyncedResponse::new_asr_error
-        let res = match (self.exe_result, self.after_sync_result) {
-            (
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Ok(ref er)),
-                }),
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Ok(ref asr)),
-                }),
-            ) => {
-                let er = <C as Command>::ER::decode(er)?;
-                let asr = <C as Command>::ASR::decode(asr)?;
-                Ok((asr, er))
-            }
-            (
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Error(ref buf)),
-                }),
-                None,
-            )
-            | (
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Ok(_)),
-                }),
-                Some(CmdResult {
-                    result: Some(CmdResultInner::Error(ref buf)),
-                }),
-            ) => {
-                let er = <C as Command>::Error::decode(buf.as_slice())?;
-                Err(er)
-            }
-            _ => unreachable!("got unexpected WaitSyncedResponse"),
-        };
-
-        Ok(f(res))
     }
 }
 
@@ -693,12 +578,8 @@ impl PublishRequest {
 /// `test_retry_propose_return_no_retry_error` `test_retry_propose_return_retry_error` if you added some
 /// new [`CurpError`]
 impl CurpError {
-    /// `KeyConflict` error
-    pub(crate) fn key_conflict() -> Self {
-        Self::KeyConflict(())
-    }
-
     /// `Duplicated` error
+    #[allow(unused)]
     pub(crate) fn duplicated() -> Self {
         Self::Duplicated(())
     }
@@ -765,6 +646,7 @@ impl CurpError {
     }
 
     /// Whether to abort slow round early
+    #[allow(unused)]
     pub(crate) fn should_abort_slow_round(&self) -> bool {
         matches!(
             *self,

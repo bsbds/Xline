@@ -23,10 +23,10 @@ use crate::{
         AppendEntriesRequest, AppendEntriesResponse, FetchClusterRequest, FetchClusterResponse,
         FetchReadStateRequest, FetchReadStateResponse, InstallSnapshotRequest,
         InstallSnapshotResponse, LeaseKeepAliveMsg, MoveLeaderRequest, MoveLeaderResponse,
-        ProposeConfChangeRequest, ProposeConfChangeResponse, ProposeRequest, ProposeResponse,
-        PublishRequest, PublishResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
+        ProposeConfChangeRequest, ProposeConfChangeResponse, ProposeRequest, PublishRequest,
+        PublishResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
         TriggerShutdownResponse, TryBecomeLeaderNowRequest, TryBecomeLeaderNowResponse,
-        VoteRequest, VoteResponse, WaitSyncedRequest, WaitSyncedResponse,
+        VoteRequest, VoteResponse,
     },
 };
 
@@ -106,17 +106,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol fo
         ))
     }
 
-    #[instrument(skip_all, name = "curp_propose")]
-    async fn propose(
-        &self,
-        request: tonic::Request<ProposeRequest>,
-    ) -> Result<tonic::Response<ProposeResponse>, tonic::Status> {
-        request.metadata().extract_span();
-        Ok(tonic::Response::new(
-            self.inner.propose(request.into_inner()).await?,
-        ))
-    }
-
     #[instrument(skip_all, name = "curp_shutdown")]
     async fn shutdown(
         &self,
@@ -147,17 +136,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol fo
         request.metadata().extract_span();
         Ok(tonic::Response::new(
             self.inner.publish(request.into_inner())?,
-        ))
-    }
-
-    #[instrument(skip_all, name = "curp_wait_synced")]
-    async fn wait_synced(
-        &self,
-        request: tonic::Request<WaitSyncedRequest>,
-    ) -> Result<tonic::Response<WaitSyncedResponse>, tonic::Status> {
-        request.metadata().extract_span();
-        Ok(tonic::Response::new(
-            self.inner.wait_synced(request.into_inner()).await?,
         ))
     }
 

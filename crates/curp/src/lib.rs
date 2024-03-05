@@ -162,8 +162,6 @@
         dead_code
     )
 )]
-// TODO: remove this
-#![allow(unused)]
 
 pub use curp_external_api::{InflightId, LogIndex};
 
