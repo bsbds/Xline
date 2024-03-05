@@ -571,7 +571,7 @@ impl KvStore {
                 .execute_range(&txn_db, &txn_index, req)
                 .map(Into::into)?,
             RequestWrapper::PutRequest(ref req) => self
-                .execute_put(&txn_db, &txn_index, req, fake_revision, &mut 0)
+                .execute_put(&txn_db, &mut txn_index, req, fake_revision, &mut 0)
                 .map(Into::into)?,
             RequestWrapper::DeleteRangeRequest(ref req) => self
                 .execute_delete_range(&txn_db, &mut txn_index, req, fake_revision, &mut 0)
@@ -649,28 +649,7 @@ impl KvStore {
     }
 
     /// Handle `PutRequest`
-    #[allow(unused)]
     fn execute_put(
-        &self,
-        txn_db: &Transaction,
-        txn_index: &IndexTransaction,
-        req: &PutRequest,
-        revision: i64,
-        sub_revision: &mut i64,
-    ) -> Result<PutResponse, ExecuteError> {
-        let response = PutResponse {
-            header: Some(self.header_gen.gen_header()),
-            ..Default::default()
-        };
-        if req.lease != 0 && self.lease_collection.look_up(req.lease).is_none() {
-            return Err(ExecuteError::LeaseNotFound(req.lease));
-        };
-        Ok(response)
-    }
-
-    /// Handle `PutRequest`
-    #[allow(unused)]
-    fn execute_put_old(
         &self,
         txn_db: &Transaction,
         txn_index: &mut IndexTransaction,
@@ -681,6 +660,9 @@ impl KvStore {
         let mut response = PutResponse {
             header: Some(self.header_gen.gen_header()),
             ..Default::default()
+        };
+        if req.lease != 0 && self.lease_collection.look_up(req.lease).is_none() {
+            return Err(ExecuteError::LeaseNotFound(req.lease));
         };
         let new_rev = txn_index.register_revision(&req.key, revision, *sub_revision);
         let mut kv = KeyValue {
@@ -910,7 +892,7 @@ impl KvStore {
         }
         if req.lease != 0 {
             self.attach(req.lease, kv.key.as_slice())
-                .unwrap_or_else(|e| panic!("unexpected error from lease Attach: {e}"));
+                .unwrap_or_else(|e| warn!("unexpected error from lease Attach: {e}"));
         }
 
         txn_db.write_op(WriteOp::PutKeyValue(new_rev.as_revision(), kv.clone()))?;
