@@ -3319,6 +3319,8 @@ dependencies = [
  "clippy-utilities",
  "dashmap",
  "derive_builder",
+ "event-listener 5.3.0",
+ "futures",
  "getset",
  "madsim-tokio",
  "madsim-tonic",
