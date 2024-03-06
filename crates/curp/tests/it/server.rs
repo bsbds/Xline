@@ -57,7 +57,7 @@ async fn synced_propose() {
 
     let mut group = CurpGroup::new(5).await;
     let client = group.new_client().await;
-    let cmd = TestCommand::new_get(vec![0]);
+    let cmd = TestCommand::new_put(vec![0], 0);
 
     let (er, index) = client.propose(&cmd, None, false).await.unwrap().unwrap();
     assert_eq!(er, TestCommandResult::new(vec![], vec![]));
@@ -88,7 +88,7 @@ async fn exe_exactly_once_on_leader() {
 
     let mut group = CurpGroup::new(3).await;
     let client = group.new_client().await;
-    let cmd = TestCommand::new_get(vec![0]);
+    let cmd = TestCommand::new_put(vec![0], 0);
 
     let er = client.propose(&cmd, None, true).await.unwrap().unwrap().0;
     assert_eq!(er, TestCommandResult::new(vec![], vec![]));
