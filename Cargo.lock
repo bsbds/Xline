@@ -910,6 +910,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "event-listener"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b5fb89194fa3cad959b833185b3063ba881dbfc7030680b314250779fb4cc91"
+dependencies = [
+ "concurrent-queue",
+ "parking",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "event-listener-strategy"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3328,6 +3339,8 @@ dependencies = [
  "clippy-utilities 0.2.0",
  "dashmap",
  "derive_builder 0.13.0",
+ "event-listener 5.2.0",
+ "futures",
  "getset",
  "madsim-tokio",
  "madsim-tonic",

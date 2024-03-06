@@ -11,14 +11,14 @@ use engine::{Snapshot, TransactionApi};
 use event_listener::Event;
 use parking_lot::RwLock;
 use tracing::warn;
-use utils::table_names::META_TABLE;
+use utils::{barrier::IdBarrier, table_names::META_TABLE};
 use xlineapi::{
     command::{Command, CurpClient},
     execute_error::ExecuteError,
     AlarmAction, AlarmRequest, AlarmType,
 };
 
-use super::barriers::{IdBarrier, IndexBarrier};
+use super::barriers::IndexBarrier;
 use crate::{
     rpc::{RequestBackend, RequestWrapper},
     storage::{
@@ -76,7 +76,7 @@ pub(crate) struct CommandExecutor {
     /// Barrier for applied index
     index_barrier: Arc<IndexBarrier>,
     /// Barrier for propose id
-    id_barrier: Arc<IdBarrier>,
+    id_barrier: Arc<IdBarrier<InflightId>>,
     /// Compact events
     compact_events: Arc<DashMap<u64, Arc<Event>>>,
     /// Quota checker
@@ -222,7 +222,7 @@ impl CommandExecutor {
         alarm_storage: Arc<AlarmStore>,
         persistent: Arc<DB>,
         index_barrier: Arc<IndexBarrier>,
-        id_barrier: Arc<IdBarrier>,
+        id_barrier: Arc<IdBarrier<InflightId>>,
         compact_events: Arc<DashMap<u64, Arc<Event>>>,
         quota: u64,
     ) -> Self {

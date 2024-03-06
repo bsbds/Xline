@@ -176,6 +176,8 @@ pub struct ClientTlsConfig;
 #[non_exhaustive]
 pub struct ServerTlsConfig;
 
+/// Barrier util
+pub mod barrier;
 /// configuration
 pub mod config;
 /// Interval tree implementation
