@@ -21,6 +21,7 @@ use tracing::{debug, error, info, trace, warn};
 #[cfg(madsim)]
 use utils::ClientTlsConfig;
 use utils::{
+    barrier::IdBarrier,
     config::CurpConfig,
     task_manager::{tasks::TaskName, Listener, State, TaskManager},
 };
@@ -47,8 +48,8 @@ use crate::{
         AppendEntriesRequest, AppendEntriesResponse, ConfChange, ConfChangeType, CurpError,
         FetchClusterRequest, FetchClusterResponse, FetchReadStateRequest, FetchReadStateResponse,
         InstallSnapshotRequest, InstallSnapshotResponse, LeaseKeepAliveMsg, MoveLeaderRequest,
-        MoveLeaderResponse, PoolEntry, ProposeConfChangeRequest, ProposeConfChangeResponse,
-        ProposeId, ProposeRequest, ProposeResponse, PublishRequest, PublishResponse, RecordRequest,
+        MoveLeaderResponse, ProposeConfChangeRequest, ProposeConfChangeResponse, ProposeId,
+        ProposeRequest, ProposeResponse, PublishRequest, PublishResponse, RecordRequest,
         RecordResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
         TriggerShutdownResponse, TryBecomeLeaderNowRequest, TryBecomeLeaderNowResponse,
         VoteRequest, VoteResponse,
@@ -188,9 +189,9 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         if cmd.is_read_only() {
             // Use default value for the entry as we don't need to put it into curp log
             let entry = Arc::new(LogEntry::new(0, 0, ProposeId::default(), Arc::clone(&cmd)));
-            let _conflict_cmds = curp.conflict_cmds_uncommitted(PoolEntry::new(id, cmd));
+            let wait_fut = curp.wait_conflicts_synced(cmd);
             let _ignore = tokio::spawn(async move {
-                // TODO: wait for conflict cmds
+                wait_fut.await;
                 if let Err(_) = wait_tx.send(Ok(Some(entry))) {
                     error!("wait_rx accidentally dropped");
                 }
@@ -784,6 +785,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 .new_ucp(Arc::new(Mutex::new(UncomPool::new(ucps))))
                 .as_tx(as_tx.clone())
                 .resp_txs(Arc::new(Mutex::default()))
+                .id_barrier(Arc::new(IdBarrier::new()))
                 .build_raw_curp()
                 .map_err(|e| CurpError::internal(format!("build raw curp failed, {e}")))?,
         );

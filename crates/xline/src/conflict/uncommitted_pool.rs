@@ -7,6 +7,7 @@ use utils::interval_map::IntervalMap;
 use xlineapi::{
     command::{get_lease_ids, Command},
     interval::BytesAffine,
+    RequestWrapper,
 };
 
 use super::{filter_kv, intervals, is_xor_cmd};
@@ -126,6 +127,10 @@ impl UncommittedPool for LeaseUncomPool {
     }
 
     fn all_conflict(&self, entry: &Self::Entry) -> Vec<Self::Entry> {
+        if matches!(*entry.request(), RequestWrapper::LeaseLeasesRequest(_)) {
+            return self.all();
+        }
+
         let ids = get_lease_ids(entry.request());
         ids.into_iter()
             .flat_map(|id| self.leases.get(&id).map(Commands::all).unwrap_or_default())

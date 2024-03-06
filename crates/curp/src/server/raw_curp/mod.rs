@@ -23,6 +23,7 @@ use clippy_utilities::{NumericCast, OverflowArithmetic};
 use dashmap::DashMap;
 use derive_builder::Builder;
 use event_listener::Event;
+use futures::Future;
 use itertools::Itertools;
 use opentelemetry::KeyValue;
 use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
@@ -37,6 +38,7 @@ use tracing::{
 #[cfg(madsim)]
 use utils::ClientTlsConfig;
 use utils::{
+    barrier::IdBarrier,
     config::CurpConfig,
     parking_lot_lock::{MutexMap, RwLockMap},
     task_manager::TaskManager,
@@ -149,6 +151,8 @@ pub(super) struct RawCurpArgs<C: Command, RC: RoleChange> {
     as_tx: flume::Sender<TaskType<C>>,
     /// Response Senders
     resp_txs: Arc<Mutex<HashMap<LogIndex, Arc<ResponseSender>>>>,
+    /// Barrier for waiting unsynced commands
+    id_barrier: Arc<IdBarrier<ProposeId>>,
 }
 
 impl<C: Command, RC: RoleChange> RawCurpBuilder<C, RC> {
@@ -182,6 +186,7 @@ impl<C: Command, RC: RoleChange> RawCurpBuilder<C, RC> {
             .new_ucp(args.new_ucp)
             .as_tx(args.as_tx)
             .resp_txs(args.resp_txs)
+            .id_barrier(args.id_barrier)
             .build()
             .map_err(|e| match e {
                 ContextBuilderError::UninitializedField(s) => {
@@ -340,6 +345,8 @@ struct Context<C: Command, RC: RoleChange> {
     as_tx: flume::Sender<TaskType<C>>,
     /// Response Senders
     resp_txs: Arc<Mutex<HashMap<LogIndex, Arc<ResponseSender>>>>,
+    /// Barrier for waiting unsynced commands
+    id_barrier: Arc<IdBarrier<ProposeId>>,
 }
 
 impl<C: Command, RC: RoleChange> Context<C, RC> {
@@ -411,6 +418,10 @@ impl<C: Command, RC: RoleChange> ContextBuilder<C, RC> {
             resp_txs: match self.resp_txs.take() {
                 Some(value) => value,
                 None => return Err(ContextBuilderError::UninitializedField("resp_txs")),
+            },
+            id_barrier: match self.id_barrier.take() {
+                Some(value) => value,
+                None => return Err(ContextBuilderError::UninitializedField("id_barrier")),
             },
         })
     }
@@ -539,6 +550,23 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         self.entry_process(&mut log_w, Arc::clone(&entry), true, term);
 
         Ok((!conflict).then_some(entry))
+    }
+
+    /// Wait synced for all conflict commands
+    pub(super) fn wait_conflicts_synced(&self, cmd: Arc<C>) -> impl Future<Output = ()> {
+        let conflict_cmds: Vec<_> = self
+            .ctx
+            .new_ucp
+            .lock()
+            .all_conflict(PoolEntry::new(ProposeId::default(), cmd))
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        self.ctx.id_barrier.wait_all(conflict_cmds)
+    }
+
+    pub(super) fn trigger(&self, propose_id: ProposeId) {
+        self.ctx.id_barrier.trigger(propose_id);
     }
 
     /// Returns `CurpError::LeaderTransfer` if the leadership is transferring
@@ -1936,16 +1964,5 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             debug!("{} updates commit index to {index}", self.id());
             self.apply(&mut *log_w);
         }
-    }
-
-    /// Returns all uncommitted commands that conflict with current command
-    pub(super) fn conflict_cmds_uncommitted(&self, entry: PoolEntry<C>) -> Vec<ProposeId> {
-        self.ctx
-            .new_ucp
-            .lock()
-            .all_conflict(entry)
-            .into_iter()
-            .map(|e| e.id)
-            .collect()
     }
 }

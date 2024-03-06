@@ -83,6 +83,7 @@ impl RawCurp<TestCommand, TestRoleChange> {
         let (as_tx, as_rx) = flume::unbounded();
         std::mem::forget(as_rx);
         let resp_txs = Arc::new(Mutex::default());
+        let id_barrier = Arc::new(IdBarrier::new());
 
         Self::builder()
             .cluster_info(cluster_info)
@@ -100,6 +101,7 @@ impl RawCurp<TestCommand, TestRoleChange> {
             .new_ucp(ucp)
             .as_tx(as_tx)
             .resp_txs(resp_txs)
+            .id_barrier(id_barrier)
             .build_raw_curp()
             .unwrap()
     }

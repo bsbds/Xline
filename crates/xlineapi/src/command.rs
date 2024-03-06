@@ -544,8 +544,7 @@ impl CurpCommand for Command {
 
     #[inline]
     fn is_read_only(&self) -> bool {
-        false
-        // self.request().is_read_only()
+        self.request().is_read_only()
     }
 }
 

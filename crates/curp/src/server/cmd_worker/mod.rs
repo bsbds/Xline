@@ -91,12 +91,14 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
                 if er.is_err() {
                     ce.trigger(entry.inflight_id(), entry.index);
                     remove_from_sp_ucp(&sp, &ucp, &entry);
+                    curp.trigger(entry.propose_id);
                     return;
                 }
             }
             let asr = ce.after_sync(cmd.as_ref(), entry.index).await;
             tx.send_synced(SyncedResponse::new_result::<C>(&asr));
             remove_from_sp_ucp(&sp, &ucp, &entry);
+            curp.trigger(entry.propose_id);
         }
         // Follower
         (EntryData::Command(ref cmd), None) => {

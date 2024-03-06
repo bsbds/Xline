@@ -1,7 +1,7 @@
 use std::{collections::HashMap, hash::Hash};
 
 use event_listener::Event;
-use futures::{stream::FuturesOrdered, StreamExt};
+use futures::{stream::FuturesOrdered, Future, FutureExt, StreamExt};
 use parking_lot::Mutex;
 
 /// Barrier for id
@@ -36,13 +36,13 @@ where
     }
 
     /// Wait for a collection of ids.
-    pub async fn wait_all(&self, ids: Vec<Id>) {
+    pub fn wait_all(&self, ids: Vec<Id>) -> impl Future<Output = ()> {
         let mut barriers_l = self.barriers.lock();
         let listeners: FuturesOrdered<_> = ids
             .into_iter()
             .map(|id| barriers_l.entry(id).or_insert_with(Event::new).listen())
             .collect();
-        let _ignore = listeners.collect::<Vec<_>>().await;
+        listeners.collect::<Vec<_>>().map(|_| ())
     }
 
     /// Trigger the barrier of the given inflight id.
