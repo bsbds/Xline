@@ -114,11 +114,17 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         self.curp.check_term(req.term)?;
 
         let (wait_tx, wait_rx) = oneshot::channel();
+        debug!("propose tx len: {}", self.propose_tx.len());
         let _ignore = self.propose_tx.send((req, wait_tx, Arc::clone(&resp_tx)));
+        let id = std::thread::current().id();
+        let start = std::time::Instant::now();
         let to_execute = wait_rx.await??;
+        debug!("thread {id:?} wait execute takes: {:?}", start.elapsed());
 
         if let Some(entry) = to_execute {
+            let start = std::time::Instant::now();
             let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref()).await;
+            debug!("thread {id:?} execute takes: {:?}", start.elapsed());
             let resp = ProposeResponse::new_result::<C>(&er_res, false);
             resp_tx.send_propose(resp);
         }
@@ -162,6 +168,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                             continue;
                         }
                     };
+                    let start = std::time::Instant::now();
                     Self::handle_propose_inner(
                         cmd,
                         req.propose_id(),
@@ -169,15 +176,15 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                         &curp,
                         resp_tx,
                         wait_tx,
-                    )
-                    .await;
+                    );
+                    debug!("handle propose takes: {:?}", start.elapsed());
                 }
             }
         }
         debug!("handle propose task exits");
     }
 
-    async fn handle_propose_inner(
+    fn handle_propose_inner(
         cmd: Arc<C>,
         id: ProposeId,
         term: u64,
@@ -197,9 +204,13 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 }
             });
         } else {
+            let start = std::time::Instant::now();
             let conflict = curp.leader_record(id, Arc::clone(&cmd));
+            println!("leader record takes: {:?}", start.elapsed());
             resp_tx.set_conflict(conflict);
+            let start = std::time::Instant::now();
             let entry_res = curp.push_log(id, cmd, term, resp_tx);
+            println!("push log takes: {:?}", start.elapsed());
             if let Err(_) = wait_tx.send(entry_res) {
                 error!("wait_rx accidentally dropped");
             }

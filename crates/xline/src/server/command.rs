@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use engine::{Snapshot, TransactionApi};
 use event_listener::Event;
 use parking_lot::RwLock;
-use tracing::warn;
+use tracing::{debug, warn};
 use utils::{barrier::IdBarrier, table_names::META_TABLE};
 use xlineapi::{
     command::{Command, CurpClient},
@@ -282,12 +282,15 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         let auth_info = cmd.auth_info();
         let wrapper = cmd.request();
         self.auth_storage.check_permission(wrapper, auth_info)?;
-        match wrapper.backend() {
+        let start = std::time::Instant::now();
+        let res = match wrapper.backend() {
             RequestBackend::Kv => self.kv_storage.execute(wrapper),
             RequestBackend::Auth => self.auth_storage.execute(wrapper),
             RequestBackend::Lease => self.lease_storage.execute(wrapper),
             RequestBackend::Alarm => Ok(self.alarm_storage.execute(wrapper)),
-        }
+        };
+        debug!("execute inner takes: {:?}", start.elapsed());
+        res
     }
 
     async fn after_sync(
