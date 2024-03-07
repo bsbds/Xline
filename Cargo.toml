@@ -20,3 +20,6 @@ resolver = "2"
 
 [workspace.metadata.cargo-machete]
 ignored = ["prost", "workspace-hack"]
+
+[profile.release]
+debug = true
