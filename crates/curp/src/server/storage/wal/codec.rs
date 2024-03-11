@@ -121,11 +121,12 @@ where
         frames: Vec<DataFrame<'_, C>>,
         dst: &mut bytes::BytesMut,
     ) -> Result<(), Self::Error> {
-        let frames_bytes: Vec<_> = frames.into_iter().flat_map(|f| f.encode()).collect();
-        let commit_frame = CommitFrame::new_from_data(&frames_bytes);
-
-        dst.extend(frames_bytes);
-        dst.extend(commit_frame.encode());
+        let initial_len = dst.len();
+        for frame in frames {
+            dst.extend_from_slice(&frame.encode());
+        }
+        let commit_frame = CommitFrame::new_from_data(&dst[initial_len..dst.len()]);
+        dst.extend_from_slice(&commit_frame.encode());
 
         Ok(())
     }
