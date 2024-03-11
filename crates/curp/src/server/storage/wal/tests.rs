@@ -55,9 +55,8 @@ async fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
     };
 
     let config = WALConfig::new(&wal_test_path).with_max_segment_size(TEST_SEGMENT_SIZE);
-    let (mut storage, _logs) = WALStorage::<TestCommand>::new_or_recover(config.clone())
-        .await
-        .unwrap();
+    let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
+    let _logs = storage.recover().await.unwrap();
 
     let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     let num_entries_per_segment = entry_gen.num_entries_per_segment();
@@ -84,7 +83,8 @@ async fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
 async fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncate_at: LogIndex) {
     assert!(num_entries as u64 >= truncate_at);
     let config = WALConfig::new(&wal_test_path).with_max_segment_size(TEST_SEGMENT_SIZE);
-    let (mut storage, _logs) = WALStorage::new_or_recover(config.clone()).await.unwrap();
+    let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
+    let _logs = storage.recover().await.unwrap();
 
     let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     for frame in entry_gen
@@ -105,9 +105,8 @@ async fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
 
     drop(storage);
 
-    let (_storage, logs) = WALStorage::<TestCommand>::new_or_recover(config)
-        .await
-        .unwrap();
+    let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
+    let logs = storage.recover().await.unwrap();
 
     assert_eq!(
         logs.len() as u64,
@@ -121,9 +120,8 @@ async fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
 /// Test if the append and recovery are ok after some event
 async fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) {
     let config = WALConfig::new(&wal_test_path).with_max_segment_size(TEST_SEGMENT_SIZE);
-    let (mut storage, logs_initial) = WALStorage::<TestCommand>::new_or_recover(config.clone())
-        .await
-        .unwrap();
+    let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
+    let logs_initial = storage.recover().await.unwrap();
 
     let next_log_index = logs_initial.last().map_or(0, |e| e.index) + 1;
 
@@ -140,9 +138,8 @@ async fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) 
 
     drop(storage);
 
-    let (_storage, logs) = WALStorage::<TestCommand>::new_or_recover(config)
-        .await
-        .unwrap();
+    let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
+    let logs = storage.recover().await.unwrap();
 
     assert_eq!(
         logs.len(),

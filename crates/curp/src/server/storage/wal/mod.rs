@@ -77,18 +77,31 @@ pub(super) struct WALStorage<C> {
     _phantom: PhantomData<C>,
 }
 
+impl<C> WALStorage<C> {
+    /// Creates a new `LogStorage`
+    pub(super) fn new(config: WALConfig) -> io::Result<WALStorage<C>> {
+        let mut pipeline = FilePipeline::new(config.dir.clone(), config.max_segment_size)?;
+        Ok(Self {
+            config,
+            pipeline,
+            segments: vec![],
+            next_segment_id: 0,
+            next_log_index: 0,
+            _phantom: PhantomData,
+        })
+    }
+}
+
 impl<C> WALStorage<C>
 where
     C: Serialize + DeserializeOwned + Unpin + 'static + std::fmt::Debug,
 {
     /// Recover from the given directory if there's any segments
-    /// Otherwise, creates a new `LogStorage`
-    pub(super) async fn new_or_recover(config: WALConfig) -> io::Result<(Self, Vec<LogEntry<C>>)> {
+    pub(super) async fn recover(&mut self) -> io::Result<Vec<LogEntry<C>>> {
         // We try to recover the removal first
-        SegmentRemover::recover(&config.dir).await?;
+        SegmentRemover::recover(&self.config.dir).await?;
 
-        let mut pipeline = FilePipeline::new(config.dir.clone(), config.max_segment_size)?;
-        let file_paths = util::get_file_paths_with_ext(&config.dir, WAL_FILE_EXT)?;
+        let file_paths = util::get_file_paths_with_ext(&self.config.dir, WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
             .into_iter()
             .map(LockedFile::open_rw)
@@ -96,7 +109,7 @@ where
 
         let segment_futs = lfiles
             .into_iter()
-            .map(|f| WALSegment::open(f, config.max_segment_size));
+            .map(|f| WALSegment::open(f, self.config.max_segment_size));
 
         let mut segments = Self::take_until_io_error(segment_futs).await?;
         segments.sort_unstable();
@@ -127,19 +140,10 @@ where
         let next_segment_id = segments.last().map_or(0, |s| s.id().overflow_add(1));
         let next_log_index = logs.last().map_or(1, |l| l.index.overflow_add(1));
 
-        let mut storage = Self {
-            config,
-            pipeline,
-            segments,
-            next_segment_id,
-            next_log_index,
-            _phantom: PhantomData,
-        };
-
-        storage.open_new_segment().await?;
+        self.open_new_segment().await?;
         info!("WAL successfully recovered");
 
-        Ok((storage, logs))
+        Ok(logs)
     }
 
     /// Send frames with fsync

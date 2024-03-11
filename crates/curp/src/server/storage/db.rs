@@ -3,6 +3,7 @@ use std::{ops::Deref, path::Path};
 use async_trait::async_trait;
 use engine::{Engine, EngineType, StorageEngine, StorageOps, WriteOperation};
 use prost::Message;
+use tokio::sync::Mutex;
 
 use super::{
     wal::{codec::DataFrame, config::WALConfig, WALStorage},
@@ -24,8 +25,6 @@ const MEMBER_ID: &[u8] = b"MemberId";
 
 /// Column family name for curp storage
 const CF: &str = "curp";
-/// Column family name for logs
-const LOGS_CF: &str = "logs";
 /// Column family name for members
 const MEMBERS_CF: &str = "members";
 
@@ -39,7 +38,7 @@ const WAL_SUB_DIR: &str = "wal";
 #[derive(Debug)]
 pub struct DB<C> {
     /// The WAL storage
-    wal: WALStorage<C>,
+    wal: Mutex<WALStorage<C>>,
     /// DB handle
     db: Engine,
 }
@@ -60,10 +59,12 @@ impl<C: Command> StorageApi for DB<C> {
 
     #[inline]
     async fn put_log_entries(
-        &mut self,
+        &self,
         entry: &[&LogEntry<Self::Command>],
     ) -> Result<(), StorageError> {
         self.wal
+            .lock()
+            .await
             .send_sync(
                 entry
                     .into_iter()
@@ -151,31 +152,37 @@ impl<C: Command> StorageApi for DB<C> {
     }
 
     #[inline]
-    async fn recover<D>(
-        data_dir: D,
-    ) -> Result<
-        (
-            Self,
-            (Option<(u64, ServerId)>, Vec<LogEntry<Self::Command>>),
-        ),
-        StorageError,
-    >
-    where
-        D: AsRef<Path> + Send,
-    {
+    async fn recover(
+        &self,
+    ) -> Result<(Option<(u64, ServerId)>, Vec<LogEntry<Self::Command>>), StorageError> {
+        let entries = self.wal.lock().await.recover().await?;
+        let voted_for = self
+            .db
+            .get(CF, VOTE_FOR)?
+            .map(|bytes| bincode::deserialize::<(u64, ServerId)>(&bytes))
+            .transpose()?;
+        Ok((voted_for, entries))
+    }
+}
+
+impl<C> DB<C> {
+    /// Create a new CURP `DB`
+    /// # Errors
+    /// Will return `StorageError` if failed to open the storage
+    #[inline]
+    pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, StorageError> {
         let mut rocksdb_dir = data_dir.as_ref().to_path_buf();
         rocksdb_dir.push(ROCKSDB_SUB_DIR);
         let mut wal_dir = data_dir.as_ref().to_path_buf();
         wal_dir.push(WAL_SUB_DIR);
-        let db = Engine::new(EngineType::Rocks(rocksdb_dir), &[CF])?;
+        let db = Engine::new(EngineType::Rocks(rocksdb_dir), &[CF, MEMBERS_CF])?;
         let wal_config = WALConfig::new(wal_dir);
-        let (wal, entries) = WALStorage::new_or_recover(wal_config).await?;
+        let wal = WALStorage::new(wal_config)?;
 
-        let voted_for = db
-            .get(CF, VOTE_FOR)?
-            .map(|bytes| bincode::deserialize::<(u64, ServerId)>(&bytes))
-            .transpose()?;
-        Ok((DB { wal, db }, (voted_for, entries)))
+        Ok(Self {
+            wal: Mutex::new(wal),
+            db,
+        })
     }
 }
 
@@ -195,7 +202,7 @@ mod tests {
     async fn create_and_recover() -> Result<(), Box<dyn Error>> {
         let db_dir = tempfile::tempdir().unwrap().into_path();
         {
-            let (s, _) = DB::<TestCommand>::recover(&db_dir).await?;
+            let s = DB::<TestCommand>::open(&db_dir)?;
             s.flush_voted_for(1, 222).await?;
             s.flush_voted_for(3, 111).await?;
             let entry0 = LogEntry::new(1, 3, ProposeId(1, 1), Arc::new(TestCommand::default()));
@@ -208,7 +215,8 @@ mod tests {
         }
 
         {
-            let (s, (voted_for, entries)) = DB::<TestCommand>::recover(&db_dir).await?;
+            let s = DB::<TestCommand>::open(&db_dir)?;
+            let (voted_for, entries) = s.recover().await?;
             assert_eq!(voted_for, Some((3, 111)));
             assert_eq!(entries[0].index, 1);
             assert_eq!(entries[1].index, 2);
