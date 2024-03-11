@@ -192,7 +192,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::InnerProtoc
         request: tonic::Request<AppendEntriesRequest>,
     ) -> Result<tonic::Response<AppendEntriesResponse>, tonic::Status> {
         Ok(tonic::Response::new(
-            self.inner.append_entries(request.get_ref())?,
+            self.inner.append_entries(request.get_ref()).await?,
         ))
     }
 

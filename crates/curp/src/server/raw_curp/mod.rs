@@ -27,7 +27,7 @@ use futures::Future;
 use itertools::Itertools;
 use opentelemetry::KeyValue;
 use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, oneshot};
 #[cfg(not(madsim))]
 use tonic::transport::ClientTlsConfig;
 use tracing::{
@@ -49,8 +49,12 @@ use self::{
     state::{CandidateState, LeaderState, State},
 };
 use super::{
-    conflict::spec_pool_new::SpecPool, conflict::uncommitted_pool::UncomPool, curp_node::TaskType,
-    lease_manager::LeaseManagerRef, storage::StorageApi, DB,
+    conflict::spec_pool_new::SpecPool,
+    conflict::uncommitted_pool::UncomPool,
+    curp_node::{Propose, TaskType},
+    lease_manager::LeaseManagerRef,
+    storage::StorageApi,
+    DB,
 };
 use crate::{
     cmd::Command,
@@ -119,8 +123,6 @@ pub(super) struct RawCurpArgs<C: Command, RC: RoleChange> {
     lease_manager: LeaseManagerRef,
     /// Config
     cfg: Arc<CurpConfig>,
-    /// Tx to send log entries
-    log_tx: mpsc::UnboundedSender<Arc<LogEntry<C>>>,
     /// Role change callback
     role_change: RC,
     /// Task manager
@@ -166,11 +168,7 @@ impl<C: Command, RC: RoleChange> RawCurpBuilder<C, RC> {
         ));
         let lst = LeaderState::new(&args.cluster_info.peers_ids());
         let cst = Mutex::new(CandidateState::new(args.cluster_info.all_ids().into_iter()));
-        let log = RwLock::new(Log::new(
-            args.log_tx,
-            args.cfg.batch_max_size,
-            args.cfg.log_entries_cap,
-        ));
+        let log = RwLock::new(Log::new(args.cfg.batch_max_size, args.cfg.log_entries_cap));
 
         let ctx = Context::builder()
             .cluster_info(args.cluster_info)
@@ -508,26 +506,63 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     }
 
     /// Handles record
-    pub(super) fn leader_record(&self, propose_id: ProposeId, cmd: Arc<C>) -> bool {
-        let mut conflict = self
-            .ctx
-            .new_sp
-            .lock()
-            .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)))
-            .is_some();
-        conflict |= self
-            .ctx
-            .new_ucp
-            .lock()
-            .insert(PoolEntry::new(propose_id, Arc::clone(&cmd)));
-        if conflict {
-            metrics::get()
-                .proposals_failed
-                .add(1, &[KeyValue::new("reason", "leader key conflict")]);
+    pub(super) fn leader_record(&self, entries: impl Iterator<Item = PoolEntry<C>>) -> Vec<bool> {
+        let mut sp_l = self.ctx.new_sp.lock();
+        let mut ucp_l = self.ctx.new_ucp.lock();
+        let mut conflicts = Vec::new();
+        for entry in entries {
+            let mut conflict = sp_l.insert(entry.clone()).is_some();
+            conflict |= ucp_l.insert(entry);
+            conflicts.push(conflict);
         }
-        conflict
+        metrics::get().proposals_failed.add(
+            conflicts.iter().filter(|c| **c).count() as u64,
+            &[KeyValue::new("reason", "leader key conflict")],
+        );
+        conflicts
     }
 
+    /// Handles leader propose
+    pub(super) fn push_logs(&self, proposes: Vec<Propose<C>>) -> Vec<Arc<LogEntry<C>>> {
+        let term = proposes
+            .first()
+            .unwrap_or_else(|| unreachable!("no propose in proposes"))
+            .term;
+        let mut log_entries = Vec::with_capacity(proposes.len());
+        let mut to_process = Vec::with_capacity(proposes.len());
+        let mut log_w = self.log.write();
+        let mut resp_txs_l = self.ctx.resp_txs.lock();
+        for propose in proposes {
+            let Propose {
+                cmd,
+                id,
+                term,
+                resp_tx,
+                wait_tx,
+            } = propose;
+            let entry_result = log_w.push(term, id, cmd);
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(e) => {
+                    let _ignore = wait_tx.send(Err(e.into()));
+                    metrics::get()
+                        .proposals_failed
+                        .add(1, &[KeyValue::new("reason", "log serialize failed")]);
+                    continue;
+                }
+            };
+            let index = entry.index;
+            let conflict = resp_tx.is_conflict();
+            let _ignore = resp_txs_l.insert(index, resp_tx);
+            to_process.push((index, conflict));
+            let _ignore = wait_tx.send(Ok((!conflict).then_some(Arc::clone(&entry))));
+            log_entries.push(entry);
+        }
+        self.entry_process_multi(&mut log_w, to_process, term);
+        log_entries
+    }
+
+    #[allow(unused)]
     /// Handles leader propose
     pub(super) fn push_log(
         &self,
@@ -547,7 +582,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let index = entry.index;
         let conflict = resp_tx.is_conflict();
         let _ignore = self.ctx.resp_txs.lock().insert(index, resp_tx);
-        self.entry_process(&mut log_w, Arc::clone(&entry), true, term);
+        self.entry_process_single(&mut log_w, Arc::clone(&entry), true, term);
 
         Ok((!conflict).then_some(entry))
     }
@@ -596,7 +631,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 e
             })?;
         debug!("{} gets new log[{}]", self.id(), entry.index);
-        self.entry_process(&mut log_w, entry, true, st_r.term);
+        self.entry_process_single(&mut log_w, entry, true, st_r.term);
         Ok(())
     }
 
@@ -652,7 +687,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             entry.index,
             FallbackContext::new(Arc::clone(&entry), addrs, name, is_learner),
         );
-        self.entry_process(&mut log_w, entry, conflict, st_r.term);
+        self.entry_process_single(&mut log_w, entry, conflict, st_r.term);
         Ok(())
     }
 
@@ -678,7 +713,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             e
         })?;
         debug!("{} gets new log[{}]", self.id(), entry.index);
-        self.entry_process(&mut log_w, entry, false, st_r.term);
+        self.entry_process_single(&mut log_w, entry, false, st_r.term);
         Ok(())
     }
 
@@ -709,7 +744,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         prev_log_term: u64,
         entries: Vec<LogEntry<C>>,
         leader_commit: LogIndex,
-    ) -> Result<u64, (u64, LogIndex)> {
+    ) -> Result<(u64, Vec<Arc<LogEntry<C>>>), (u64, LogIndex)> {
         if entries.is_empty() {
             trace!(
                 "{} received heartbeat from {}: term({}), commit({}), prev_log_index({}), prev_log_term({})",
@@ -746,7 +781,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
         // append log entries
         let mut log_w = self.log.write();
-        let (cc_entries, fallback_indexes) = log_w
+        let (to_persist, cc_entries, fallback_indexes) = log_w
             .try_append_entries(entries, prev_log_index, prev_log_term)
             .map_err(|_ig| (term, log_w.commit_index + 1))?;
         // fallback overwritten conf change entries
@@ -777,7 +812,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         if prev_commit_index < log_w.commit_index {
             self.apply(&mut *log_w);
         }
-        Ok(term)
+        Ok((term, to_persist))
     }
 
     /// Handle `append_entries` response
@@ -1934,8 +1969,51 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         fallback_info
     }
 
+    /// Notify sync events
+    fn notify_sync_events(&self, log: &Log<C>) {
+        self.ctx.sync_events.iter().for_each(|e| {
+            if let Some(next) = self.lst.get_next_index(*e.key()) {
+                if next > log.base_index && log.has_next_batch(next) {
+                    e.notify(1);
+                }
+            }
+        });
+    }
+
+    /// Update index in single node cluster
+    fn update_index_single_node(&self, log: &mut Log<C>, index: u64, term: u64) {
+        // check if commit_index needs to be updated
+        if self.can_update_commit_index_to(log, index, term) && index > log.commit_index {
+            log.commit_to(index);
+            metrics::get().proposals_committed.observe(index, &[]);
+            metrics::get()
+                .proposals_pending
+                .observe(log.last_log_index().overflow_sub(index), &[]);
+            debug!("{} updates commit index to {index}", self.id());
+            self.apply(&mut *log);
+        }
+    }
+
     /// Entry process shared by `handle_xxx`
-    fn entry_process(
+    fn entry_process_multi(&self, log: &mut Log<C>, entries: Vec<(u64, bool)>, term: u64) {
+        if let Some(last_no_conflict) = entries
+            .iter()
+            .rev()
+            .find(|(_, conflict)| *conflict)
+            .map(|(index, _)| *index)
+        {
+            log.last_exe = last_no_conflict;
+        }
+        let highest_index = entries
+            .last()
+            .unwrap_or_else(|| unreachable!("no log in entries"))
+            .0;
+        self.notify_sync_events(log);
+        self.update_index_single_node(log, highest_index, term);
+    }
+
+    /// Entry process shared by `handle_xxx`
+    fn entry_process_single(
         &self,
         log_w: &mut RwLockWriteGuard<'_, Log<C>>,
         entry: Arc<LogEntry<C>>,
@@ -1946,23 +2024,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         if !conflict {
             log_w.last_exe = index;
         }
-        self.ctx.sync_events.iter().for_each(|e| {
-            if let Some(next) = self.lst.get_next_index(*e.key()) {
-                if next > log_w.base_index && log_w.has_next_batch(next) {
-                    e.notify(1);
-                }
-            }
-        });
-
-        // check if commit_index needs to be updated
-        if self.can_update_commit_index_to(log_w, index, term) && index > log_w.commit_index {
-            log_w.commit_to(index);
-            metrics::get().proposals_committed.observe(index, &[]);
-            metrics::get()
-                .proposals_pending
-                .observe(log_w.last_log_index().overflow_sub(index), &[]);
-            debug!("{} updates commit index to {index}", self.id());
-            self.apply(&mut *log_w);
-        }
+        self.notify_sync_events(log_w);
+        self.update_index_single_node(log_w, index, term);
     }
 }
