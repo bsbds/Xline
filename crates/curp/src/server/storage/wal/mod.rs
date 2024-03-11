@@ -42,7 +42,7 @@ use tracing::{debug, error, info, warn};
 use crate::log_entry::LogEntry;
 
 use self::{
-    codec::{DataFrame, WAL},
+    codec::{DataFrame, DataFrameOwned, WAL},
     config::WALConfig,
     error::{CorruptType, WALError},
     pipeline::FilePipeline,
@@ -143,7 +143,7 @@ where
 
     /// Send frames with fsync
     #[allow(clippy::pattern_type_mismatch)] // Cannot satisfy both clippy
-    pub(super) async fn send_sync(&mut self, item: Vec<DataFrame<C>>) -> io::Result<()> {
+    pub(super) async fn send_sync(&mut self, item: Vec<DataFrame<'_, C>>) -> io::Result<()> {
         let last_segment = self
             .segments
             .last_mut()

@@ -1,7 +1,6 @@
 use std::{path::Path, sync::Arc};
 
 use bytes::BytesMut;
-use curp_external_api::cmd::ProposeId;
 use curp_test_utils::test_cmd::TestCommand;
 use parking_lot::Mutex;
 use tempfile::TempDir;
@@ -9,8 +8,9 @@ use tokio_util::codec::Encoder;
 
 use crate::{
     log_entry::{EntryData, LogEntry},
+    rpc::ProposeId,
     server::storage::wal::{
-        codec::DataFrame, test_util::EntryGenerator, util::get_file_paths_with_ext,
+        codec::DataFrameOwned, test_util::EntryGenerator, util::get_file_paths_with_ext,
     },
 };
 
@@ -65,9 +65,9 @@ async fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
     for frame in entry_gen
         .take(num_entries)
         .into_iter()
-        .map(DataFrame::Entry)
+        .map(DataFrameOwned::Entry)
     {
-        storage.send_sync(vec![frame]).await.unwrap();
+        storage.send_sync(vec![frame.get_ref()]).await.unwrap();
     }
 
     let num_segments = (num_entries + num_entries_per_segment - 1) / num_entries_per_segment;
@@ -90,16 +90,16 @@ async fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
     for frame in entry_gen
         .take(num_entries)
         .into_iter()
-        .map(DataFrame::Entry)
+        .map(DataFrameOwned::Entry)
     {
-        storage.send_sync(vec![frame]).await.unwrap();
+        storage.send_sync(vec![frame.get_ref()]).await.unwrap();
     }
 
     storage.truncate_tail(truncate_at).await;
     let next_entry =
-        LogEntry::<TestCommand>::new(truncate_at + 1, 1, EntryData::Empty(ProposeId(1, 3)));
+        LogEntry::<TestCommand>::new(truncate_at + 1, 1, ProposeId(1, 3), EntryData::Empty);
     storage
-        .send_sync(vec![DataFrame::Entry(next_entry.clone())])
+        .send_sync(vec![DataFrameOwned::Entry(next_entry.clone()).get_ref()])
         .await
         .unwrap();
 
@@ -129,10 +129,13 @@ async fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) 
 
     let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     entry_gen.skip(logs_initial.len());
-    let frames = entry_gen.take(to_append).into_iter().map(DataFrame::Entry);
+    let frames = entry_gen
+        .take(to_append)
+        .into_iter()
+        .map(DataFrameOwned::Entry);
 
     for frame in frames.clone() {
-        storage.send_sync(vec![frame]).await.unwrap();
+        storage.send_sync(vec![frame.get_ref()]).await.unwrap();
     }
 
     drop(storage);
@@ -151,7 +154,7 @@ async fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) 
         logs.into_iter()
             .skip(logs_initial.len())
             .zip(frames)
-            .all(|(x, y)| DataFrame::Entry(x) == y),
+            .all(|(x, y)| DataFrameOwned::Entry(x) == y),
         "log entries mismatched"
     );
 }

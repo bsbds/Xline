@@ -39,7 +39,7 @@ trait FrameEncoder {
 #[derive(Debug)]
 pub(super) struct WAL<C, H = Sha256> {
     /// Frames stored in decoding
-    frames: Vec<DataFrame<C>>,
+    frames: Vec<DataFrameOwned<C>>,
     /// The hasher state for decoding
     hasher: H,
 }
@@ -48,7 +48,7 @@ pub(super) struct WAL<C, H = Sha256> {
 #[derive(Debug)]
 enum WALFrame<C> {
     /// Data frame type
-    Data(DataFrame<C>),
+    Data(DataFrameOwned<C>),
     /// Commit frame type
     Commit(CommitFrame),
 }
@@ -58,9 +58,21 @@ enum WALFrame<C> {
 /// Contains either a log entry or a seal index
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
-pub(crate) enum DataFrame<C> {
+pub(crate) enum DataFrameOwned<C> {
     /// A Frame containing a log entry
     Entry(LogEntry<C>),
+    /// A Frame containing the sealed index
+    SealIndex(LogIndex),
+}
+
+/// The data frame
+///
+/// Contains either a log entry or a seal index
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub(super) enum DataFrame<'a, C> {
+    /// A Frame containing a log entry
+    Entry(&'a LogEntry<C>),
     /// A Frame containing the sealed index
     SealIndex(LogIndex),
 }
@@ -98,7 +110,7 @@ impl<C> WAL<C> {
     }
 }
 
-impl<C> Encoder<Vec<DataFrame<C>>> for WAL<C>
+impl<C> Encoder<Vec<DataFrame<'_, C>>> for WAL<C>
 where
     C: Serialize,
 {
@@ -106,7 +118,7 @@ where
 
     fn encode(
         &mut self,
-        frames: Vec<DataFrame<C>>,
+        frames: Vec<DataFrame<'_, C>>,
         dst: &mut bytes::BytesMut,
     ) -> Result<(), Self::Error> {
         let frames_bytes: Vec<_> = frames.into_iter().flat_map(|f| f.encode()).collect();
@@ -123,7 +135,7 @@ impl<C> Decoder for WAL<C>
 where
     C: Serialize + DeserializeOwned,
 {
-    type Item = Vec<DataFrame<C>>;
+    type Item = Vec<DataFrameOwned<C>>;
 
     type Error = WALError;
 
@@ -137,8 +149,6 @@ where
                         self.hasher.update(decoded_bytes);
                     }
                     WALFrame::Commit(commit) => {
-                        let frames_bytes: Vec<_> =
-                            self.frames.iter().flat_map(DataFrame::encode).collect();
                         let checksum = self.hasher.clone().finalize();
                         self.hasher.reset();
                         if commit.validate(&checksum) {
@@ -211,14 +221,14 @@ where
         let entry: LogEntry<C> = bincode::deserialize(payload)
             .map_err(|e| WALError::Corrupted(CorruptType::Codec(e.to_string())))?;
 
-        Ok(Some((Self::Data(DataFrame::Entry(entry)), 8 + len)))
+        Ok(Some((Self::Data(DataFrameOwned::Entry(entry)), 8 + len)))
     }
 
     /// Decodes an seal index frame from source
     fn decode_seal_index(header: [u8; 8]) -> Result<Option<(Self, usize)>, WALError> {
         let index = Self::decode_u64_from_header(header);
 
-        Ok(Some((Self::Data(DataFrame::SealIndex(index)), 8)))
+        Ok(Some((Self::Data(DataFrameOwned::SealIndex(index)), 8)))
     }
 
     /// Decodes a commit frame from source
@@ -242,7 +252,17 @@ where
     }
 }
 
-impl<C> FrameType for DataFrame<C> {
+impl<C> DataFrameOwned<C> {
+    /// Converts `DataFrameOwned` to `DataFrame`
+    pub(super) fn get_ref(&self) -> DataFrame<'_, C> {
+        match *self {
+            DataFrameOwned::Entry(ref entry) => DataFrame::Entry(entry),
+            DataFrameOwned::SealIndex(index) => DataFrame::SealIndex(index),
+        }
+    }
+}
+
+impl<C> FrameType for DataFrame<'_, C> {
     fn frame_type(&self) -> u8 {
         match *self {
             DataFrame::Entry(_) => ENTRY,
@@ -251,7 +271,7 @@ impl<C> FrameType for DataFrame<C> {
     }
 }
 
-impl<C> FrameEncoder for DataFrame<C>
+impl<C> FrameEncoder for DataFrame<'_, C>
 where
     C: Serialize,
 {
@@ -326,10 +346,10 @@ mod tests {
         let file = TokioFile::from(tempfile().unwrap());
         let mut framed = Framed::new(file, WAL::<TestCommand>::new());
         let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
-        let data_frame = DataFrame::Entry(entry.clone());
-        let seal_frame = DataFrame::<TestCommand>::SealIndex(1);
-        framed.send(vec![data_frame]).await.unwrap();
-        framed.send(vec![seal_frame]).await.unwrap();
+        let data_frame = DataFrameOwned::Entry(entry.clone());
+        let seal_frame = DataFrameOwned::<TestCommand>::SealIndex(1);
+        framed.send(vec![data_frame.get_ref()]).await.unwrap();
+        framed.send(vec![seal_frame.get_ref()]).await.unwrap();
         framed.get_mut().flush().await;
 
         let mut file = framed.into_inner();
@@ -338,10 +358,10 @@ mod tests {
 
         let data_frame_get = &framed.next().await.unwrap().unwrap()[0];
         let seal_frame_get = &framed.next().await.unwrap().unwrap()[0];
-        let DataFrame::Entry(ref entry_get) = *data_frame_get else {
+        let DataFrameOwned::Entry(ref entry_get) = *data_frame_get else {
             panic!("frame should be type: DataFrame::Entry");
         };
-        let DataFrame::SealIndex(ref index) = *seal_frame_get else {
+        let DataFrameOwned::SealIndex(ref index) = *seal_frame_get else {
             panic!("frame should be type: DataFrame::Entry");
         };
 
@@ -354,8 +374,8 @@ mod tests {
         let file = TokioFile::from(tempfile().unwrap());
         let mut framed = Framed::new(file, WAL::<TestCommand>::new());
         let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
-        let data_frame = DataFrame::Entry(entry.clone());
-        framed.send(vec![data_frame]).await.unwrap();
+        let data_frame = DataFrameOwned::Entry(entry.clone());
+        framed.send(vec![data_frame.get_ref()]).await.unwrap();
         framed.get_mut().flush().await;
 
         let mut file = framed.into_inner();
@@ -377,8 +397,8 @@ mod tests {
         let file = TokioFile::from(tempfile().unwrap());
         let mut framed = Framed::new(file, WAL::<TestCommand>::new());
         let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
-        let data_frame = DataFrame::Entry(entry.clone());
-        framed.send(vec![data_frame]).await.unwrap();
+        let data_frame = DataFrameOwned::Entry(entry.clone());
+        framed.send(vec![data_frame.get_ref()]).await.unwrap();
         framed.get_mut().flush().await;
 
         let mut file = framed.into_inner();

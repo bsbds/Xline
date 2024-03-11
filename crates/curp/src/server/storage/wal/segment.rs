@@ -15,7 +15,7 @@ use tokio_util::codec::Framed;
 use crate::log_entry::LogEntry;
 
 use super::{
-    codec::{DataFrame, WAL},
+    codec::{DataFrame, DataFrameOwned, WAL},
     error::{CorruptType, WALError},
     util::{get_checksum, parse_u64, validate_data, LockedFile},
     WAL_FILE_EXT, WAL_MAGIC, WAL_VERSION,
@@ -136,7 +136,7 @@ impl WALSegment {
             let frame = frames
                 .last()
                 .unwrap_or_else(|| unreachable!("a batch should contains at least one frame"));
-            if let DataFrame::SealIndex(index) = *frame {
+            if let DataFrameOwned::SealIndex(index) = *frame {
                 highest_index = index;
             }
         }
@@ -146,7 +146,7 @@ impl WALSegment {
 
         // Get log entries that index is no larger than `highest_index`
         Ok(frame_batches.into_iter().flatten().filter_map(move |f| {
-            if let DataFrame::Entry(e) = f {
+            if let DataFrameOwned::Entry(e) = f {
                 (e.index <= highest_index).then_some(e)
             } else {
                 None
@@ -518,7 +518,7 @@ mod tests {
         let mut seg_framed = Framed::new(&mut segment, WAL::<TestCommand>::new());
         let frames: Vec<_> = (0..100)
             .map(|i| {
-                DataFrame::Entry(LogEntry::new(
+                DataFrameOwned::Entry(LogEntry::new(
                     i,
                     1,
                     crate::rpc::ProposeId(0, 0),
@@ -526,7 +526,10 @@ mod tests {
                 ))
             })
             .collect();
-        seg_framed.send(frames.clone()).await.unwrap();
+        seg_framed
+            .send(frames.iter().map(DataFrameOwned::get_ref).collect())
+            .await
+            .unwrap();
         seg_framed.flush().await.unwrap();
         seg_framed.get_mut().sync_all().await.unwrap();
 
@@ -538,7 +541,7 @@ mod tests {
             .recover_segment_logs::<TestCommand>()
             .await
             .unwrap()
-            .map(|e| DataFrame::Entry(e))
+            .map(|e| DataFrameOwned::Entry(e))
             .collect();
         assert_eq!(frames, recovered);
     }

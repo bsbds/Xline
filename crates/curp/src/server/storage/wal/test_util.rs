@@ -1,12 +1,15 @@
 use bytes::BytesMut;
-use curp_external_api::{cmd::ProposeId, LogIndex};
+use curp_external_api::LogIndex;
 use curp_test_utils::test_cmd::TestCommand;
 use parking_lot::Mutex;
 use tokio_util::codec::Encoder;
 
-use crate::log_entry::{EntryData, LogEntry};
+use crate::{
+    log_entry::{EntryData, LogEntry},
+    rpc::ProposeId,
+};
 
-use super::codec::{DataFrame, WAL};
+use super::codec::{DataFrameOwned, WAL};
 
 pub(super) struct EntryGenerator {
     inner: Mutex<Inner>,
@@ -37,7 +40,7 @@ impl EntryGenerator {
     pub(super) fn next(&self) -> LogEntry<TestCommand> {
         let mut this = self.inner.lock();
         let entry =
-            LogEntry::<TestCommand>::new(this.next_index, 1, EntryData::Empty(ProposeId(1, 2)));
+            LogEntry::<TestCommand>::new(this.next_index, 1, ProposeId(1, 2), EntryData::Empty);
         this.logs_sent.push(entry.clone());
         this.next_index += 1;
         entry
@@ -79,10 +82,13 @@ impl EntryGenerator {
     }
 
     fn entry_size(&self) -> usize {
-        let sample_entry = LogEntry::<TestCommand>::new(1, 1, EntryData::Empty(ProposeId(1, 2)));
+        let sample_entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
         let mut wal_codec = WAL::<TestCommand>::new();
         let mut buf = BytesMut::new();
-        wal_codec.encode(vec![DataFrame::Entry(sample_entry)], &mut buf);
+        wal_codec.encode(
+            vec![DataFrameOwned::Entry(sample_entry).get_ref()],
+            &mut buf,
+        );
         buf.len()
     }
 }
