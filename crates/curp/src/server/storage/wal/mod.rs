@@ -18,6 +18,10 @@ mod remover;
 /// WAL segment
 mod segment;
 
+/// WAL test utils
+#[cfg(test)]
+mod test_util;
+
 /// WAL storage tests
 #[cfg(test)]
 mod tests;
