@@ -74,9 +74,6 @@ pub(super) enum TaskType<C: Command> {
     Snapshot(SnapshotMeta, oneshot::Sender<Snapshot>),
 }
 
-/// Propose result
-pub(super) type ProposeResult<C> = Result<Option<Arc<LogEntry<C>>>, CurpError>;
-
 /// A propose type
 pub(super) struct Propose<C> {
     /// The command of the propose
@@ -88,9 +85,14 @@ pub(super) struct Propose<C> {
     /// for the propose to be accepted.
     pub(super) term: u64,
     /// Tx used for sending back result by the propose handling task
-    pub(super) wait_tx: oneshot::Sender<ProposeResult<C>>,
+    pub(super) wait_tx: flume::Sender<WaitResult<C>>,
     /// Tx used for sending the streaming response back to client
     pub(super) resp_tx: Arc<ResponseSender>,
+}
+
+pub(super) enum WaitResult<C> {
+    Result(Result<Option<Arc<LogEntry<C>>>, CurpError>),
+    FSynced(Result<(), CurpError>),
 }
 
 impl<C> Propose<C>
@@ -100,7 +102,7 @@ where
     /// Attempts to create a new `Propose` from request
     fn try_new(
         req: ProposeRequest,
-        wait_tx: oneshot::Sender<Result<Option<Arc<LogEntry<C>>>, CurpError>>,
+        wait_tx: flume::Sender<WaitResult<C>>,
         resp_tx: Arc<ResponseSender>,
     ) -> Result<Self, CurpError> {
         let cmd: Arc<C> = Arc::new(req.cmd()?);
@@ -116,6 +118,23 @@ where
     /// Returns `true` if the proposed command is read-only
     fn is_read_only(&self) -> bool {
         self.cmd.is_read_only()
+    }
+
+    /// Convert self into parts
+    fn into_parts(
+        self,
+    ) -> (
+        (Arc<C>, ProposeId, u64, Arc<ResponseSender>),
+        flume::Sender<WaitResult<C>>,
+    ) {
+        let Self {
+            cmd,
+            id,
+            term,
+            wait_tx,
+            resp_tx,
+        } = self;
+        ((cmd, id, term, resp_tx), wait_tx)
     }
 }
 
@@ -154,14 +173,18 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         self.check_cluster_version(req.cluster_version)?;
         self.curp.check_term(req.term)?;
 
-        let (wait_tx, wait_rx) = oneshot::channel();
+        let (wait_tx, wait_rx) = flume::bounded(2);
         let propose = Propose::try_new(req, wait_tx, Arc::clone(&resp_tx))?;
         let _ignore = self.propose_tx.send(propose);
-        let to_execute = wait_rx.await??;
+        let WaitResult::Result(wait_res) = wait_rx.recv_async().await? else { unreachable!() };
+        let to_execute = wait_res?;
 
         if let Some(entry) = to_execute {
             let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref()).await;
             let resp = ProposeResponse::new_result::<C>(&er_res, false);
+            if let WaitResult::FSynced(Err(e)) = wait_rx.recv_async().await? {
+                return Err(e);
+            }
             resp_tx.send_propose(resp);
         }
 
@@ -188,17 +211,18 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         shutdown_listener: Listener,
     ) {
         const MAX_BATCH_SIZE: usize = 1024;
-        const HANDLE_INTERVAL: Duration = Duration::from_millis(1);
-        let mut interval = tokio::time::interval(HANDLE_INTERVAL);
         loop {
-            let _ignore = interval.tick().await;
+            let first = rx.recv_async().await.unwrap();
+            let mut addition: Vec<_> = std::iter::repeat_with(|| rx.try_recv())
+                .take(MAX_BATCH_SIZE)
+                .flatten()
+                .collect();
+            addition.push(first);
             if shutdown_listener.is_shutdown() {
                 break;
             }
-            let (read_onlys, mutatives): (Vec<_>, Vec<_>) = rx
-                .try_iter()
-                .take(MAX_BATCH_SIZE)
-                .partition(Propose::is_read_only);
+            let (read_onlys, mutatives): (Vec<_>, Vec<_>) =
+                addition.into_iter().partition(Propose::is_read_only);
             Self::handle_read_onlys(&curp, read_onlys).await;
             Self::handle_mutatives(&curp, storage.as_ref(), mutatives).await;
         }
@@ -213,9 +237,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             let wait_fut = curp.wait_conflicts_synced(cmd);
             let _ignore = tokio::spawn(async move {
                 wait_fut.await;
-                if let Err(_) = wait_tx.send(Ok(Some(entry))) {
-                    error!("wait_rx accidentally dropped");
-                }
+                let _ignore = wait_tx.send(WaitResult::Result(Ok(Some(entry))));
+                let _ignore = wait_tx.send(WaitResult::FSynced(Ok(())));
             });
         }
     }
@@ -236,12 +259,25 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         for (p, conflict) in proposes.iter().zip(conflicts) {
             p.resp_tx.set_conflict(conflict);
         }
-        let log_entries = curp.push_logs(proposes);
+        let (logs, wait_txs): (Vec<_>, Vec<_>) =
+            proposes.into_iter().map(Propose::into_parts).unzip();
+        let (log_entries, push_results) = curp.push_logs(logs);
+        for (wait_tx, result) in wait_txs.iter().zip(push_results) {
+            let _ignore = wait_tx.send(result);
+        }
         if let Err(e) = storage
             .put_log_entries(&log_entries.iter().map(Arc::as_ref).collect::<Vec<_>>())
             .await
         {
             error!("Failed to persistent log: {e}");
+            for wait_tx in wait_txs {
+                let err = CurpError::Internal(format!("log persistent failed: {}", e));
+                let _ignore = wait_tx.send(WaitResult::FSynced(Err(err)));
+            }
+        } else {
+            for wait_tx in wait_txs {
+                let _ignore = wait_tx.send(WaitResult::FSynced(Ok(())));
+            }
         }
     }
 
@@ -775,7 +811,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             .map_err(|e| CurpError::internal(format!("get applied index error, {e}")))?;
         // TODO: after sync task
         let (as_tx, as_rx) = flume::unbounded();
-        let (propose_tx, propose_rx) = flume::unbounded();
+        let (propose_tx, propose_rx) = flume::bounded(4096);
 
         // create curp state machine
         let (voted_for, entries) = storage.recover().await?;

@@ -51,7 +51,7 @@ use self::{
 use super::{
     conflict::spec_pool_new::SpecPool,
     conflict::uncommitted_pool::UncomPool,
-    curp_node::{Propose, TaskType},
+    curp_node::{TaskType, WaitResult},
     lease_manager::LeaseManagerRef,
     storage::StorageApi,
     DB,
@@ -523,28 +523,26 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     }
 
     /// Handles leader propose
-    pub(super) fn push_logs(&self, proposes: Vec<Propose<C>>) -> Vec<Arc<LogEntry<C>>> {
+    pub(super) fn push_logs(
+        &self,
+        proposes: Vec<(Arc<C>, ProposeId, u64, Arc<ResponseSender>)>,
+    ) -> (Vec<Arc<LogEntry<C>>>, Vec<WaitResult<C>>) {
         let term = proposes
             .first()
             .unwrap_or_else(|| unreachable!("no propose in proposes"))
-            .term;
+            .2;
         let mut log_entries = Vec::with_capacity(proposes.len());
+        let mut results = Vec::with_capacity(proposes.len());
         let mut to_process = Vec::with_capacity(proposes.len());
         let mut log_w = self.log.write();
         let mut resp_txs_l = self.ctx.resp_txs.lock();
         for propose in proposes {
-            let Propose {
-                cmd,
-                id,
-                term,
-                resp_tx,
-                wait_tx,
-            } = propose;
+            let (cmd, id, term, resp_tx) = propose;
             let entry_result = log_w.push(term, id, cmd);
             let entry = match entry_result {
                 Ok(e) => e,
                 Err(e) => {
-                    let _ignore = wait_tx.send(Err(e.into()));
+                    results.push(WaitResult::Result(Err(e.into())));
                     metrics::get()
                         .proposals_failed
                         .add(1, &[KeyValue::new("reason", "log serialize failed")]);
@@ -555,11 +553,12 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             let conflict = resp_tx.is_conflict();
             let _ignore = resp_txs_l.insert(index, resp_tx);
             to_process.push((index, conflict));
-            let _ignore = wait_tx.send(Ok((!conflict).then_some(Arc::clone(&entry))));
+            let result = Ok((!conflict).then_some(Arc::clone(&entry)));
+            results.push(WaitResult::Result(result));
             log_entries.push(entry);
         }
         self.entry_process_multi(&mut log_w, to_process, term);
-        log_entries
+        (log_entries, results)
     }
 
     #[allow(unused)]

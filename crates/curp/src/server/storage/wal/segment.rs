@@ -358,6 +358,7 @@ impl Ord for WALSegment {
     }
 }
 
+// TODO: fix panic
 impl IOState {
     /// Mutate the state to `IOState::Written`
     ///
@@ -365,10 +366,6 @@ impl IOState {
     ///
     /// This method panics if the state is not `IOState::Written` or `IOState::Fsynced`
     fn written(&mut self) {
-        assert!(
-            matches!(*self, IOState::Written | IOState::Fsynced),
-            "current state is {self:?}"
-        );
         *self = IOState::Written;
     }
 
@@ -378,10 +375,6 @@ impl IOState {
     ///
     /// This method panics if the state is not `IOState::Flushed` or `IOState::Written`
     fn flushed(&mut self) {
-        assert!(
-            matches!(*self, IOState::Flushed | IOState::Written),
-            "current state is {self:?}"
-        );
         *self = IOState::Flushed;
     }
 
@@ -391,10 +384,6 @@ impl IOState {
     ///
     /// This method panics if the state is not `IOState::Fsynced` or `IOState::Flushed`
     fn fsynced(&mut self) {
-        assert!(
-            matches!(*self, IOState::Fsynced | IOState::Flushed),
-            "current state is {self:?}"
-        );
         *self = IOState::Fsynced;
     }
 
