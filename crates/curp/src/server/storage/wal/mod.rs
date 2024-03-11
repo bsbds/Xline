@@ -80,6 +80,9 @@ pub(super) struct WALStorage<C> {
 impl<C> WALStorage<C> {
     /// Creates a new `LogStorage`
     pub(super) fn new(config: WALConfig) -> io::Result<WALStorage<C>> {
+        if !config.dir.try_exists()? {
+            std::fs::create_dir_all(&config.dir);
+        }
         let mut pipeline = FilePipeline::new(config.dir.clone(), config.max_segment_size)?;
         Ok(Self {
             config,
