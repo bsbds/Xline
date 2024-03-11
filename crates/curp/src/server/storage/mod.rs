@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use async_trait::async_trait;
 use engine::EngineError;
 use thiserror::Error;
@@ -18,8 +20,11 @@ pub enum StorageError {
     #[error("codec error, {0}")]
     Codec(String),
     /// Rocksdb error
-    #[error("internal error, {0}")]
-    Internal(#[from] EngineError),
+    #[error("rocksdb error, {0}")]
+    RocksDB(#[from] EngineError),
+    /// WAL error
+    #[error("wal error, {0}")]
+    WAL(#[from] std::io::Error),
 }
 
 impl From<bincode::Error> for StorageError {
@@ -59,13 +64,26 @@ pub trait StorageApi: Send + Sync {
     fn recover_cluster_info(&self) -> Result<Option<ClusterInfo>, StorageError>;
 
     /// Put log entries in storage
-    async fn put_log_entry(&self, entry: &LogEntry<Self::Command>) -> Result<(), StorageError>;
+    async fn put_log_entries(
+        &mut self,
+        entry: &[&LogEntry<Self::Command>],
+    ) -> Result<(), StorageError>;
 
     /// Recover from persisted storage
     /// Return `voted_for` and all log entries
-    async fn recover(
-        &self,
-    ) -> Result<(Option<(u64, ServerId)>, Vec<LogEntry<Self::Command>>), StorageError>;
+
+    async fn recover<D>(
+        data_dir: D,
+    ) -> Result<
+        (
+            Self,
+            (Option<(u64, ServerId)>, Vec<LogEntry<Self::Command>>),
+        ),
+        StorageError,
+    >
+    where
+        D: AsRef<Path> + Send,
+        Self: Sized;
 }
 
 /// CURP `DB` storage implementation

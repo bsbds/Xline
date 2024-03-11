@@ -674,7 +674,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                     let Some(e) = e else {
                         return;
                     };
-                    if let Err(err) = storage.put_log_entry(e.as_ref()).await {
+                    if let Err(err) = storage.put_log_entries(&[e.as_ref()]).await {
                         error!("storage error, {err}");
                     }
                 }
@@ -682,7 +682,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             }
         }
         while let Ok(e) = log_rx.try_recv() {
-            if let Err(err) = storage.put_log_entry(e.as_ref()).await {
+            if let Err(err) = storage.put_log_entries(&[e.as_ref()]).await {
                 error!("storage error, {err}");
             }
         }

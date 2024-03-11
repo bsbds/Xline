@@ -1,10 +1,10 @@
 #![allow(unused)] // TODO: remove this until used
 
 /// The WAL codec
-mod codec;
+pub(super) mod codec;
 
 /// The config for `WALStorage`
-mod config;
+pub(super) mod config;
 
 /// WAL errors
 mod error;
@@ -61,7 +61,8 @@ const WAL_VERSION: u8 = 0x00;
 const WAL_FILE_EXT: &str = ".wal";
 
 /// The WAL storage
-struct WALStorage<C> {
+#[derive(Debug)]
+pub(super) struct WALStorage<C> {
     /// The directory to store the log files
     config: WALConfig,
     /// The pipeline that pre-allocates files

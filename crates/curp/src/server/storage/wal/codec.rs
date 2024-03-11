@@ -70,7 +70,7 @@ pub(crate) enum DataFrameOwned<C> {
 /// Contains either a log entry or a seal index
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
-pub(super) enum DataFrame<'a, C> {
+pub(crate) enum DataFrame<'a, C> {
     /// A Frame containing a log entry
     Entry(&'a LogEntry<C>),
     /// A Frame containing the sealed index
