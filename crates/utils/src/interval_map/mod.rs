@@ -72,13 +72,13 @@ where
     #[inline]
     pub fn overlap(&self, interval: &Interval<T>) -> bool {
         let node_idx = self.search(interval);
-        !self.nref(node_idx, Node::is_sentinel)
+        !self.node_ref(node_idx, Node::is_sentinel)
     }
 
     /// Finds all intervals in the map that overlaps with the given interval.
     #[inline]
     pub fn find_all_overlap(&self, interval: &Interval<T>) -> Vec<(&Interval<T>, &V)> {
-        if self.nref(self.root, Node::is_sentinel) {
+        if self.node_ref(self.root, Node::is_sentinel) {
             Vec::new()
         } else {
             self.find_all_overlap_inner(self.root, interval)
@@ -89,14 +89,14 @@ where
     #[inline]
     pub fn get(&self, interval: &Interval<T>) -> Option<&V> {
         self.search_exact(interval)
-            .map(|idx| self.nref(idx, Node::value))
+            .map(|idx| self.node_ref(idx, Node::value))
     }
 
     /// Returns a reference to the value corresponding to the key.
     #[inline]
     pub fn get_mut(&mut self, interval: &Interval<T>) -> Option<&mut V> {
         self.search_exact(interval)
-            .map(|idx| self.nmut(idx, Node::value_mut))
+            .map(|idx| self.node_mut(idx, Node::value_mut))
     }
 
     /// Gets an iterator over the entries of the map, sorted by key.
@@ -221,31 +221,31 @@ where
         let mut y = Self::sentinel();
         let mut x = self.root;
 
-        while !self.nref(x, Node::is_sentinel) {
+        while !self.node_ref(x, Node::is_sentinel) {
             y = x;
-            if self.nref(z, Node::interval) == self.nref(y, Node::interval) {
-                let zval = self.nmut(z, Node::take_value);
-                let old_value = self.nmut(y, Node::set_value(zval));
+            if self.node_ref(z, Node::interval) == self.node_ref(y, Node::interval) {
+                let zval = self.node_mut(z, Node::take_value);
+                let old_value = self.node_mut(y, Node::set_value(zval));
                 return Some(old_value);
             }
-            if self.nref(z, Node::interval) < self.nref(x, Node::interval) {
-                x = self.nref(x, Node::left);
+            if self.node_ref(z, Node::interval) < self.node_ref(x, Node::interval) {
+                x = self.node_ref(x, Node::left);
             } else {
-                x = self.nref(x, Node::right);
+                x = self.node_ref(x, Node::right);
             }
         }
-        self.nmut(z, Node::set_parent(y));
-        if self.nref(y, Node::is_sentinel) {
+        self.node_mut(z, Node::set_parent(y));
+        if self.node_ref(y, Node::is_sentinel) {
             self.root = z;
         } else {
-            if self.nref(z, Node::interval) < self.nref(y, Node::interval) {
-                self.nmut(y, Node::set_left(z));
+            if self.node_ref(z, Node::interval) < self.node_ref(y, Node::interval) {
+                self.node_mut(y, Node::set_left(z));
             } else {
-                self.nmut(y, Node::set_right(z));
+                self.node_mut(y, Node::set_right(z));
             }
             self.update_max_bottom_up(y);
         }
-        self.nmut(z, Node::set_color(Color::Red));
+        self.node_mut(z, Node::set_color(Color::Red));
 
         self.insert_fixup(z);
 
@@ -256,29 +256,29 @@ where
     /// Removes a node from the tree.
     fn remove_inner(&mut self, z: NodeIndex<Ix>) {
         let mut y = z;
-        let mut y_orig_color = self.nref(y, Node::color);
+        let mut y_orig_color = self.node_ref(y, Node::color);
         let x;
         if self.left_ref(z, Node::is_sentinel) {
-            x = self.nref(z, Node::right);
+            x = self.node_ref(z, Node::right);
             self.transplant(z, x);
         } else if self.right_ref(z, Node::is_sentinel) {
-            x = self.nref(z, Node::left);
+            x = self.node_ref(z, Node::left);
             self.transplant(z, x);
         } else {
-            y = self.tree_minimum(self.nref(z, Node::right));
-            y_orig_color = self.nref(y, Node::color);
-            x = self.nref(y, Node::right);
-            if self.nref(y, Node::parent) == z {
-                self.nmut(x, Node::set_parent(y));
+            y = self.tree_minimum(self.node_ref(z, Node::right));
+            y_orig_color = self.node_ref(y, Node::color);
+            x = self.node_ref(y, Node::right);
+            if self.node_ref(y, Node::parent) == z {
+                self.node_mut(x, Node::set_parent(y));
             } else {
                 self.transplant(y, x);
-                self.nmut(y, Node::set_right(self.nref(z, Node::right)));
+                self.node_mut(y, Node::set_right(self.node_ref(z, Node::right)));
                 self.right_mut(y, Node::set_parent(y));
             }
             self.transplant(z, y);
-            self.nmut(y, Node::set_left(self.nref(z, Node::left)));
+            self.node_mut(y, Node::set_left(self.node_ref(z, Node::left)));
             self.left_mut(y, Node::set_parent(y));
-            self.nmut(y, Node::set_color(self.nref(z, Node::color)));
+            self.node_mut(y, Node::set_color(self.node_ref(z, Node::color)));
 
             self.update_max_bottom_up(y);
         }
@@ -297,22 +297,22 @@ where
         interval: &Interval<T>,
     ) -> Vec<(&Interval<T>, &V)> {
         let mut list = vec![];
-        if self.nref(x, Node::interval).overlap(interval) {
-            list.push(self.nref(x, |nx| (nx.interval(), nx.value())));
+        if self.node_ref(x, Node::interval).overlap(interval) {
+            list.push(self.node_ref(x, |nx| (nx.interval(), nx.value())));
         }
         if self
             .left_ref(x, Node::sentinel)
             .map(Node::max)
             .is_some_and(|lm| lm >= &interval.low)
         {
-            list.extend(self.find_all_overlap_inner(self.nref(x, Node::left), interval));
+            list.extend(self.find_all_overlap_inner(self.node_ref(x, Node::left), interval));
         }
         if self
             .right_ref(x, Node::sentinel)
-            .map(|r| IntervalRef::new(&self.nref(x, Node::interval).low, r.max()))
+            .map(|r| IntervalRef::new(&self.node_ref(x, Node::interval).low, r.max()))
             .is_some_and(|i| i.overlap(interval))
         {
-            list.extend(self.find_all_overlap_inner(self.nref(x, Node::right), interval));
+            list.extend(self.find_all_overlap_inner(self.node_ref(x, Node::right), interval));
         }
         list
     }
@@ -321,7 +321,7 @@ where
     fn search(&self, interval: &Interval<T>) -> NodeIndex<Ix> {
         let mut x = self.root;
         while self
-            .nref(x, Node::sentinel)
+            .node_ref(x, Node::sentinel)
             .map(Node::interval)
             .is_some_and(|xi| !xi.overlap(interval))
         {
@@ -330,9 +330,9 @@ where
                 .map(Node::max)
                 .is_some_and(|lm| lm > &interval.low)
             {
-                x = self.nref(x, Node::left);
+                x = self.node_ref(x, Node::left);
             } else {
-                x = self.nref(x, Node::right);
+                x = self.node_ref(x, Node::right);
             }
         }
         x
@@ -341,17 +341,17 @@ where
     /// Search for the node with exact the given interval
     fn search_exact(&self, interval: &Interval<T>) -> Option<NodeIndex<Ix>> {
         let mut x = self.root;
-        while !self.nref(x, Node::is_sentinel) {
-            if self.nref(x, Node::interval) == interval {
+        while !self.node_ref(x, Node::is_sentinel) {
+            if self.node_ref(x, Node::interval) == interval {
                 return Some(x);
             }
-            if self.nref(x, Node::max) < &interval.high {
+            if self.node_ref(x, Node::max) < &interval.high {
                 return None;
             }
-            if self.nref(x, Node::interval) > interval {
-                x = self.nref(x, Node::left);
+            if self.node_ref(x, Node::interval) > interval {
+                x = self.node_ref(x, Node::left);
             } else {
-                x = self.nref(x, Node::right);
+                x = self.node_ref(x, Node::right);
             }
         }
         None
@@ -363,16 +363,16 @@ where
             if self.grand_parent_ref(z, Node::is_sentinel) {
                 break;
             }
-            if self.is_left_child(self.nref(z, Node::parent)) {
+            if self.is_left_child(self.node_ref(z, Node::parent)) {
                 let y = self.grand_parent_ref(z, Node::right);
-                if self.nref(y, Node::is_red) {
+                if self.node_ref(y, Node::is_red) {
                     self.parent_mut(z, Node::set_color(Color::Black));
-                    self.nmut(y, Node::set_color(Color::Black));
+                    self.node_mut(y, Node::set_color(Color::Black));
                     self.grand_parent_mut(z, Node::set_color(Color::Red));
                     z = self.parent_ref(z, Node::parent);
                 } else {
                     if self.is_right_child(z) {
-                        z = self.nref(z, Node::parent);
+                        z = self.node_ref(z, Node::parent);
                         self.left_rotate(z);
                     }
                     self.parent_mut(z, Node::set_color(Color::Black));
@@ -381,14 +381,14 @@ where
                 }
             } else {
                 let y = self.grand_parent_ref(z, Node::left);
-                if self.nref(y, Node::is_red) {
+                if self.node_ref(y, Node::is_red) {
                     self.parent_mut(z, Node::set_color(Color::Black));
-                    self.nmut(y, Node::set_color(Color::Black));
+                    self.node_mut(y, Node::set_color(Color::Black));
                     self.grand_parent_mut(z, Node::set_color(Color::Red));
                     z = self.parent_ref(z, Node::parent);
                 } else {
                     if self.is_left_child(z) {
-                        z = self.nref(z, Node::parent);
+                        z = self.node_ref(z, Node::parent);
                         self.right_rotate(z);
                     }
                     self.parent_mut(z, Node::set_color(Color::Black));
@@ -397,70 +397,70 @@ where
                 }
             }
         }
-        self.nmut(self.root, Node::set_color(Color::Black));
+        self.node_mut(self.root, Node::set_color(Color::Black));
     }
 
     /// Restores red-black tree properties after a remove.
     fn remove_fixup(&mut self, mut x: NodeIndex<Ix>) {
-        while x != self.root && self.nref(x, Node::is_black) {
+        while x != self.root && self.node_ref(x, Node::is_black) {
             let mut w;
             if self.is_left_child(x) {
                 w = self.parent_ref(x, Node::right);
-                if self.nref(w, Node::is_red) {
-                    self.nmut(w, Node::set_color(Color::Black));
+                if self.node_ref(w, Node::is_red) {
+                    self.node_mut(w, Node::set_color(Color::Black));
                     self.parent_mut(x, Node::set_color(Color::Red));
-                    self.left_rotate(self.nref(x, Node::parent));
+                    self.left_rotate(self.node_ref(x, Node::parent));
                     w = self.parent_ref(x, Node::right);
                 }
-                if self.nref(w, Node::is_sentinel) {
+                if self.node_ref(w, Node::is_sentinel) {
                     break;
                 }
                 if self.left_ref(w, Node::is_black) && self.right_ref(w, Node::is_black) {
-                    self.nmut(w, Node::set_color(Color::Red));
-                    x = self.nref(x, Node::parent);
+                    self.node_mut(w, Node::set_color(Color::Red));
+                    x = self.node_ref(x, Node::parent);
                 } else {
                     if self.right_ref(w, Node::is_black) {
                         self.left_mut(w, Node::set_color(Color::Black));
-                        self.nmut(w, Node::set_color(Color::Red));
+                        self.node_mut(w, Node::set_color(Color::Red));
                         self.right_rotate(w);
                         w = self.parent_ref(x, Node::right);
                     }
-                    self.nmut(w, Node::set_color(self.parent_ref(x, Node::color)));
+                    self.node_mut(w, Node::set_color(self.parent_ref(x, Node::color)));
                     self.parent_mut(x, Node::set_color(Color::Black));
                     self.right_mut(w, Node::set_color(Color::Black));
-                    self.left_rotate(self.nref(x, Node::parent));
+                    self.left_rotate(self.node_ref(x, Node::parent));
                     x = self.root;
                 }
             } else {
                 w = self.parent_ref(x, Node::left);
-                if self.nref(w, Node::is_red) {
-                    self.nmut(w, Node::set_color(Color::Black));
+                if self.node_ref(w, Node::is_red) {
+                    self.node_mut(w, Node::set_color(Color::Black));
                     self.parent_mut(x, Node::set_color(Color::Red));
-                    self.right_rotate(self.nref(x, Node::parent));
+                    self.right_rotate(self.node_ref(x, Node::parent));
                     w = self.parent_ref(x, Node::left);
                 }
-                if self.nref(w, Node::is_sentinel) {
+                if self.node_ref(w, Node::is_sentinel) {
                     break;
                 }
                 if self.right_ref(w, Node::is_black) && self.left_ref(w, Node::is_black) {
-                    self.nmut(w, Node::set_color(Color::Red));
-                    x = self.nref(x, Node::parent);
+                    self.node_mut(w, Node::set_color(Color::Red));
+                    x = self.node_ref(x, Node::parent);
                 } else {
                     if self.left_ref(w, Node::is_black) {
                         self.right_mut(w, Node::set_color(Color::Black));
-                        self.nmut(w, Node::set_color(Color::Red));
+                        self.node_mut(w, Node::set_color(Color::Red));
                         self.left_rotate(w);
                         w = self.parent_ref(x, Node::left);
                     }
-                    self.nmut(w, Node::set_color(self.parent_ref(x, Node::color)));
+                    self.node_mut(w, Node::set_color(self.parent_ref(x, Node::color)));
                     self.parent_mut(x, Node::set_color(Color::Black));
                     self.left_mut(w, Node::set_color(Color::Black));
-                    self.right_rotate(self.nref(x, Node::parent));
+                    self.right_rotate(self.node_ref(x, Node::parent));
                     x = self.root;
                 }
             }
         }
-        self.nmut(x, Node::set_color(Color::Black));
+        self.node_mut(x, Node::set_color(Color::Black));
     }
 
     /// Binary tree left rotate.
@@ -468,14 +468,14 @@ where
         if self.right_ref(x, Node::is_sentinel) {
             return;
         }
-        let y = self.nref(x, Node::right);
-        self.nmut(x, Node::set_right(self.nref(y, Node::left)));
+        let y = self.node_ref(x, Node::right);
+        self.node_mut(x, Node::set_right(self.node_ref(y, Node::left)));
         if !self.left_ref(y, Node::is_sentinel) {
             self.left_mut(y, Node::set_parent(x));
         }
 
         self.replace_parent(x, y);
-        self.nmut(y, Node::set_left(x));
+        self.node_mut(y, Node::set_left(x));
 
         self.rotate_update_max(x, y);
     }
@@ -485,21 +485,21 @@ where
         if self.left_ref(x, Node::is_sentinel) {
             return;
         }
-        let y = self.nref(x, Node::left);
-        self.nmut(x, Node::set_left(self.nref(y, Node::right)));
+        let y = self.node_ref(x, Node::left);
+        self.node_mut(x, Node::set_left(self.node_ref(y, Node::right)));
         if !self.right_ref(y, Node::is_sentinel) {
             self.right_mut(y, Node::set_parent(x));
         }
 
         self.replace_parent(x, y);
-        self.nmut(y, Node::set_right(x));
+        self.node_mut(y, Node::set_right(x));
 
         self.rotate_update_max(x, y);
     }
 
     /// Replaces parent during a rotation.
     fn replace_parent(&mut self, x: NodeIndex<Ix>, y: NodeIndex<Ix>) {
-        self.nmut(y, Node::set_parent(self.nref(x, Node::parent)));
+        self.node_mut(y, Node::set_parent(self.node_ref(x, Node::parent)));
         if self.parent_ref(x, Node::is_sentinel) {
             self.root = y;
         } else if self.is_left_child(x) {
@@ -507,45 +507,48 @@ where
         } else {
             self.parent_mut(x, Node::set_right(y));
         }
-        self.nmut(x, Node::set_parent(y));
+        self.node_mut(x, Node::set_parent(y));
     }
 
     /// Updates the max value after a rotation.
     fn rotate_update_max(&mut self, x: NodeIndex<Ix>, y: NodeIndex<Ix>) {
-        self.nmut(y, Node::set_max(self.nref(x, Node::max_owned)));
-        let mut max = &self.nref(x, Node::interval).high;
+        self.node_mut(y, Node::set_max(self.node_ref(x, Node::max_owned)));
+        let mut max = &self.node_ref(x, Node::interval).high;
         if let Some(lmax) = self.left_ref(x, Node::sentinel).map(Node::max) {
             max = max.max(lmax);
         }
         if let Some(rmax) = self.right_ref(x, Node::sentinel).map(Node::max) {
             max = max.max(rmax);
         }
-        self.nmut(x, Node::set_max(max.clone()));
+        self.node_mut(x, Node::set_max(max.clone()));
     }
 
     /// Updates the max value towards the root
     fn update_max_bottom_up(&mut self, x: NodeIndex<Ix>) {
         let mut p = x;
-        while !self.nref(p, Node::is_sentinel) {
-            self.nmut(p, Node::set_max(self.nref(p, Node::interval).high.clone()));
-            self.max_from(p, self.nref(p, Node::left));
-            self.max_from(p, self.nref(p, Node::right));
-            p = self.nref(p, Node::parent);
+        while !self.node_ref(p, Node::is_sentinel) {
+            self.node_mut(
+                p,
+                Node::set_max(self.node_ref(p, Node::interval).high.clone()),
+            );
+            self.max_from(p, self.node_ref(p, Node::left));
+            self.max_from(p, self.node_ref(p, Node::right));
+            p = self.node_ref(p, Node::parent);
         }
     }
 
     /// Updates a nodes value from a child node.
     fn max_from(&mut self, x: NodeIndex<Ix>, c: NodeIndex<Ix>) {
-        if let Some(cmax) = self.nref(c, Node::sentinel).map(Node::max) {
-            let max = self.nref(x, Node::max).max(cmax).clone();
-            self.nmut(x, Node::set_max(max));
+        if let Some(cmax) = self.node_ref(c, Node::sentinel).map(Node::max) {
+            let max = self.node_ref(x, Node::max).max(cmax).clone();
+            self.node_mut(x, Node::set_max(max));
         }
     }
 
     /// Finds the node with the minimum interval.
     fn tree_minimum(&self, mut x: NodeIndex<Ix>) -> NodeIndex<Ix> {
         while !self.left_ref(x, Node::is_sentinel) {
-            x = self.nref(x, Node::left);
+            x = self.node_ref(x, Node::left);
         }
         x
     }
@@ -560,9 +563,9 @@ where
             } else {
                 self.parent_mut(u, Node::set_right(v));
             }
-            self.update_max_bottom_up(self.nref(u, Node::parent));
+            self.update_max_bottom_up(self.node_ref(u, Node::parent));
         }
-        self.nmut(v, Node::set_parent(self.nref(u, Node::parent)));
+        self.node_mut(v, Node::set_parent(self.node_ref(u, Node::parent)));
     }
 
     /// Checks if a node is a left child of its parent.
@@ -601,7 +604,7 @@ impl<'a, T, V, Ix> IntervalMap<T, V, Ix>
 where
     Ix: IndexType,
 {
-    fn nref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    fn node_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
@@ -609,7 +612,7 @@ where
         op(&self.nodes[node.index()])
     }
 
-    fn nmut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    fn node_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
@@ -713,9 +716,9 @@ where
     /// Pushes x and x's left sub tree to stack.
     fn left_tree(map_ref: &IntervalMap<T, V, Ix>, mut x: NodeIndex<Ix>) -> Vec<NodeIndex<Ix>> {
         let mut nodes = vec![];
-        while !map_ref.nref(x, Node::is_sentinel) {
+        while !map_ref.node_ref(x, Node::is_sentinel) {
             nodes.push(x);
-            x = map_ref.nref(x, Node::left);
+            x = map_ref.node_ref(x, Node::left);
         }
         nodes
     }
@@ -740,9 +743,9 @@ where
         let x = stack.pop().unwrap();
         stack.extend(Self::left_tree(
             self.map_ref,
-            self.map_ref.nref(x, Node::right),
+            self.map_ref.node_ref(x, Node::right),
         ));
-        Some(self.map_ref.nref(x, |xn| (xn.interval(), xn.value())))
+        Some(self.map_ref.node_ref(x, |xn| (xn.interval(), xn.value())))
     }
 }
 
@@ -786,11 +789,11 @@ where
     #[inline]
     pub fn or_insert(self, default: V) -> &'a mut V {
         match self {
-            Entry::Occupied(entry) => entry.map_ref.nmut(entry.node, Node::value_mut),
+            Entry::Occupied(entry) => entry.map_ref.node_mut(entry.node, Node::value_mut),
             Entry::Vacant(entry) => {
                 let entry_idx = NodeIndex::new(entry.map_ref.nodes.len());
                 let _ignore = entry.map_ref.insert(entry.interval, default);
-                entry.map_ref.nmut(entry_idx, Node::value_mut)
+                entry.map_ref.node_mut(entry_idx, Node::value_mut)
             }
         }
     }
@@ -809,7 +812,7 @@ where
     {
         match self {
             Entry::Occupied(entry) => {
-                f(entry.map_ref.nmut(entry.node, Node::value_mut));
+                f(entry.map_ref.node_mut(entry.node, Node::value_mut));
                 Self::Occupied(entry)
             }
             Entry::Vacant(entry) => Self::Vacant(entry),

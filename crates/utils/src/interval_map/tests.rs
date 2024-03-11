@@ -50,13 +50,13 @@ impl<V> IntervalMap<i32, V> {
     }
 
     fn check_max_inner(&self, x: NodeIndex<u32>) -> i32 {
-        if self.nref(x, Node::is_sentinel) {
+        if self.node_ref(x, Node::is_sentinel) {
             return 0;
         }
-        let l_max = self.check_max_inner(self.nref(x, Node::left));
-        let r_max = self.check_max_inner(self.nref(x, Node::right));
-        let max = self.nref(x, |x| x.interval().high.max(l_max).max(r_max));
-        assert_eq!(self.nref(x, Node::max_owned), max);
+        let l_max = self.check_max_inner(self.node_ref(x, Node::left));
+        let r_max = self.check_max_inner(self.node_ref(x, Node::right));
+        let max = self.node_ref(x, |x| x.interval().high.max(l_max).max(r_max));
+        assert_eq!(self.node_ref(x, Node::max_owned), max);
         max
     }
 
@@ -67,31 +67,34 @@ impl<V> IntervalMap<i32, V> {
     /// 5. For each node, all simple paths from the node to descendant leaves contain the
     /// same number of black nodes.
     fn check_rb_properties(&self) {
-        assert!(matches!(self.nref(self.root, Node::color), Color::Black));
+        assert!(matches!(
+            self.node_ref(self.root, Node::color),
+            Color::Black
+        ));
         self.check_children_color(self.root);
         self.check_black_height(self.root);
     }
 
     fn check_children_color(&self, x: NodeIndex<u32>) {
-        if self.nref(x, Node::is_sentinel) {
+        if self.node_ref(x, Node::is_sentinel) {
             return;
         }
-        self.check_children_color(self.nref(x, Node::left));
-        self.check_children_color(self.nref(x, Node::right));
-        if self.nref(x, Node::is_red) {
+        self.check_children_color(self.node_ref(x, Node::left));
+        self.check_children_color(self.node_ref(x, Node::right));
+        if self.node_ref(x, Node::is_red) {
             assert!(matches!(self.left_ref(x, Node::color), Color::Black));
             assert!(matches!(self.right_ref(x, Node::color), Color::Black));
         }
     }
 
     fn check_black_height(&self, x: NodeIndex<u32>) -> usize {
-        if self.nref(x, Node::is_sentinel) {
+        if self.node_ref(x, Node::is_sentinel) {
             return 0;
         }
-        let lefth = self.check_black_height(self.nref(x, Node::left));
-        let righth = self.check_black_height(self.nref(x, Node::right));
+        let lefth = self.check_black_height(self.node_ref(x, Node::left));
+        let righth = self.check_black_height(self.node_ref(x, Node::right));
         assert_eq!(lefth, righth);
-        if self.nref(x, Node::is_black) {
+        if self.node_ref(x, Node::is_black) {
             return lefth + 1;
         }
         lefth
