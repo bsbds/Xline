@@ -56,7 +56,7 @@ impl<V> IntervalMap<i32, V> {
         let l_max = self.check_max_inner(self.node_ref(x, Node::left));
         let r_max = self.check_max_inner(self.node_ref(x, Node::right));
         let max = self.node_ref(x, |x| x.interval().high.max(l_max).max(r_max));
-        assert_eq!(self.node_ref(x, Node::max_owned), max);
+        assert_eq!(self.max(x), Some(&max));
         max
     }
 
