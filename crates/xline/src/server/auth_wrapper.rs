@@ -10,7 +10,7 @@ use curp::{
         ShutdownResponse,
     },
 };
-use tokio_stream::wrappers::ReceiverStream;
+use flume::r#async::RecvStream;
 use tracing::debug;
 use xlineapi::command::Command;
 
@@ -37,7 +37,7 @@ impl AuthWrapper {
 
 #[tonic::async_trait]
 impl Protocol for AuthWrapper {
-    type ProposeStreamStream = ReceiverStream<Result<OpResponse, tonic::Status>>;
+    type ProposeStreamStream = RecvStream<'static, Result<OpResponse, tonic::Status>>;
 
     async fn propose_stream(
         &self,

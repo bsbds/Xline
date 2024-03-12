@@ -1,8 +1,8 @@
 use std::{fmt::Debug, sync::Arc};
 
 use engine::SnapshotAllocator;
+use flume::r#async::RecvStream;
 use tokio::sync::broadcast;
-use tokio_stream::wrappers::ReceiverStream;
 #[cfg(not(madsim))]
 use tonic::transport::ClientTlsConfig;
 use tracing::instrument;
@@ -78,19 +78,19 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> Clone for Rpc<C, CE, RC
 
 #[tonic::async_trait]
 impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol for Rpc<C, CE, RC> {
-    type ProposeStreamStream = ReceiverStream<Result<OpResponse, tonic::Status>>;
+    type ProposeStreamStream = RecvStream<'static, Result<OpResponse, tonic::Status>>;
 
     async fn propose_stream(
         &self,
         request: tonic::Request<ProposeRequest>,
     ) -> Result<tonic::Response<Self::ProposeStreamStream>, tonic::Status> {
-        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let (tx, rx) = flume::bounded(2);
         let resp_tx = Arc::new(ResponseSender::new(tx));
         self.inner
             .propose_stream(request.into_inner(), resp_tx)
             .await?;
 
-        Ok(tonic::Response::new(ReceiverStream::new(rx)))
+        Ok(tonic::Response::new(rx.into_stream()))
     }
 
     #[instrument(skip_all, name = "curp_record")]

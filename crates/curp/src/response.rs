@@ -5,7 +5,6 @@ use std::{
 
 use curp_external_api::cmd::Command;
 use futures::Stream;
-use tokio::sync::mpsc::Sender;
 use tokio_stream::StreamExt;
 use tonic::Status;
 
@@ -15,14 +14,14 @@ use crate::rpc::{CurpError, OpResponse, ProposeResponse, ResponseOp, SyncedRespo
 #[derive(Debug)]
 pub(super) struct ResponseSender {
     /// The stream sender
-    tx: Sender<Result<OpResponse, Status>>,
+    tx: flume::Sender<Result<OpResponse, Status>>,
     /// Whether the command will be speculatively executed
     conflict: AtomicBool,
 }
 
 impl ResponseSender {
     /// Creates a new `ResponseSender`
-    pub(super) fn new(tx: Sender<Result<OpResponse, Status>>) -> ResponseSender {
+    pub(super) fn new(tx: flume::Sender<Result<OpResponse, Status>>) -> ResponseSender {
         ResponseSender {
             tx,
             conflict: AtomicBool::new(false),
