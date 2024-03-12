@@ -571,10 +571,10 @@ impl KvStore {
                 .execute_range(&txn_db, &txn_index, req)
                 .map(Into::into)?,
             RequestWrapper::PutRequest(ref req) => self
-                .execute_put(&txn_db, &mut txn_index, req, fake_revision, &mut 0)
+                .execute_put(&txn_db, &mut txn_index, req)
                 .map(Into::into)?,
             RequestWrapper::DeleteRangeRequest(ref req) => self
-                .execute_delete_range(&txn_db, &mut txn_index, req, fake_revision, &mut 0)
+                .execute_delete_range(&txn_db, &mut txn_index, req)
                 .map(Into::into)?,
             RequestWrapper::TxnRequest(ref req) => self
                 .execute_txn(&txn_db, &mut txn_index, req, fake_revision, &mut 0)
@@ -648,8 +648,48 @@ impl KvStore {
         Ok(response)
     }
 
+    /// Generates `PutResponse`
+    fn generate_put_resp(
+        &self,
+        req: &PutRequest,
+        txn_db: &Transaction,
+        txn_index: &mut IndexTransaction,
+    ) -> Result<(PutResponse, Option<KeyValue>), ExecuteError> {
+        let response = PutResponse {
+            header: Some(self.header_gen.gen_header()),
+            ..Default::default()
+        };
+        if req.lease != 0 && self.lease_collection.look_up(req.lease).is_none() {
+            return Err(ExecuteError::LeaseNotFound(req.lease));
+        };
+
+        if req.prev_kv || req.ignore_lease || req.ignore_value {
+            let prev_kv = KvStoreInner::get_range(txn_db, txn_index, &req.key, &[], 0)?.pop();
+            if prev_kv.is_none() && (req.ignore_lease || req.ignore_value) {
+                return Err(ExecuteError::KeyNotFound);
+            }
+            return Ok((response, prev_kv));
+        }
+
+        Ok((response, None))
+    }
+
     /// Handle `PutRequest`
     fn execute_put(
+        &self,
+        txn_db: &Transaction,
+        txn_index: &mut IndexTransaction,
+        req: &PutRequest,
+    ) -> Result<PutResponse, ExecuteError> {
+        let (mut response, prev_kv) = self.generate_put_resp(req, txn_db, txn_index)?;
+        if req.prev_kv {
+            response.prev_kv = prev_kv;
+        }
+        Ok(response)
+    }
+
+    /// Handle `PutRequest`
+    fn execute_txn_put(
         &self,
         txn_db: &Transaction,
         txn_index: &mut IndexTransaction,
@@ -657,13 +697,7 @@ impl KvStore {
         revision: i64,
         sub_revision: &mut i64,
     ) -> Result<PutResponse, ExecuteError> {
-        let mut response = PutResponse {
-            header: Some(self.header_gen.gen_header()),
-            ..Default::default()
-        };
-        if req.lease != 0 && self.lease_collection.look_up(req.lease).is_none() {
-            return Err(ExecuteError::LeaseNotFound(req.lease));
-        };
+        let (mut response, prev_kv) = self.generate_put_resp(req, txn_db, txn_index)?;
         let new_rev = txn_index.register_revision(&req.key, revision, *sub_revision);
         let mut kv = KeyValue {
             key: req.key.clone(),
@@ -673,23 +707,26 @@ impl KvStore {
             version: new_rev.version,
             lease: req.lease,
         };
-
-        if req.prev_kv || req.ignore_lease || req.ignore_value {
-            let prev_kv = KvStoreInner::get_range(txn_db, txn_index, &req.key, &[], 0)?.pop();
-            if req.ignore_lease || req.ignore_value {
-                let prev = prev_kv.as_ref().ok_or(ExecuteError::KeyNotFound)?;
-                if req.ignore_lease {
-                    kv.lease = prev.lease;
-                }
-                if req.ignore_value {
-                    kv.value = prev.value.clone();
-                }
-            }
-            if req.prev_kv {
-                response.prev_kv = prev_kv;
-            }
-        };
-
+        if req.ignore_lease {
+            kv.lease = prev_kv
+                .as_ref()
+                .unwrap_or_else(|| {
+                    unreachable!("Should returns an error when prev kv does not exist")
+                })
+                .lease;
+        }
+        if req.ignore_value {
+            kv.value = prev_kv
+                .as_ref()
+                .unwrap_or_else(|| {
+                    unreachable!("Should returns an error when prev kv does not exist")
+                })
+                .value
+                .clone();
+        }
+        if req.prev_kv {
+            response.prev_kv = prev_kv;
+        }
         txn_db.write_op(WriteOp::PutKeyValue(new_rev.as_revision(), kv.clone()))?;
         *sub_revision = sub_revision.overflow_add(1);
         let revs = vec![(
@@ -706,14 +743,12 @@ impl KvStore {
         Ok(response)
     }
 
-    /// Handle `DeleteRangeRequest`
-    fn execute_delete_range<T>(
+    /// Generates `DeleteRangeResponse`
+    fn generate_delete_range_resp<T>(
         &self,
+        req: &DeleteRangeRequest,
         txn_db: &T,
         txn_index: &mut IndexTransaction,
-        req: &DeleteRangeRequest,
-        revision: i64,
-        sub_revision: &mut i64,
     ) -> Result<DeleteRangeResponse, ExecuteError>
     where
         T: XlineStorageOps,
@@ -727,7 +762,35 @@ impl KvStore {
         if req.prev_kv {
             response.prev_kvs = prev_kvs;
         }
+        Ok(response)
+    }
 
+    /// Handle `DeleteRangeRequest`
+    fn execute_delete_range<T>(
+        &self,
+        txn_db: &T,
+        txn_index: &mut IndexTransaction,
+        req: &DeleteRangeRequest,
+    ) -> Result<DeleteRangeResponse, ExecuteError>
+    where
+        T: XlineStorageOps,
+    {
+        self.generate_delete_range_resp(req, txn_db, txn_index)
+    }
+
+    /// Handle `DeleteRangeRequest`
+    fn execute_txn_delete_range<T>(
+        &self,
+        txn_db: &T,
+        txn_index: &mut IndexTransaction,
+        req: &DeleteRangeRequest,
+        revision: i64,
+        sub_revision: &mut i64,
+    ) -> Result<DeleteRangeResponse, ExecuteError>
+    where
+        T: XlineStorageOps,
+    {
+        let response = self.generate_delete_range_resp(req, txn_db, txn_index)?;
         let _keys = Self::delete_keys(
             txn_db,
             txn_index,
@@ -769,10 +832,10 @@ impl KvStore {
                     .execute_txn(txn_db, txn_index, r, revision, sub_revision)
                     .map(Into::into),
                 Request::RequestPut(ref r) => self
-                    .execute_put(txn_db, txn_index, r, revision, sub_revision)
+                    .execute_txn_put(txn_db, txn_index, r, revision, sub_revision)
                     .map(Into::into),
                 Request::RequestDeleteRange(ref r) => self
-                    .execute_delete_range(txn_db, txn_index, r, revision, sub_revision)
+                    .execute_txn_delete_range(txn_db, txn_index, r, revision, sub_revision)
                     .map(Into::into),
             })
             .collect::<Result<Vec<ResponseWrapper>, _>>()?;
