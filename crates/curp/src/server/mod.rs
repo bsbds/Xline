@@ -80,12 +80,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> Clone for Rpc<C, CE, RC
 impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol for Rpc<C, CE, RC> {
     type ProposeStreamStream = ReceiverStream<Result<OpResponse, tonic::Status>>;
 
-    #[instrument(skip_all, name = "curp_propose_stream")]
     async fn propose_stream(
         &self,
         request: tonic::Request<ProposeRequest>,
     ) -> Result<tonic::Response<Self::ProposeStreamStream>, tonic::Status> {
-        request.metadata().extract_span();
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         let resp_tx = Arc::new(ResponseSender::new(tx));
         self.inner
