@@ -17,7 +17,7 @@ use super::revision::{KeyRevision, Revision};
 use crate::server::command::RangeType;
 
 /// A Key revisions map
-type KeyRevMap = SkipMap<Vec<u8>, RwLock<Vec<KeyRevision>>>;
+type KeyRevMap = RwLock<BTreeMap<Vec<u8>, Vec<KeyRevision>>>;
 
 /// Keys to revisions mapping
 #[derive(Debug)]
@@ -39,7 +39,7 @@ impl Index {
     /// New `Index`
     pub(crate) fn new() -> Self {
         Self {
-            inner: Arc::new(SkipMap::new()),
+            inner: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -82,23 +82,21 @@ impl Index {
     /// Get all revisions that need to be kept after compact at the given revision
     pub(crate) fn keep(&self, at_rev: i64) -> HashSet<Revision> {
         let mut revs = HashSet::new();
-        self.inner.iter().for_each(|entry| {
-            entry.value().map_read(|revisions| {
-                if let Some(revision) = revisions.first() {
-                    if revision.mod_revision < at_rev {
-                        let pivot = revisions.partition_point(|rev| rev.mod_revision <= at_rev);
-                        let compacted_last_idx = pivot.overflow_sub(1);
-                        let key_rev = revisions.get(compacted_last_idx).unwrap_or_else(|| {
-                            unreachable!(
-                                "Oops, the key revision at {compacted_last_idx} should not be None",
-                            )
-                        });
-                        if !key_rev.is_deleted() {
-                            _ = revs.insert(key_rev.as_revision());
-                        }
+        self.inner.read().values().for_each(|revisions| {
+            if let Some(revision) = revisions.first() {
+                if revision.mod_revision < at_rev {
+                    let pivot = revisions.partition_point(|rev| rev.mod_revision <= at_rev);
+                    let compacted_last_idx = pivot.overflow_sub(1);
+                    let key_rev = revisions.get(compacted_last_idx).unwrap_or_else(|| {
+                        unreachable!(
+                            "Oops, the key revision at {compacted_last_idx} should not be None",
+                        )
+                    });
+                    if !key_rev.is_deleted() {
+                        _ = revs.insert(key_rev.as_revision());
                     }
                 }
-            });
+            }
         });
         revs
     }
@@ -153,10 +151,10 @@ impl IndexTransaction {
     /// Gets the revisions for a single key
     fn one_key_revisions(&self, key: &[u8]) -> Vec<KeyRevision> {
         self.index_ref
+            .read()
             .get(key)
             .into_iter()
-            .map(Self::entry_read)
-            .map(|(_, v)| v)
+            .cloned()
             .chain(self.state.get(key).into_iter().cloned())
             .flatten()
             .collect()
@@ -167,8 +165,9 @@ impl IndexTransaction {
         let mut map: BTreeMap<Vec<u8>, Vec<KeyRevision>> = BTreeMap::new();
         for (key, value) in self
             .index_ref
+            .read()
             .range(range.clone())
-            .map(Self::entry_read)
+            .map(|(k, v)| (k.clone(), v.clone()))
             .chain(self.state.range(range).map(|(k, v)| (k.clone(), v.clone())))
         {
             let entry = map.entry(key.clone()).or_default();
@@ -182,8 +181,9 @@ impl IndexTransaction {
         let mut map: BTreeMap<Vec<u8>, Vec<KeyRevision>> = BTreeMap::new();
         for (key, value) in self
             .index_ref
+            .read()
             .iter()
-            .map(Self::entry_read)
+            .map(|(k, v)| (k.clone(), v.clone()))
             .chain(self.state.clone().into_iter())
         {
             let entry = map.entry(key.clone()).or_default();
@@ -297,31 +297,22 @@ impl IndexOperate for Index {
         match RangeType::get_range_type(key, range_end) {
             RangeType::OneKey => self
                 .inner
+                .read()
                 .get(key)
-                .map(|entry| {
-                    entry
-                        .value()
-                        .map_read(|revs| Self::filter_revision(revs.as_ref(), revision))
-                })
+                .map(|revs| Self::filter_revision(revs.as_ref(), revision))
                 .unwrap_or_default(),
             RangeType::AllKeys => self
                 .inner
-                .iter()
-                .flat_map(|entry| {
-                    entry
-                        .value()
-                        .map_read(|revs| Self::filter_revision(revs.as_ref(), revision))
-                })
+                .read()
+                .values()
+                .flat_map(|revs| Self::filter_revision(revs.as_ref(), revision))
                 .sorted()
                 .collect(),
             RangeType::Range => self
                 .inner
+                .read()
                 .range(KeyRange::new(key, range_end))
-                .flat_map(|entry| {
-                    entry
-                        .value()
-                        .map_read(|revs| Self::filter_revision(revs.as_ref(), revision))
-                })
+                .flat_map(|(_, revs)| Self::filter_revision(revs.as_ref(), revision))
                 .sorted()
                 .collect(),
         }
@@ -335,52 +326,47 @@ impl IndexOperate for Index {
         create_revision: i64,
         version: i64,
     ) {
-        self.inner
-            .get_or_insert(key, RwLock::new(Vec::new()))
-            .value()
-            .map_write(|mut revisions| {
-                revisions.push(KeyRevision::new(
-                    create_revision,
-                    version,
-                    revision,
-                    sub_revision,
-                ));
-            });
+        let mut inner_w = self.inner.write();
+        let revisions = inner_w.entry(key).or_default();
+        revisions.push(KeyRevision::new(
+            create_revision,
+            version,
+            revision,
+            sub_revision,
+        ));
     }
 
     fn compact(&self, at_rev: i64) -> Vec<KeyRevision> {
         let mut revs = Vec::new();
         let mut del_keys = Vec::new();
 
-        self.inner.iter().for_each(|entry| {
-            entry.value().map_write(|mut revisions| {
-                if let Some(revision) = revisions.first() {
-                    if revision.mod_revision < at_rev {
-                        let pivot = revisions.partition_point(|rev| rev.mod_revision <= at_rev);
-                        let compacted_last_idx = pivot.overflow_sub(1);
-                        // There is at least 1 element in the first partition, so the key revision at `compacted_last_idx`
-                        // must exist.
-                        let key_rev = revisions.get(compacted_last_idx).unwrap_or_else(|| {
-                            unreachable!(
-                                "Oops, the key revision at {compacted_last_idx} should not be None",
-                            )
-                        });
-                        let compact_revs = if key_rev.is_deleted() {
-                            revisions.drain(..=compacted_last_idx)
-                        } else {
-                            revisions.drain(..compacted_last_idx)
-                        };
-                        revs.extend(compact_revs.into_iter());
+        self.inner.write().iter_mut().for_each(|(key, revisions)| {
+            if let Some(revision) = revisions.first() {
+                if revision.mod_revision < at_rev {
+                    let pivot = revisions.partition_point(|rev| rev.mod_revision <= at_rev);
+                    let compacted_last_idx = pivot.overflow_sub(1);
+                    // There is at least 1 element in the first partition, so the key revision at `compacted_last_idx`
+                    // must exist.
+                    let key_rev = revisions.get(compacted_last_idx).unwrap_or_else(|| {
+                        unreachable!(
+                            "Oops, the key revision at {compacted_last_idx} should not be None",
+                        )
+                    });
+                    let compact_revs = if key_rev.is_deleted() {
+                        revisions.drain(..=compacted_last_idx)
+                    } else {
+                        revisions.drain(..compacted_last_idx)
+                    };
+                    revs.extend(compact_revs.into_iter());
 
-                        if revisions.is_empty() {
-                            del_keys.push(entry.key().clone());
-                        }
+                    if revisions.is_empty() {
+                        del_keys.push(key.clone());
                     }
                 }
-            });
+            }
         });
         for key in del_keys {
-            let _ignore = self.inner.remove(&key);
+            let _ignore = self.inner.write().remove(&key);
         }
         revs
     }
@@ -455,11 +441,10 @@ impl IndexTransactionOperate for IndexTransaction {
     }
 
     fn commit(self) {
+        let mut index_w = self.index_ref.write();
         for (key, state_revs) in self.state {
-            let index_entry = self.index_ref.get_or_insert(key, RwLock::default());
-            index_entry
-                .value()
-                .map_write(|mut revs| revs.extend(state_revs));
+            let revs = index_w.entry(key).or_default();
+            revs.extend(state_revs);
         }
     }
 
@@ -473,12 +458,11 @@ mod test {
     use super::*;
     #[allow(clippy::expect_used)]
     fn match_values(index: &Index, key: impl AsRef<[u8]>, expected_values: &[KeyRevision]) {
-        index
-            .inner
+        let inner_r = index.inner.read();
+        let revs = inner_r
             .get(key.as_ref())
-            .expect("index entry should not be None")
-            .value()
-            .map_read(|revs| assert_eq!(*revs, expected_values));
+            .expect("index entry should not be None");
+        assert_eq!(*revs, expected_values);
     }
 
     fn init_and_test_insert() -> Index {
