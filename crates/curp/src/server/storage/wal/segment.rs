@@ -168,7 +168,7 @@ impl WALSegment {
 
     /// Syncs the file of this segment
     pub(super) async fn sync_all(&mut self) -> io::Result<()> {
-        self.file.sync_all().await?;
+        self.file.sync_data().await?;
         self.io_state.fsynced();
 
         Ok(())
