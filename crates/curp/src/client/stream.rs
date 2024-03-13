@@ -46,7 +46,7 @@ impl Streaming {
     ) -> Result<R, CurpError> {
         loop {
             let Some(leader_id) = self.state.leader_id().await else {
-                warn!("got rpc transport error when keep heartbeat, refreshing state...");
+                warn!("cannot find leader_id, refreshing state...");
                 let _ig = self.state.try_refresh_state().await;
                 tokio::time::sleep(RETRY_DELAY).await;
                 continue;
