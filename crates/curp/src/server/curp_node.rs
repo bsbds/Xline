@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -157,6 +160,10 @@ pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
     propose_tx: flume::Sender<Propose<C>>,
 }
 
+static WAIT_LOG_SUM: AtomicU64 = AtomicU64::new(0);
+static WAIT_SYNC_SUM: AtomicU64 = AtomicU64::new(0);
+static TOTAL: AtomicU64 = AtomicU64::new(0);
+
 /// Handlers for clients
 impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     // TODO: Add term to req
@@ -176,7 +183,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let (wait_tx, wait_rx) = flume::bounded(2);
         let propose = Propose::try_new(req, wait_tx, Arc::clone(&resp_tx))?;
         let _ignore = self.propose_tx.send(propose);
+        let start = std::time::Instant::now();
         let WaitResult::Result(wait_res) = wait_rx.recv_async().await? else { unreachable!() };
+        let elapsed = start.elapsed().as_nanos() as u64;
+        let _ignore = WAIT_LOG_SUM.fetch_add(elapsed, Ordering::Relaxed);
         let to_execute = wait_res?;
 
         if let Some(entry) = to_execute {
@@ -185,8 +195,11 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             if let WaitResult::FSynced(Err(e)) = wait_rx.recv_async().await? {
                 return Err(e);
             }
+            let elapsed = start.elapsed().as_nanos() as u64;
+            let _ignore = WAIT_SYNC_SUM.fetch_add(elapsed, Ordering::Relaxed);
             resp_tx.send_propose(resp);
         }
+        let _ignore = TOTAL.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -795,6 +808,25 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         sps: Vec<SpObject<C>>,
         ucps: Vec<UcpObject<C>>,
     ) -> Result<Self, CurpError> {
+        let _ignore = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut last_total = 0;
+            loop {
+                let _ignore = interval.tick().await;
+                let wait_log = WAIT_LOG_SUM.load(Ordering::Relaxed);
+                let wait_sync = WAIT_SYNC_SUM.load(Ordering::Relaxed);
+                let total = TOTAL.load(Ordering::Relaxed);
+                if total != 0 {
+                    println!(
+                        "Current QPS: {}, wait log avg: {}, wait sync avg: {}",
+                        total - last_total,
+                        wait_log / total,
+                        wait_sync / total,
+                    );
+                }
+                last_total = total;
+            }
+        });
         let sync_events = cluster_info
             .peers_ids()
             .into_iter()
