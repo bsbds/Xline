@@ -221,6 +221,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 .flatten()
                 .collect();
             addition.push(first);
+            info!("propose batch size: {}", addition.len());
             if shutdown_listener.is_shutdown() {
                 break;
             }

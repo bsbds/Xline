@@ -162,7 +162,9 @@ where
         }
         framed.send(item).await?;
         framed.flush().await?;
+        let start = std::time::Instant::now();
         framed.get_mut().sync_all().await?;
+        info!("sync takes: {:?}", start.elapsed());
 
         if framed.get_ref().is_full() {
             self.open_new_segment().await?;
