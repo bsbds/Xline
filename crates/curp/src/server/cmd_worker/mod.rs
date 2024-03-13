@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use super::{
+    cmd_board::CommandBoard,
     conflict::{spec_pool_new::SpecPool, uncommitted_pool::UncomPool},
     raw_curp::RawCurp,
 };
@@ -22,8 +23,8 @@ use crate::{
 
 /// Removes an entry from sp and ucp
 fn remove_from_sp_ucp<C: Command>(
-    sp: &Mutex<SpecPool<C>>,
-    ucp: &Mutex<UncomPool<C>>,
+    sp: &mut SpecPool<C>,
+    ucp: &mut UncomPool<C>,
     entry: &LogEntry<C>,
 ) {
     let pool_entry = match entry.entry_data {
@@ -33,8 +34,8 @@ fn remove_from_sp_ucp<C: Command>(
             unreachable!()
         }
     };
-    sp.lock().remove(pool_entry.clone());
-    ucp.lock().remove(pool_entry);
+    sp.remove(pool_entry.clone());
+    ucp.remove(pool_entry);
 }
 
 /// Cmd worker execute handler
@@ -49,7 +50,7 @@ pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
         EntryData::Command(ref cmd) => {
             let er = ce.execute(cmd).await;
             if er.is_err() {
-                remove_from_sp_ucp(&sp, &ucp, &entry);
+                remove_from_sp_ucp(&mut sp.lock(), &mut ucp.lock(), &entry);
                 ce.trigger(entry.inflight_id(), entry.index);
             }
             debug!(
@@ -68,10 +69,151 @@ pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     }
 }
 
+/// After sync cmd entries
+async fn after_sync_cmds<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
+    cmd_entries: Vec<(Arc<LogEntry<C>>, Option<Arc<ResponseSender>>)>,
+    ce: &CE,
+    curp: &RawCurp<C, RC>,
+    sp: &Mutex<SpecPool<C>>,
+    ucp: &Mutex<UncomPool<C>>,
+) {
+    let resp_txs = cmd_entries.iter().map(|(_, tx)| tx);
+    let highest_index = cmd_entries
+        .last()
+        .map(|(entry, _)| entry.index)
+        .unwrap_or_else(|| unreachable!());
+    let cmds: Vec<_> = cmd_entries
+        .iter()
+        .map(|(entry, tx)| {
+            let EntryData::Command(ref cmd) = entry.entry_data else { unreachable!() };
+            (
+                cmd.as_ref(),
+                tx.as_ref().map_or(false, |tx| tx.is_conflict()),
+            )
+        })
+        .collect();
+
+    match ce.after_sync_batch(cmds, highest_index).await {
+        Ok(resps) => {
+            for ((asr, er_opt), tx) in resps
+                .into_iter()
+                .zip(resp_txs)
+                .map(|(resp, tx_opt)| tx_opt.as_ref().map(|tx| (resp, tx)))
+                .flatten()
+            {
+                if let Some(er) = er_opt {
+                    tx.send_propose(ProposeResponse::new_result::<C>(&Ok(er), true));
+                }
+                tx.send_synced(SyncedResponse::new_result::<C>(&Ok(asr)));
+            }
+        }
+        Err(e) => {
+            for tx in resp_txs.flatten() {
+                tx.send_synced(SyncedResponse::new_result::<C>(&Err(e.clone())));
+            }
+        }
+    }
+
+    for (entry, _) in &cmd_entries {
+        curp.trigger(entry.propose_id);
+        ce.trigger(entry.inflight_id(), entry.index);
+    }
+    let mut sp_l = sp.lock();
+    let mut ucp_l = ucp.lock();
+    for (entry, _) in cmd_entries {
+        remove_from_sp_ucp(&mut sp_l, &mut ucp_l, &entry);
+    }
+}
+
+/// After sync entries other than cmd
+async fn after_sync_others<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
+    others: Vec<(Arc<LogEntry<C>>, Option<Arc<ResponseSender>>)>,
+    ce: &CE,
+    curp: &RawCurp<C, RC>,
+    cb: &RwLock<CommandBoard<C>>,
+    sp: &Mutex<SpecPool<C>>,
+    ucp: &Mutex<UncomPool<C>>,
+) {
+    let id = curp.id();
+    for (entry, resp_tx) in others {
+        match (&entry.entry_data, resp_tx) {
+            (EntryData::Shutdown, _) => {
+                curp.task_manager().cluster_shutdown();
+                if curp.is_leader() {
+                    curp.task_manager().mark_leader_notified();
+                }
+                if let Err(e) = ce.set_last_applied(entry.index) {
+                    error!("failed to set last_applied, {e}");
+                }
+                cb.write().notify_shutdown();
+            }
+            (EntryData::ConfChange(ref conf_change), _) => {
+                if let Err(e) = ce.set_last_applied(entry.index) {
+                    error!("failed to set last_applied, {e}");
+                    return;
+                }
+                let change = conf_change.first().unwrap_or_else(|| {
+                    unreachable!("conf change should always have at least one change")
+                });
+                let shutdown_self =
+                    change.change_type() == ConfChangeType::Remove && change.node_id == id;
+                cb.write().insert_conf(entry.propose_id);
+                remove_from_sp_ucp(&mut sp.lock(), &mut ucp.lock(), &entry);
+                if shutdown_self {
+                    if let Some(maybe_new_leader) = curp.pick_new_leader() {
+                        info!(
+                            "the old leader {} will shutdown, try to move leadership to {}",
+                            id, maybe_new_leader
+                        );
+                        if curp
+                            .handle_move_leader(maybe_new_leader)
+                            .unwrap_or_default()
+                        {
+                            if let Err(e) = curp
+                                .connects()
+                                .get(&maybe_new_leader)
+                                .unwrap_or_else(|| {
+                                    unreachable!("connect to {} should exist", maybe_new_leader)
+                                })
+                                .try_become_leader_now(curp.cfg().wait_synced_timeout)
+                                .await
+                            {
+                                warn!(
+                                    "{} send try become leader now to {} failed: {:?}",
+                                    curp.id(),
+                                    maybe_new_leader,
+                                    e
+                                );
+                            };
+                        }
+                    } else {
+                        info!(
+                        "the old leader {} will shutdown, but no other node can be the leader now",
+                        id
+                    );
+                    }
+                    curp.task_manager().shutdown(false).await;
+                }
+            }
+            (EntryData::SetNodeState(node_id, ref name, ref client_urls), _) => {
+                if let Err(e) = ce.set_last_applied(entry.index) {
+                    error!("failed to set last_applied, {e}");
+                    return;
+                }
+                curp.cluster()
+                    .set_node_state(*node_id, name.clone(), client_urls.clone());
+            }
+            (EntryData::Empty, _) => {}
+            _ => unreachable!(),
+        }
+        ce.trigger(entry.inflight_id(), entry.index);
+        debug!("{id} cmd({}) after sync is called", entry.propose_id);
+    }
+}
+
 /// Cmd worker after sync handler
 pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
-    entry: Arc<LogEntry<C>>,
-    resp_tx: Option<Arc<ResponseSender>>,
+    entries: Vec<(Arc<LogEntry<C>>, Option<Arc<ResponseSender>>)>,
     ce: &CE,
     curp: &RawCurp<C, RC>,
 ) {
@@ -80,101 +222,11 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
         curp.new_spec_pool(),
         curp.new_uncommitted_pool(),
     );
-    let id = curp.id();
-    #[allow(clippy::pattern_type_mismatch)]
-    match (&entry.entry_data, resp_tx) {
-        // Leader
-        (EntryData::Command(ref cmd), Some(ref tx)) => {
-            if tx.is_conflict() {
-                let er = ce.execute(cmd.as_ref()).await;
-                tx.send_propose(ProposeResponse::new_result::<C>(&er, true));
-                if er.is_err() {
-                    ce.trigger(entry.inflight_id(), entry.index);
-                    remove_from_sp_ucp(&sp, &ucp, &entry);
-                    curp.trigger(entry.propose_id);
-                    return;
-                }
-            }
-            let asr = ce.after_sync(cmd.as_ref(), entry.index).await;
-            tx.send_synced(SyncedResponse::new_result::<C>(&asr));
-            remove_from_sp_ucp(&sp, &ucp, &entry);
-            curp.trigger(entry.propose_id);
-        }
-        // Follower
-        (EntryData::Command(ref cmd), None) => {
-            let _ignore = ce.after_sync(cmd.as_ref(), entry.index).await;
-            remove_from_sp_ucp(&sp, &ucp, &entry);
-        }
-        (EntryData::Shutdown, _) => {
-            curp.task_manager().cluster_shutdown();
-            if curp.is_leader() {
-                curp.task_manager().mark_leader_notified();
-            }
-            if let Err(e) = ce.set_last_applied(entry.index) {
-                error!("failed to set last_applied, {e}");
-            }
-            cb.write().notify_shutdown();
-        }
-        (EntryData::ConfChange(ref conf_change), _) => {
-            if let Err(e) = ce.set_last_applied(entry.index) {
-                error!("failed to set last_applied, {e}");
-                return;
-            }
-            let change = conf_change.first().unwrap_or_else(|| {
-                unreachable!("conf change should always have at least one change")
-            });
-            let shutdown_self =
-                change.change_type() == ConfChangeType::Remove && change.node_id == id;
-            cb.write().insert_conf(entry.propose_id);
-            remove_from_sp_ucp(&sp, &ucp, &entry);
-            if shutdown_self {
-                if let Some(maybe_new_leader) = curp.pick_new_leader() {
-                    info!(
-                        "the old leader {} will shutdown, try to move leadership to {}",
-                        id, maybe_new_leader
-                    );
-                    if curp
-                        .handle_move_leader(maybe_new_leader)
-                        .unwrap_or_default()
-                    {
-                        if let Err(e) = curp
-                            .connects()
-                            .get(&maybe_new_leader)
-                            .unwrap_or_else(|| {
-                                unreachable!("connect to {} should exist", maybe_new_leader)
-                            })
-                            .try_become_leader_now(curp.cfg().wait_synced_timeout)
-                            .await
-                        {
-                            warn!(
-                                "{} send try become leader now to {} failed: {:?}",
-                                curp.id(),
-                                maybe_new_leader,
-                                e
-                            );
-                        };
-                    }
-                } else {
-                    info!(
-                        "the old leader {} will shutdown, but no other node can be the leader now",
-                        id
-                    );
-                }
-                curp.task_manager().shutdown(false).await;
-            }
-        }
-        (EntryData::SetNodeState(node_id, ref name, ref client_urls), _) => {
-            if let Err(e) = ce.set_last_applied(entry.index) {
-                error!("failed to set last_applied, {e}");
-                return;
-            }
-            curp.cluster()
-                .set_node_state(*node_id, name.clone(), client_urls.clone());
-        }
-        (EntryData::Empty, _) => {}
-    };
-    debug!("{id} cmd({}) after sync is called", entry.propose_id);
-    ce.trigger(entry.inflight_id(), entry.index);
+    let (cmd_entries, others): (Vec<_>, Vec<_>) = entries
+        .into_iter()
+        .partition(|(entry, _)| matches!(entry.entry_data, EntryData::Command(_)));
+    after_sync_cmds(cmd_entries, ce, curp, &sp, &ucp).await;
+    after_sync_others(others, ce, curp, &cb, &sp, &ucp).await;
 }
 
 /// Cmd worker reset handler

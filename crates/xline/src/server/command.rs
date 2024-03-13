@@ -13,7 +13,7 @@ use parking_lot::RwLock;
 use tracing::warn;
 use utils::{barrier::IdBarrier, table_names::META_TABLE};
 use xlineapi::{
-    command::{Command, CurpClient, SyncResponse},
+    command::{Command, CurpClient},
     execute_error::ExecuteError,
     AlarmAction, AlarmRequest, AlarmType,
 };
@@ -23,6 +23,7 @@ use crate::{
     rpc::{RequestBackend, RequestWrapper},
     storage::{
         db::{WriteOp, DB},
+        index::{Index, IndexTransactionOperate},
         storage_api::XlineStorageOps,
         AlarmStore, AuthStore, KvStore, LeaseStore,
     },
@@ -73,6 +74,8 @@ pub(crate) struct CommandExecutor {
     alarm_storage: Arc<AlarmStore>,
     /// persistent storage
     persistent: Arc<DB>,
+    /// Key Index
+    kv_index: Arc<Index>,
     /// Barrier for applied index
     index_barrier: Arc<IndexBarrier>,
     /// Barrier for propose id
@@ -221,6 +224,7 @@ impl CommandExecutor {
         lease_storage: Arc<LeaseStore>,
         alarm_storage: Arc<AlarmStore>,
         persistent: Arc<DB>,
+        kv_index: Arc<Index>,
         index_barrier: Arc<IndexBarrier>,
         id_barrier: Arc<IdBarrier<InflightId>>,
         compact_events: Arc<DashMap<u64, Arc<Event>>>,
@@ -234,6 +238,7 @@ impl CommandExecutor {
             lease_storage,
             alarm_storage,
             persistent,
+            kv_index,
             index_barrier,
             id_barrier,
             compact_events,
@@ -290,6 +295,99 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         }
     }
 
+    async fn after_sync_batch(
+        &self,
+        cmds: Vec<(&Command, bool)>,
+        highest_index: LogIndex,
+    ) -> Result<
+        Vec<(
+            <Command as CurpCommand>::ASR,
+            Option<<Command as CurpCommand>::ER>,
+        )>,
+        <Command as CurpCommand>::Error,
+    > {
+        if cmds.is_empty() {
+            return Ok(Vec::new());
+        }
+        cmds.iter()
+            .map(|(c, _)| self.check_alarm(c))
+            .collect::<Result<_, _>>()?;
+        let quota_enough = cmds.iter().all(|(c, _)| self.quota_checker.check(c));
+        cmds.iter()
+            .map(|(c, _)| {
+                self.auth_storage
+                    .check_permission(c.request(), c.auth_info())
+            })
+            .collect::<Result<_, _>>()?;
+
+        let txn_db = self.persistent.transaction();
+        let mut txn_index = self.kv_index.transaction();
+        txn_db.write_op(WriteOp::PutAppliedIndex(highest_index))?;
+
+        let mut resps = Vec::with_capacity(cmds.len());
+        for (cmd, to_execute) in cmds {
+            let wrapper = cmd.request();
+            let er = to_execute
+                .then(|| match wrapper.backend() {
+                    RequestBackend::Kv => self.kv_storage.execute(wrapper),
+                    RequestBackend::Auth => self.auth_storage.execute(wrapper),
+                    RequestBackend::Lease => self.lease_storage.execute(wrapper),
+                    RequestBackend::Alarm => Ok(self.alarm_storage.execute(wrapper)),
+                })
+                .transpose()?;
+            let (asr, wr_ops) = match wrapper.backend() {
+                RequestBackend::Kv => (
+                    self.kv_storage
+                        .after_sync(wrapper, &txn_db, &mut txn_index)
+                        .await?,
+                    vec![],
+                ),
+                RequestBackend::Auth => self.auth_storage.after_sync(wrapper)?,
+                RequestBackend::Lease => self.lease_storage.after_sync(wrapper).await?,
+                RequestBackend::Alarm => self.alarm_storage.after_sync(wrapper),
+            };
+            txn_db.write_ops(wr_ops)?;
+            resps.push((asr, er));
+
+            if let RequestWrapper::CompactionRequest(ref compact_req) = *wrapper {
+                if compact_req.physical {
+                    if let Some(n) = self.compact_events.get(&cmd.compact_id()) {
+                        n.notify(usize::MAX);
+                    }
+                }
+            };
+            if let RequestWrapper::CompactionRequest(ref compact_req) = *wrapper {
+                if compact_req.physical {
+                    if let Some(n) = self.compact_events.get(&cmd.compact_id()) {
+                        n.notify(usize::MAX);
+                    }
+                }
+            };
+
+            self.lease_storage.mark_lease_synced(wrapper);
+        }
+        txn_db
+            .commit()
+            .map_err(|e| ExecuteError::DbError(e.to_string()))?;
+        txn_index.commit();
+
+        if !quota_enough {
+            if let Some(alarmer) = self.alarmer.read().clone() {
+                let _ig = tokio::spawn(async move {
+                    if let Err(e) = alarmer
+                        .alarm(AlarmAction::Activate, AlarmType::Nospace)
+                        .await
+                    {
+                        warn!("{} propose alarm failed: {:?}", alarmer.id, e);
+                    }
+                });
+            }
+        }
+
+        Ok(resps)
+    }
+
+    #[cfg(ignore)]
     async fn after_sync(
         &self,
         cmd: &Command,
@@ -322,6 +420,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
                 res
             }
         };
+
         if let RequestWrapper::CompactionRequest(ref compact_req) = *wrapper {
             if compact_req.physical {
                 if let Some(n) = self.compact_events.get(&cmd.compact_id()) {

@@ -342,6 +342,7 @@ struct Context<C: Command, RC: RoleChange> {
     /// Tx to send entries to after_sync
     as_tx: flume::Sender<TaskType<C>>,
     /// Response Senders
+    // TODO: this could be replaced by a queue
     resp_txs: Arc<Mutex<HashMap<LogIndex, Arc<ResponseSender>>>>,
     /// Barrier for waiting unsynced commands
     id_barrier: Arc<IdBarrier<ProposeId>>,
@@ -1857,6 +1858,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
     /// Apply new logs
     fn apply(&self, log: &mut Log<C>) {
+        let mut entries = Vec::new();
         for i in (log.last_as + 1)..=log.commit_index {
             metrics::get().proposals_applied.observe(i, &[]);
             let entry = log.get(i).unwrap_or_else(|| {
@@ -1866,8 +1868,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 )
             });
             let tx = self.ctx.resp_txs.lock().remove(&i);
-            let task = TaskType::Entry((Arc::clone(entry), tx));
-            let _ignore = self.ctx.as_tx.send(task);
+            entries.push((Arc::clone(&entry), tx));
             log.last_as = i;
             if log.last_exe < log.last_as {
                 log.last_exe = log.last_as;
@@ -1879,6 +1880,8 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 i
             );
         }
+        debug!("sending {} entries to after sync task", entries.len());
+        let _ignore = self.ctx.as_tx.send(TaskType::Entries(entries));
         log.compact();
     }
 

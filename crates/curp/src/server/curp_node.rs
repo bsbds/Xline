@@ -67,7 +67,7 @@ use crate::{
 #[derive(Debug)]
 pub(super) enum TaskType<C: Command> {
     /// After sync an entry
-    Entry((Arc<LogEntry<C>>, Option<Arc<ResponseSender>>)),
+    Entries(Vec<(Arc<LogEntry<C>>, Option<Arc<ResponseSender>>)>),
     /// Reset the CE
     Reset(Option<Snapshot>, oneshot::Sender<()>),
     /// Snapshot
@@ -765,8 +765,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     async fn handle_as_task(curp: &RawCurp<C, RC>, cmd_executor: &CE, task: TaskType<C>) {
         debug!("after sync: {task:?}");
         match task {
-            TaskType::Entry((entry, resp_tx)) => {
-                after_sync(entry, resp_tx, cmd_executor, curp).await;
+            TaskType::Entries(entries) => {
+                after_sync(entries, cmd_executor, curp).await;
             }
             TaskType::Reset(snap, tx) => {
                 let _ignore = worker_reset(snap, tx, cmd_executor, curp).await;
