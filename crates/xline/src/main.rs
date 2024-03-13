@@ -149,7 +149,7 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use tracing::{debug, info};
 use xline::{
     server::XlineServer,
-    utils::{init_metrics, init_subscriber, parse_config},
+    utils::{init_metrics, parse_config},
 };
 
 #[global_allocator]
@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
 
     let cluster_config = config.cluster();
 
-    let _guard = init_subscriber(cluster_config.name(), config.log(), config.trace())?;
+    // let _guard = init_subscriber(cluster_config.name(), config.log(), config.trace())?;
     init_metrics(config.metrics())?;
 
     let server = XlineServer::new(

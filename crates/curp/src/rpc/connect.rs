@@ -383,7 +383,6 @@ impl ConnectApi for Connect<ProtocolClient<Channel>> {
     }
 
     /// Send `ProposeRequest`
-    #[instrument(skip(self), name = "client propose stream")]
     async fn propose_stream(
         &self,
         request: ProposeRequest,
@@ -394,7 +393,6 @@ impl ConnectApi for Connect<ProtocolClient<Channel>> {
         let mut client = self.rpc_connect.clone();
         let mut req = tonic::Request::new(request);
         req.set_timeout(timeout);
-        req.metadata_mut().inject_current();
         if let Some(token) = token {
             _ = req.metadata_mut().insert("token", token.parse()?);
         }
@@ -406,7 +404,6 @@ impl ConnectApi for Connect<ProtocolClient<Channel>> {
     }
 
     /// Send `RecordRequest`
-    #[instrument(skip(self), name = "client record")]
     async fn record(
         &self,
         request: RecordRequest,
@@ -415,7 +412,6 @@ impl ConnectApi for Connect<ProtocolClient<Channel>> {
         let mut client = self.rpc_connect.clone();
         let mut req = tonic::Request::new(request);
         req.set_timeout(timeout);
-        req.metadata_mut().inject_current();
         client.record(req).await.map_err(Into::into)
     }
 

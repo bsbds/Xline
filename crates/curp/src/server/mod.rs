@@ -93,12 +93,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol fo
         Ok(tonic::Response::new(rx.into_stream()))
     }
 
-    #[instrument(skip_all, name = "curp_record")]
     async fn record(
         &self,
         request: tonic::Request<RecordRequest>,
     ) -> Result<tonic::Response<RecordResponse>, tonic::Status> {
-        request.metadata().extract_span();
         Ok(tonic::Response::new(
             self.inner.record(request.into_inner()).await?,
         ))
