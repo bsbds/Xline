@@ -147,16 +147,16 @@ where
                 | CurpError::ShuttingDown(())
                 | CurpError::InvalidConfig(())
                 | CurpError::NodeNotExists(())
+                | CurpError::ExpiredClientId(())
                 | CurpError::NodeAlreadyExists(())
                 | CurpError::LearnerNotCatchUp(()) => {
                     return Err(tonic::Status::from(err));
                 }
 
                 // some errors that could have a retry
-                CurpError::ExpiredClientId(())
-                | CurpError::KeyConflict(())
-                | CurpError::Internal(_)
-                | CurpError::LeaderTransfer(_) => {}
+                CurpError::KeyConflict(())
+                | CurpError::Internal(())
+                | CurpError::LeaderTransfer(()) => {}
 
                 // update leader state if we got a rpc transport error
                 CurpError::RpcTransport(()) => {
