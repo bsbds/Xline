@@ -265,7 +265,7 @@ pub(super) trait IndexOperate {
 }
 
 /// Transactional operations for `Index`
-pub(super) trait IndexTransactionOperate {
+pub(crate) trait IndexTransactionOperate {
     /// Get `Revision` of keys, get the latest `Revision` when revision <= 0
     fn get(&self, key: &[u8], range_end: &[u8], revision: i64) -> Vec<Revision>;
 

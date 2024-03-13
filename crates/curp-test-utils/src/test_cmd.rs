@@ -284,6 +284,21 @@ impl CommandExecutor<TestCommand> for TestCE {
         Ok(result)
     }
 
+    async fn after_sync_batch(
+        &self,
+        _cmds: Vec<(&TestCommand, bool)>,
+        _highest_index: LogIndex,
+    ) -> Result<
+        Vec<(
+            <TestCommand as Command>::ASR,
+            Option<<TestCommand as Command>::ER>,
+        )>,
+        <TestCommand as Command>::Error,
+    > {
+        todo!()
+    }
+
+    #[cfg(ignore)]
     async fn after_sync(
         &self,
         cmd: &TestCommand,

@@ -205,12 +205,13 @@ impl KvStore {
     pub(crate) async fn after_sync<T>(
         &self,
         request: &RequestWrapper,
-        txn_db: T,
+        txn_db: &T,
+        txn_index: &mut IndexTransaction,
     ) -> Result<SyncResponse, ExecuteError>
     where
         T: XlineStorageOps + TransactionApi,
     {
-        self.sync_request(request, txn_db).await
+        self.sync_request(request, txn_db, txn_index).await
     }
 
     /// Recover data from persistent storage
@@ -872,14 +873,14 @@ impl KvStore {
     async fn sync_request<T>(
         &self,
         wrapper: &RequestWrapper,
-        txn_db: T,
+        txn_db: &T,
+        txn_index: &mut IndexTransaction,
     ) -> Result<SyncResponse, ExecuteError>
     where
         T: XlineStorageOps + TransactionApi,
     {
         debug!("Execute {:?}", wrapper);
 
-        let mut txn_index = self.inner.index.transaction();
         let next_revision = self.revision.get().overflow_add(1);
 
         #[allow(clippy::wildcard_enum_match_arm)]
@@ -888,22 +889,17 @@ impl KvStore {
                 vec![]
             }
             RequestWrapper::PutRequest(ref req) => {
-                self.sync_put(&txn_db, &mut txn_index, req, next_revision, &mut 0)?
+                self.sync_put(txn_db, txn_index, req, next_revision, &mut 0)?
             }
             RequestWrapper::DeleteRangeRequest(ref req) => {
-                self.sync_delete_range(&txn_db, &mut txn_index, req, next_revision, &mut 0)?
+                self.sync_delete_range(txn_db, txn_index, req, next_revision, &mut 0)?
             }
             RequestWrapper::TxnRequest(ref req) => {
-                self.sync_txn(&txn_db, &mut txn_index, req, next_revision, &mut 0)?
+                self.sync_txn(txn_db, txn_index, req, next_revision, &mut 0)?
             }
             RequestWrapper::CompactionRequest(ref req) => self.sync_compaction(req).await?,
             _ => unreachable!("Other request should not be sent to this store"),
         };
-
-        txn_db
-            .commit()
-            .map_err(|e| ExecuteError::DbError(e.to_string()))?;
-        txn_index.commit();
 
         let response = if events.is_empty() {
             SyncResponse::new(self.revision.get())
@@ -1277,8 +1273,12 @@ mod test {
         store: &Arc<KvStore>,
         request: &RequestWrapper,
     ) -> Result<(), ExecuteError> {
-        let txn = store.db().transaction();
-        store.after_sync(request, txn).await.map(|_| ())
+        let txn_db = store.db().transaction();
+        let mut txn_index = store.inner.index.transaction();
+        store
+            .after_sync(request, &txn_db, &mut txn_index)
+            .await
+            .map(|_| ())
     }
 
     fn index_compact(store: &Arc<KvStore>, at_rev: i64) -> Vec<Vec<u8>> {

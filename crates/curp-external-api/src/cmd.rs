@@ -28,7 +28,7 @@ impl<T> pri::Serializable for T where T: pri::ThreadSafe + Clone + Serialize + D
 #[async_trait]
 pub trait Command: pri::Serializable + ConflictCheck + PbCodec + Unpin {
     /// Error type
-    type Error: pri::Serializable + PbCodec + std::error::Error;
+    type Error: pri::Serializable + PbCodec + std::error::Error + Clone;
 
     /// K (key) is used to tell confliction
     /// The key can be a single key or a key range
@@ -56,15 +56,6 @@ pub trait Command: pri::Serializable + ConflictCheck + PbCodec + Unpin {
         E: CommandExecutor<Self> + Send + Sync,
     {
         <E as CommandExecutor<Self>>::execute(e, self).await
-    }
-
-    /// Execute the command after_sync callback
-    #[inline]
-    async fn after_sync<E>(&self, e: &E, index: LogIndex) -> Result<Self::ASR, Self::Error>
-    where
-        E: CommandExecutor<Self> + Send + Sync,
-    {
-        <E as CommandExecutor<Self>>::after_sync(e, self, index).await
     }
 }
 
@@ -102,8 +93,12 @@ where
     /// Execute the command
     async fn execute(&self, cmd: &C) -> Result<C::ER, C::Error>;
 
-    /// Execute the after_sync callback
-    async fn after_sync(&self, cmd: &C, index: LogIndex) -> Result<C::ASR, C::Error>;
+    /// Batch execute the after_sync callback
+    async fn after_sync_batch(
+        &self,
+        cmds: Vec<(&C, bool)>,
+        highest_index: LogIndex,
+    ) -> Result<Vec<(C::ASR, Option<C::ER>)>, C::Error>;
 
     /// Set the index of the last log entry that has been successfully applied to the command executor
     fn set_last_applied(&self, index: LogIndex) -> Result<(), C::Error>;
