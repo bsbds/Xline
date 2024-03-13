@@ -210,11 +210,14 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         rx: flume::Receiver<Propose<C>>,
         shutdown_listener: Listener,
     ) {
-        const MAX_BATCH_SIZE: usize = 1024;
+        let max_batch_size: usize = std::env::var("PROPOSE_MAX_BATCH_SIZE")
+            .unwrap_or("1024".to_string())
+            .parse()
+            .unwrap();
         loop {
             let first = rx.recv_async().await.unwrap();
             let mut addition: Vec<_> = std::iter::repeat_with(|| rx.try_recv())
-                .take(MAX_BATCH_SIZE)
+                .take(max_batch_size)
                 .flatten()
                 .collect();
             addition.push(first);
