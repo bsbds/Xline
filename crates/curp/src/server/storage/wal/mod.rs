@@ -1,10 +1,10 @@
 #![allow(unused)] // TODO: remove this until used
 
 /// The WAL codec
-pub(super) mod codec;
+pub mod codec;
 
 /// The config for `WALStorage`
-pub(super) mod config;
+pub mod config;
 
 /// WAL errors
 mod error;
@@ -62,7 +62,7 @@ const WAL_FILE_EXT: &str = ".wal";
 
 /// The WAL storage
 #[derive(Debug)]
-pub(super) struct WALStorage<C> {
+pub struct WALStorage<C> {
     /// The directory to store the log files
     config: WALConfig,
     /// The pipeline that pre-allocates files
@@ -79,7 +79,7 @@ pub(super) struct WALStorage<C> {
 
 impl<C> WALStorage<C> {
     /// Creates a new `LogStorage`
-    pub(super) fn new(config: WALConfig) -> io::Result<WALStorage<C>> {
+    pub fn new(config: WALConfig) -> io::Result<WALStorage<C>> {
         if !config.dir.try_exists()? {
             std::fs::create_dir_all(&config.dir);
         }
@@ -100,7 +100,7 @@ where
     C: Serialize + DeserializeOwned + Unpin + 'static + std::fmt::Debug,
 {
     /// Recover from the given directory if there's any segments
-    pub(super) async fn recover(&mut self) -> io::Result<Vec<LogEntry<C>>> {
+    pub async fn recover(&mut self) -> io::Result<Vec<LogEntry<C>>> {
         // We try to recover the removal first
         SegmentRemover::recover(&self.config.dir).await?;
 
@@ -151,7 +151,7 @@ where
 
     /// Send frames with fsync
     #[allow(clippy::pattern_type_mismatch)] // Cannot satisfy both clippy
-    pub(super) async fn send_sync(&mut self, item: Vec<DataFrame<'_, C>>) -> io::Result<()> {
+    pub async fn send_sync(&mut self, item: Vec<DataFrame<'_, C>>) -> io::Result<()> {
         let last_segment = self
             .segments
             .last_mut()
@@ -160,11 +160,11 @@ where
         if let Some(DataFrame::Entry(entry)) = item.last() {
             self.next_log_index = entry.index.overflow_add(1);
         }
-        framed.send(item).await?;
-        framed.flush().await?;
         let start = std::time::Instant::now();
+        framed.send(item).await?;
+        println!("send: {:?}", start.elapsed());
         framed.get_mut().sync_all().await?;
-        info!("sync takes: {:?}", start.elapsed());
+        println!("sync: {:?}", start.elapsed());
 
         if framed.get_ref().is_full() {
             self.open_new_segment().await?;
@@ -176,7 +176,7 @@ where
     /// Tuncate all the logs whose index is less than or equal to `compact_index`
     ///
     /// `compact_index` should be the smallest index required in CURP
-    pub(super) async fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
+    pub async fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
         if compact_index >= self.next_log_index {
             warn!(
                 "head truncation: compact index too large, compact index: {}, storage next index: {}",
@@ -207,7 +207,7 @@ where
     }
 
     /// Tuncate all the logs whose index is greater than `max_index`
-    pub(super) async fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
+    pub async fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
         // segments to truncate
         let segments: Vec<_> = self
             .segments

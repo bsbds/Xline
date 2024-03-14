@@ -58,7 +58,7 @@ enum WALFrame<C> {
 /// Contains either a log entry or a seal index
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
-pub(crate) enum DataFrameOwned<C> {
+pub enum DataFrameOwned<C> {
     /// A Frame containing a log entry
     Entry(LogEntry<C>),
     /// A Frame containing the sealed index
@@ -70,7 +70,7 @@ pub(crate) enum DataFrameOwned<C> {
 /// Contains either a log entry or a seal index
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
-pub(crate) enum DataFrame<'a, C> {
+pub enum DataFrame<'a, C> {
     /// A Frame containing a log entry
     Entry(&'a LogEntry<C>),
     /// A Frame containing the sealed index
@@ -255,7 +255,7 @@ where
 
 impl<C> DataFrameOwned<C> {
     /// Converts `DataFrameOwned` to `DataFrame`
-    pub(super) fn get_ref(&self) -> DataFrame<'_, C> {
+    pub fn get_ref(&self) -> DataFrame<'_, C> {
         match *self {
             DataFrameOwned::Entry(ref entry) => DataFrame::Entry(entry),
             DataFrameOwned::SealIndex(index) => DataFrame::SealIndex(index),

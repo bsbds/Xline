@@ -28,7 +28,7 @@ pub struct LogEntry<C> {
 /// Entry data of a `LogEntry`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(PartialEq))]
-pub(crate) enum EntryData<C> {
+pub enum EntryData<C> {
     /// Empty entry
     Empty,
     /// `Command` entry
@@ -73,7 +73,7 @@ where
     C: Command,
 {
     /// Create a new `LogEntry`
-    pub(super) fn new(
+    pub fn new(
         index: LogIndex,
         term: u64,
         propose_id: ProposeId,

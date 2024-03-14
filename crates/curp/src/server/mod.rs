@@ -49,7 +49,8 @@ mod gc;
 mod curp_node;
 
 /// Storage
-mod storage;
+#[doc(hidden)]
+pub mod storage;
 
 /// Lease Manager
 mod lease_manager;

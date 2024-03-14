@@ -76,4 +76,5 @@ pub trait StorageApi: Send + Sync {
 pub(super) mod db;
 
 /// CURP WAL storage implementation
-pub(super) mod wal;
+#[doc(hidden)]
+pub mod wal;

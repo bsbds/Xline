@@ -191,7 +191,8 @@ pub mod role_change {
 mod tracker;
 
 /// Log Entry
-mod log_entry;
+#[doc(hidden)]
+pub mod log_entry;
 
 /// Protobuf generated types that are used in RPC
 pub mod rpc;
@@ -201,6 +202,8 @@ mod snapshot;
 
 /// Propose response sender
 mod response;
+
+pub use log_entry::EntryData;
 
 /// Calculate the super quorum
 #[inline]
