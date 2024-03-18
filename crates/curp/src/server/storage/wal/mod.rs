@@ -29,6 +29,9 @@ mod tests;
 /// File utils
 mod util;
 
+/// Framed
+mod framed;
+
 use std::{io, marker::PhantomData};
 
 use clippy_utilities::OverflowArithmetic;
@@ -47,7 +50,7 @@ use self::{
     error::{CorruptType, WALError},
     pipeline::FilePipeline,
     remover::SegmentRemover,
-    segment::{IOState, WALSegment},
+    segment::WALSegment,
     util::LockedFile,
 };
 
@@ -100,9 +103,9 @@ where
     C: Serialize + DeserializeOwned + Unpin + 'static + std::fmt::Debug,
 {
     /// Recover from the given directory if there's any segments
-    pub(super) async fn recover(&mut self) -> io::Result<Vec<LogEntry<C>>> {
+    pub(super) fn recover(&mut self) -> io::Result<Vec<LogEntry<C>>> {
         // We try to recover the removal first
-        SegmentRemover::recover(&self.config.dir).await?;
+        SegmentRemover::recover(&self.config.dir)?;
 
         let file_paths = util::get_file_paths_with_ext(&self.config.dir, WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
@@ -110,11 +113,11 @@ where
             .map(LockedFile::open_rw)
             .collect::<io::Result<_>>()?;
 
-        let segment_futs = lfiles
+        let segment_opening = lfiles
             .into_iter()
             .map(|f| WALSegment::open(f, self.config.max_segment_size));
 
-        let mut segments = Self::take_until_io_error(segment_futs).await?;
+        let mut segments = Self::take_until_io_error(segment_opening)?;
         segments.sort_unstable();
         debug!("Recovered segments: {:?}", segments);
 
@@ -123,7 +126,7 @@ where
             .map(WALSegment::recover_segment_logs)
             .collect();
 
-        let logs_batches = Self::take_until_io_error(logs_fut).await?;
+        let logs_batches = Self::take_until_io_error(logs_fut)?;
         let mut logs: Vec<_> = logs_batches.into_iter().flatten().collect();
 
         let pos = Self::highest_valid_pos(&logs[..]);
@@ -143,7 +146,7 @@ where
         let next_segment_id = segments.last().map_or(0, |s| s.id().overflow_add(1));
         let next_log_index = logs.last().map_or(1, |l| l.index.overflow_add(1));
 
-        self.open_new_segment().await?;
+        self.open_new_segment()?;
         info!("WAL successfully recovered");
 
         Ok(logs)
@@ -151,21 +154,18 @@ where
 
     /// Send frames with fsync
     #[allow(clippy::pattern_type_mismatch)] // Cannot satisfy both clippy
-    pub(super) async fn send_sync(&mut self, item: Vec<DataFrame<'_, C>>) -> io::Result<()> {
+    pub(super) fn send_sync(&mut self, item: Vec<DataFrame<'_, C>>) -> io::Result<()> {
         let last_segment = self
             .segments
             .last_mut()
             .unwrap_or_else(|| unreachable!("there should be at least on segment"));
-        let mut framed = Framed::new(last_segment, WAL::<C>::new());
         if let Some(DataFrame::Entry(entry)) = item.last() {
             self.next_log_index = entry.index.overflow_add(1);
         }
-        framed.send(item).await?;
-        framed.flush().await?;
-        framed.get_mut().sync_all().await?;
+        last_segment.write_sync(item, WAL::new())?;
 
-        if framed.get_ref().is_full() {
-            self.open_new_segment().await?;
+        if last_segment.is_full() {
+            self.open_new_segment()?;
         }
 
         Ok(())
@@ -174,7 +174,7 @@ where
     /// Tuncate all the logs whose index is less than or equal to `compact_index`
     ///
     /// `compact_index` should be the smallest index required in CURP
-    pub(super) async fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
+    pub(super) fn truncate_head(&mut self, compact_index: LogIndex) -> io::Result<()> {
         if compact_index >= self.next_log_index {
             warn!(
                 "head truncation: compact index too large, compact index: {}, storage next index: {}",
@@ -199,13 +199,13 @@ where
 
         // The last segment does not need to be removed
         let to_remove: Vec<_> = self.segments.drain(0..to_remove_num).collect();
-        SegmentRemover::new_removal(&self.config.dir, to_remove.iter()).await?;
+        SegmentRemover::new_removal(&self.config.dir, to_remove.iter())?;
 
         Ok(())
     }
 
     /// Tuncate all the logs whose index is greater than `max_index`
-    pub(super) async fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
+    pub(super) fn truncate_tail(&mut self, max_index: LogIndex) -> io::Result<()> {
         // segments to truncate
         let segments: Vec<_> = self
             .segments
@@ -215,24 +215,23 @@ where
             .collect();
 
         for segment in segments {
-            segment.seal::<C>(max_index).await;
+            segment.seal::<C>(max_index)?;
         }
 
         let to_remove = self.update_segments();
-        SegmentRemover::new_removal(&self.config.dir, to_remove.iter()).await?;
+        SegmentRemover::new_removal(&self.config.dir, to_remove.iter())?;
 
         self.next_log_index = max_index.overflow_add(1);
-        self.open_new_segment().await?;
+        self.open_new_segment()?;
 
         Ok(())
     }
 
     /// Opens a new WAL segment
-    async fn open_new_segment(&mut self) -> io::Result<()> {
+    fn open_new_segment(&mut self) -> io::Result<()> {
         let lfile = self
             .pipeline
             .next()
-            .await
             .ok_or(io::Error::from(io::ErrorKind::BrokenPipe))??;
 
         let segment = WALSegment::create(
@@ -240,8 +239,7 @@ where
             self.next_log_index,
             self.next_segment_id,
             self.config.max_segment_size,
-        )
-        .await?;
+        )?;
 
         self.segments.push(segment);
         self.next_segment_id = self.next_segment_id.overflow_add(1);
@@ -264,19 +262,6 @@ where
         to_remove.into_iter().map(|(s, _)| s).collect()
     }
 
-    /// Syncs all flushed segments
-    async fn sync_segments(&mut self) -> io::Result<()> {
-        let to_sync = self
-            .segments
-            .iter_mut()
-            .filter(|s| matches!(s.io_state(), IOState::Flushed));
-        for segment in to_sync {
-            segment.sync_all().await?;
-        }
-
-        Ok(())
-    }
-
     /// Returns the highest valid position of the log entries,
     /// the logs are continuous before this position
     fn highest_valid_pos(entries: &[LogEntry<C>]) -> usize {
@@ -288,15 +273,13 @@ where
             .map_or(entries.len(), |(i, _)| i)
     }
 
-    async fn take_until_io_error<T, I>(futs: I) -> io::Result<Vec<T>>
+    fn take_until_io_error<T, I>(opening: I) -> io::Result<Vec<T>>
     where
-        I: IntoIterator,
-        I::Item: Future<Output = Result<T, WALError>>,
+        I: IntoIterator<Item = Result<T, WALError>>,
     {
         let mut ts = vec![];
 
-        let results: Vec<_> = join_all(futs).await;
-        for result in results {
+        for result in opening {
             match result {
                 Ok(t) => ts.push(t),
                 Err(e) => {

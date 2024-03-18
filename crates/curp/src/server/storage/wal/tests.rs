@@ -18,14 +18,14 @@ use super::*;
 
 const TEST_SEGMENT_SIZE: u64 = 512;
 
-#[tokio::test(flavor = "multi_thread")]
-async fn simple_append_and_recovery_is_ok() {
+#[test]
+fn simple_append_and_recovery_is_ok() {
     let wal_test_path = tempfile::tempdir().unwrap();
     test_follow_up_append_recovery(wal_test_path.path(), 100);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn log_head_truncation_is_ok() {
+#[test]
+fn log_head_truncation_is_ok() {
     let wal_test_path = tempfile::tempdir().unwrap();
     for num_entries in 1..100 {
         for truncate_at in 1..=num_entries {
@@ -35,8 +35,8 @@ async fn log_head_truncation_is_ok() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn log_tail_truncation_is_ok() {
+#[test]
+fn log_tail_truncation_is_ok() {
     let wal_test_path = tempfile::tempdir().unwrap();
     for num_entries in 1..100 {
         for truncate_at in 1..=num_entries {
@@ -47,7 +47,7 @@ async fn log_tail_truncation_is_ok() {
 }
 
 /// Checks if the segment files are deleted
-async fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncate_at: LogIndex) {
+fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncate_at: LogIndex) {
     let get_num_segments = || {
         get_file_paths_with_ext(&wal_test_path, ".wal")
             .unwrap()
@@ -56,7 +56,7 @@ async fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
 
     let config = WALConfig::new(&wal_test_path).with_max_segment_size(TEST_SEGMENT_SIZE);
     let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
-    let _logs = storage.recover().await.unwrap();
+    let _logs = storage.recover().unwrap();
 
     let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     let num_entries_per_segment = entry_gen.num_entries_per_segment();
@@ -66,13 +66,13 @@ async fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
         .into_iter()
         .map(DataFrameOwned::Entry)
     {
-        storage.send_sync(vec![frame.get_ref()]).await.unwrap();
+        storage.send_sync(vec![frame.get_ref()]).unwrap();
     }
 
     let num_segments = (num_entries + num_entries_per_segment - 1) / num_entries_per_segment;
     assert_eq!(num_segments, get_num_segments());
 
-    storage.truncate_head(truncate_at).await.unwrap();
+    storage.truncate_head(truncate_at).unwrap();
 
     let num_entries_truncated = num_entries - truncate_at as usize;
     let num_segments_truncated =
@@ -80,11 +80,11 @@ async fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
     assert_eq!(num_segments_truncated, get_num_segments());
 }
 
-async fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncate_at: LogIndex) {
+fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncate_at: LogIndex) {
     assert!(num_entries as u64 >= truncate_at);
     let config = WALConfig::new(&wal_test_path).with_max_segment_size(TEST_SEGMENT_SIZE);
     let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
-    let _logs = storage.recover().await.unwrap();
+    let _logs = storage.recover().unwrap();
 
     let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     for frame in entry_gen
@@ -92,21 +92,20 @@ async fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
         .into_iter()
         .map(DataFrameOwned::Entry)
     {
-        storage.send_sync(vec![frame.get_ref()]).await.unwrap();
+        storage.send_sync(vec![frame.get_ref()]).unwrap();
     }
 
-    storage.truncate_tail(truncate_at).await;
+    storage.truncate_tail(truncate_at);
     let next_entry =
         LogEntry::<TestCommand>::new(truncate_at + 1, 1, ProposeId(1, 3), EntryData::Empty);
     storage
         .send_sync(vec![DataFrameOwned::Entry(next_entry.clone()).get_ref()])
-        .await
         .unwrap();
 
     drop(storage);
 
     let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
-    let logs = storage.recover().await.unwrap();
+    let logs = storage.recover().unwrap();
 
     assert_eq!(
         logs.len() as u64,
@@ -118,10 +117,10 @@ async fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncat
 }
 
 /// Test if the append and recovery are ok after some event
-async fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) {
+fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) {
     let config = WALConfig::new(&wal_test_path).with_max_segment_size(TEST_SEGMENT_SIZE);
     let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
-    let logs_initial = storage.recover().await.unwrap();
+    let logs_initial = storage.recover().unwrap();
 
     let next_log_index = logs_initial.last().map_or(0, |e| e.index) + 1;
 
@@ -133,13 +132,13 @@ async fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) 
         .map(DataFrameOwned::Entry);
 
     for frame in frames.clone() {
-        storage.send_sync(vec![frame.get_ref()]).await.unwrap();
+        storage.send_sync(vec![frame.get_ref()]).unwrap();
     }
 
     drop(storage);
 
     let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
-    let logs = storage.recover().await.unwrap();
+    let logs = storage.recover().unwrap();
 
     assert_eq!(
         logs.len(),

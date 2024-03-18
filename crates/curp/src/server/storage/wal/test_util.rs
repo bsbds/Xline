@@ -2,14 +2,16 @@ use bytes::BytesMut;
 use curp_external_api::LogIndex;
 use curp_test_utils::test_cmd::TestCommand;
 use parking_lot::Mutex;
-use tokio_util::codec::Encoder;
 
 use crate::{
     log_entry::{EntryData, LogEntry},
     rpc::ProposeId,
 };
 
-use super::codec::{DataFrameOwned, WAL};
+use super::{
+    codec::{DataFrameOwned, WAL},
+    framed::Encoder,
+};
 
 pub(super) struct EntryGenerator {
     inner: Mutex<Inner>,
@@ -84,11 +86,9 @@ impl EntryGenerator {
     fn entry_size(&self) -> usize {
         let sample_entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
         let mut wal_codec = WAL::<TestCommand>::new();
-        let mut buf = BytesMut::new();
-        wal_codec.encode(
-            vec![DataFrameOwned::Entry(sample_entry).get_ref()],
-            &mut buf,
-        );
+        let buf = wal_codec
+            .encode(vec![DataFrameOwned::Entry(sample_entry).get_ref()])
+            .unwrap();
         buf.len()
     }
 }
