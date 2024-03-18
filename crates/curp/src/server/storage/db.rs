@@ -1,9 +1,8 @@
 use std::{ops::Deref, path::Path};
 
-use async_trait::async_trait;
 use engine::{Engine, EngineType, StorageEngine, StorageOps, WriteOperation};
+use parking_lot::Mutex;
 use prost::Message;
-use tokio::sync::Mutex;
 
 use super::{
     wal::{codec::DataFrame, config::WALConfig, WALStorage},
@@ -43,13 +42,12 @@ pub struct DB<C> {
     db: Engine,
 }
 
-#[async_trait]
 impl<C: Command> StorageApi for DB<C> {
     /// Command
     type Command = C;
 
     #[inline]
-    async fn flush_voted_for(&self, term: u64, voted_for: ServerId) -> Result<(), StorageError> {
+    fn flush_voted_for(&self, term: u64, voted_for: ServerId) -> Result<(), StorageError> {
         let bytes = bincode::serialize(&(term, voted_for))?;
         let op = WriteOperation::new_put(CF, VOTE_FOR.to_vec(), bytes);
         self.db.write_multi(vec![op], true)?;
@@ -58,13 +56,9 @@ impl<C: Command> StorageApi for DB<C> {
     }
 
     #[inline]
-    async fn put_log_entries(
-        &self,
-        entry: &[&LogEntry<Self::Command>],
-    ) -> Result<(), StorageError> {
+    fn put_log_entries(&self, entry: &[&LogEntry<Self::Command>]) -> Result<(), StorageError> {
         self.wal
             .lock()
-            .await
             .send_sync(
                 entry
                     .into_iter()
@@ -72,7 +66,6 @@ impl<C: Command> StorageApi for DB<C> {
                     .map(DataFrame::Entry)
                     .collect(),
             )
-            .await
             .map_err(Into::into)
     }
 
@@ -152,10 +145,10 @@ impl<C: Command> StorageApi for DB<C> {
     }
 
     #[inline]
-    async fn recover(
+    fn recover(
         &self,
     ) -> Result<(Option<(u64, ServerId)>, Vec<LogEntry<Self::Command>>), StorageError> {
-        let entries = self.wal.lock().await.recover().await?;
+        let entries = self.wal.lock().recover()?;
         let voted_for = self
             .db
             .get(CF, VOTE_FOR)?
@@ -203,20 +196,20 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap().into_path();
         {
             let s = DB::<TestCommand>::open(&db_dir)?;
-            s.flush_voted_for(1, 222).await?;
-            s.flush_voted_for(3, 111).await?;
+            s.flush_voted_for(1, 222)?;
+            s.flush_voted_for(3, 111)?;
             let entry0 = LogEntry::new(1, 3, ProposeId(1, 1), Arc::new(TestCommand::default()));
             let entry1 = LogEntry::new(2, 3, ProposeId(1, 2), Arc::new(TestCommand::default()));
             let entry2 = LogEntry::new(3, 3, ProposeId(1, 3), Arc::new(TestCommand::default()));
-            s.put_log_entries(&[&entry0]).await?;
-            s.put_log_entries(&[&entry1]).await?;
-            s.put_log_entries(&[&entry2]).await?;
+            s.put_log_entries(&[&entry0])?;
+            s.put_log_entries(&[&entry1])?;
+            s.put_log_entries(&[&entry2])?;
             sleep_secs(2).await;
         }
 
         {
             let s = DB::<TestCommand>::open(&db_dir)?;
-            let (voted_for, entries) = s.recover().await?;
+            let (voted_for, entries) = s.recover()?;
             assert_eq!(voted_for, Some((3, 111)));
             assert_eq!(entries[0].index, 1);
             assert_eq!(entries[1].index, 2);

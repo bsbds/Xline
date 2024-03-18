@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use engine::EngineError;
 use thiserror::Error;
 
@@ -40,14 +39,13 @@ impl From<prost::DecodeError> for StorageError {
 }
 
 /// Curp storage api
-#[async_trait]
 #[allow(clippy::module_name_repetitions)]
 pub trait StorageApi: Send + Sync {
     /// Command
     type Command: Command;
 
     /// Put `voted_for` into storage, must be flushed on disk before returning
-    async fn flush_voted_for(&self, term: u64, voted_for: ServerId) -> Result<(), StorageError>;
+    fn flush_voted_for(&self, term: u64, voted_for: ServerId) -> Result<(), StorageError>;
 
     /// Put `Member` into storage
     fn put_member(&self, member: &Member) -> Result<(), StorageError>;
@@ -62,12 +60,11 @@ pub trait StorageApi: Send + Sync {
     fn recover_cluster_info(&self) -> Result<Option<ClusterInfo>, StorageError>;
 
     /// Put log entries in storage
-    async fn put_log_entries(&self, entry: &[&LogEntry<Self::Command>])
-        -> Result<(), StorageError>;
+    fn put_log_entries(&self, entry: &[&LogEntry<Self::Command>]) -> Result<(), StorageError>;
 
     /// Recover from persisted storage
     /// Return `voted_for` and all log entries
-    async fn recover(
+    fn recover(
         &self,
     ) -> Result<(Option<(u64, ServerId)>, Vec<LogEntry<Self::Command>>), StorageError>;
 }
