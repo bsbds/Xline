@@ -265,9 +265,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         for (wait_tx, result) in wait_txs.iter().zip(push_results) {
             let _ignore = wait_tx.send(result);
         }
-        if let Err(e) = storage
-            .put_log_entries(&log_entries.iter().map(Arc::as_ref).collect::<Vec<_>>())
-            .await
+        if let Err(e) =
+            storage.put_log_entries(&log_entries.iter().map(Arc::as_ref).collect::<Vec<_>>())
         {
             error!("Failed to persistent log: {e}");
             for wait_tx in wait_txs {
@@ -357,8 +356,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let resp = match result {
             Ok((term, to_persist)) => {
                 self.storage
-                    .put_log_entries(&to_persist.iter().map(Arc::as_ref).collect::<Vec<_>>())
-                    .await?;
+                    .put_log_entries(&to_persist.iter().map(Arc::as_ref).collect::<Vec<_>>())?;
                 AppendEntriesResponse::new_accept(term)
             }
             Err((term, hint)) => AppendEntriesResponse::new_reject(term, hint),
@@ -388,7 +386,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let resp = match result {
             Ok((term, sp)) => {
                 if !req.is_pre_vote {
-                    self.storage.flush_voted_for(term, req.candidate_id).await?;
+                    self.storage.flush_voted_for(term, req.candidate_id)?;
                 }
                 VoteResponse::new_accept(term, sp)?
             }
@@ -814,7 +812,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let (propose_tx, propose_rx) = flume::bounded(4096);
 
         // create curp state machine
-        let (voted_for, entries) = storage.recover().await?;
+        let (voted_for, entries) = storage.recover()?;
         let curp = Arc::new(
             RawCurp::builder()
                 .cluster_info(Arc::clone(&cluster_info))
