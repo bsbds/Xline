@@ -393,9 +393,6 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         cmd: &Command,
         index: LogIndex,
     ) -> Result<<Command as CurpCommand>::ASR, <Command as CurpCommand>::Error> {
-        if true {
-            return Ok(SyncResponse::new(0));
-        }
         self.check_alarm(cmd)?;
         let quota_enough = self.quota_checker.check(cmd);
         let wrapper = cmd.request();
