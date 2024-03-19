@@ -13,7 +13,7 @@ use parking_lot::RwLock;
 use tracing::warn;
 use utils::{barrier::IdBarrier, table_names::META_TABLE};
 use xlineapi::{
-    command::{Command, CurpClient},
+    command::{Command, CurpClient, SyncResponse},
     execute_error::ExecuteError,
     AlarmAction, AlarmRequest, AlarmType,
 };
@@ -295,6 +295,9 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         cmd: &Command,
         index: LogIndex,
     ) -> Result<<Command as CurpCommand>::ASR, <Command as CurpCommand>::Error> {
+        if true {
+            return Ok(SyncResponse::new(0));
+        }
         self.check_alarm(cmd)?;
         let quota_enough = self.quota_checker.check(cmd);
         let wrapper = cmd.request();
