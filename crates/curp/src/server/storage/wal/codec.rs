@@ -135,11 +135,13 @@ where
     type Error = WALError;
 
     fn decode(&mut self, src: &[u8]) -> Result<(Self::Item, usize), Self::Error> {
+        let mut current = 0;
         loop {
-            let Some((frame, len)) = WALFrame::<C>::decode(src)? else {
+            let Some((frame, len)) = WALFrame::<C>::decode(&src[current..])? else {
                 return Err(WALError::UnexpectedEof);
             };
-            let decoded_bytes = &src[..len];
+            let decoded_bytes = &src[current..current + len];
+            current += len;
             match frame {
                 WALFrame::Data(data) => {
                     self.frames.push(data);
@@ -149,7 +151,7 @@ where
                     let checksum = self.hasher.clone().finalize();
                     self.hasher.reset();
                     if commit.validate(&checksum) {
-                        return Ok((self.frames.drain(..).collect(), len));
+                        return Ok((self.frames.drain(..).collect(), current));
                     }
                     return Err(WALError::Corrupted(CorruptType::Checksum));
                 }
