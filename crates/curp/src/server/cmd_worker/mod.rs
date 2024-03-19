@@ -77,6 +77,9 @@ async fn after_sync_cmds<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     sp: &Mutex<SpecPool<C>>,
     ucp: &Mutex<UncomPool<C>>,
 ) {
+    if cmd_entries.is_empty() {
+        return;
+    }
     let resp_txs = cmd_entries.iter().map(|(_, tx)| tx);
     let highest_index = cmd_entries
         .last()
