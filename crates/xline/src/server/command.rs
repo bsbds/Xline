@@ -23,7 +23,6 @@ use crate::{
     rpc::{RequestBackend, RequestWrapper},
     storage::{
         db::{WriteOp, DB},
-        index::{Index, IndexTransactionOperate},
         storage_api::XlineStorageOps,
         AlarmStore, AuthStore, KvStore, LeaseStore,
     },
@@ -74,8 +73,6 @@ pub(crate) struct CommandExecutor {
     alarm_storage: Arc<AlarmStore>,
     /// persistent storage
     persistent: Arc<DB>,
-    /// Key Index
-    kv_index: Arc<Index>,
     /// Barrier for applied index
     index_barrier: Arc<IndexBarrier>,
     /// Barrier for propose id
@@ -224,7 +221,6 @@ impl CommandExecutor {
         lease_storage: Arc<LeaseStore>,
         alarm_storage: Arc<AlarmStore>,
         persistent: Arc<DB>,
-        kv_index: Arc<Index>,
         index_barrier: Arc<IndexBarrier>,
         id_barrier: Arc<IdBarrier<InflightId>>,
         compact_events: Arc<DashMap<u64, Arc<Event>>>,
@@ -238,7 +234,6 @@ impl CommandExecutor {
             lease_storage,
             alarm_storage,
             persistent,
-            kv_index,
             index_barrier,
             id_barrier,
             compact_events,
@@ -321,7 +316,6 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
             .collect::<Result<_, _>>()?;
 
         let txn_db = self.persistent.transaction();
-        let mut txn_index = self.kv_index.transaction();
         txn_db.write_op(WriteOp::PutAppliedIndex(highest_index))?;
 
         let mut resps = Vec::with_capacity(cmds.len());
@@ -336,12 +330,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
                 })
                 .transpose()?;
             let (asr, wr_ops) = match wrapper.backend() {
-                RequestBackend::Kv => (
-                    self.kv_storage
-                        .after_sync(wrapper, &txn_db, &mut txn_index)
-                        .await?,
-                    vec![],
-                ),
+                RequestBackend::Kv => (self.kv_storage.after_sync(wrapper, &txn_db).await?, vec![]),
                 RequestBackend::Auth => self.auth_storage.after_sync(wrapper)?,
                 RequestBackend::Lease => self.lease_storage.after_sync(wrapper).await?,
                 RequestBackend::Alarm => self.alarm_storage.after_sync(wrapper),
@@ -369,7 +358,6 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         txn_db
             .commit()
             .map_err(|e| ExecuteError::DbError(e.to_string()))?;
-        txn_index.commit();
 
         if !quota_enough {
             if let Some(alarmer) = self.alarmer.read().clone() {

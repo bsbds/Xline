@@ -459,12 +459,10 @@ impl XlineServer {
             self.cluster_config.curp_config().heartbeat_interval,
             self.cluster_config.curp_config().candidate_timeout_ticks,
         );
-
-        let kv_index = Arc::new(Index::new());
         let (kv_storage, lease_storage, auth_storage, alarm_storage, watcher) = self
             .construct_underlying_storages(
                 Arc::clone(&persistent),
-                Arc::clone(&kv_index),
+                Arc::new(Index::new()),
                 lease_collection,
                 Arc::clone(&header_gen),
                 key_pair,
@@ -480,7 +478,6 @@ impl XlineServer {
             Arc::clone(&lease_storage),
             Arc::clone(&alarm_storage),
             Arc::clone(&persistent),
-            kv_index,
             Arc::clone(&index_barrier),
             Arc::clone(&id_barrier),
             Arc::clone(&compact_events),

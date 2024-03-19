@@ -2,7 +2,7 @@
 #![allow(unused)]
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{btree_map, BTreeMap, HashSet},
     sync::Arc,
 };
 
@@ -16,6 +16,40 @@ use xlineapi::command::KeyRange;
 use super::revision::{KeyRevision, Revision};
 use crate::server::command::RangeType;
 
+/// Operations for `Index`
+pub(crate) trait IndexOperate {
+    /// Get `Revision` of keys, get the latest `Revision` when revision <= 0
+    fn get(&self, key: &[u8], range_end: &[u8], revision: i64) -> Vec<Revision>;
+
+    /// Register a new `KeyRevision` of the given key
+    ///
+    /// Returns a new `KeyRevision` and previous `KeyRevision` of the key
+    fn register_revision(
+        &self,
+        key: Vec<u8>,
+        revision: i64,
+        sub_revision: i64,
+    ) -> (KeyRevision, Option<KeyRevision>);
+
+    /// Gets the previous revision of the key
+    fn prev_rev(&self, key: &[u8]) -> Option<KeyRevision>;
+
+    /// Insert or update `KeyRevision`
+    fn insert(&self, key_revisions: Vec<(Vec<u8>, KeyRevision)>);
+
+    /// Mark keys as deleted and return latest revision before deletion and deletion revision
+    /// return all revision pairs and all keys in range
+    fn delete(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        revision: i64,
+        sub_revision: i64,
+    ) -> (Vec<(Revision, Revision)>, Vec<Vec<u8>>);
+}
+
+// TODO: Remove `RwLock` from this data structure so that we could avoid some cloning
+// in some of the methods.
 /// A Key revisions map
 type KeyRevMap = RwLock<BTreeMap<Vec<u8>, Vec<KeyRevision>>>;
 
@@ -23,31 +57,22 @@ type KeyRevMap = RwLock<BTreeMap<Vec<u8>, Vec<KeyRevision>>>;
 #[derive(Debug)]
 pub(crate) struct Index {
     /// Inner struct of `Index`
-    inner: Arc<KeyRevMap>,
-}
-
-/// A transaction for `Index`
-#[derive(Debug)]
-pub(crate) struct IndexTransaction {
-    /// Inner struct of `Index`
-    index_ref: Arc<KeyRevMap>,
-    /// State current modification
-    state: BTreeMap<Vec<u8>, Vec<KeyRevision>>,
+    inner: Arc<RwLock<IndexInner>>,
 }
 
 impl Index {
     /// New `Index`
     pub(crate) fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(BTreeMap::new())),
+            inner: Arc::new(RwLock::default()),
         }
     }
 
     /// Creates a transaction
-    pub(crate) fn transaction(&self) -> IndexTransaction {
-        IndexTransaction {
+    pub(crate) fn state(&self) -> IndexState {
+        IndexState {
             index_ref: Arc::clone(&self.inner),
-            state: BTreeMap::new(),
+            state: RwLock::default(),
         }
     }
 
@@ -81,8 +106,103 @@ impl Index {
 
     /// Get all revisions that need to be kept after compact at the given revision
     pub(crate) fn keep(&self, at_rev: i64) -> HashSet<Revision> {
+        self.inner.read().keep(at_rev)
+    }
+
+    /// Insert `KeyRevision` of deleted and generate `Revision` pair of deleted
+    fn gen_del_revision(
+        revs: &mut Vec<KeyRevision>,
+        revision: i64,
+        sub_revision: i64,
+    ) -> Option<(Revision, Revision)> {
+        let last_available_rev = Self::get_revision(revs, 0)?;
+        let del_rev = KeyRevision::new_deletion(revision, sub_revision);
+        revs.push(del_rev);
+        Some((last_available_rev, del_rev.as_revision()))
+    }
+}
+
+impl Index {
+    /// Get `Revision` of keys from one revision
+    pub(super) fn get_from_rev(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        revision: i64,
+    ) -> Vec<Revision> {
+        self.inner.read().get_from_rev(key, range_end, revision)
+    }
+
+    /// Restore `KeyRevision` of a key
+    pub(super) fn restore(
+        &self,
+        key: Vec<u8>,
+        revision: i64,
+        sub_revision: i64,
+        create_revision: i64,
+        version: i64,
+    ) {
+        self.inner
+            .write()
+            .restore(key, revision, sub_revision, create_revision, version)
+    }
+
+    /// Compact a `KeyRevision` by removing the versions with smaller or equal
+    /// revision than the given atRev except the largest one (If the largest one is
+    /// a tombstone, it will not be kept).
+    pub(super) fn compact(&self, at_rev: i64) -> Vec<KeyRevision> {
+        self.inner.write().compact(at_rev)
+    }
+}
+
+impl IndexOperate for Index {
+    fn get(&self, key: &[u8], range_end: &[u8], revision: i64) -> Vec<Revision> {
+        self.inner.read().get(key, range_end, revision)
+    }
+
+    fn register_revision(
+        &self,
+        key: Vec<u8>,
+        revision: i64,
+        sub_revision: i64,
+    ) -> (KeyRevision, Option<KeyRevision>) {
+        self.inner
+            .write()
+            .register_revision(key, revision, sub_revision)
+    }
+
+    fn prev_rev(&self, key: &[u8]) -> Option<KeyRevision> {
+        self.inner.read().prev_rev(key)
+    }
+
+    fn insert(&self, key_revisions: Vec<(Vec<u8>, KeyRevision)>) {
+        self.inner.write().insert(key_revisions)
+    }
+
+    fn delete(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        revision: i64,
+        sub_revision: i64,
+    ) -> (Vec<(Revision, Revision)>, Vec<Vec<u8>>) {
+        self.inner
+            .write()
+            .delete(key, range_end, revision, sub_revision)
+    }
+}
+
+/// Inner type of `Index`
+#[derive(Debug, Default)]
+struct IndexInner {
+    rev_map: BTreeMap<Vec<u8>, Vec<KeyRevision>>,
+}
+
+impl IndexInner {
+    /// Get all revisions that need to be kept after compact at the given revision
+    pub(crate) fn keep(&self, at_rev: i64) -> HashSet<Revision> {
         let mut revs = HashSet::new();
-        self.inner.read().values().for_each(|revisions| {
+        self.rev_map.values().for_each(|revisions| {
             if let Some(revision) = revisions.first() {
                 if revision.mod_revision < at_rev {
                     let pivot = revisions.partition_point(|rev| rev.mod_revision <= at_rev);
@@ -100,234 +220,45 @@ impl Index {
         });
         revs
     }
-}
 
-impl Index {
-    /// Get `Revision` of keys, get the latest `Revision` when revision <= 0
-    pub(super) fn get(&self, key: &[u8], range_end: &[u8], revision: i64) -> Vec<Revision> {
-        self.with_transaction(|txn| txn.get(key, range_end, revision))
-    }
-
-    /// Register a new `KeyRevision` of the given key
-    pub(super) fn register_revision(
-        &self,
-        key: &[u8],
-        revision: i64,
-        sub_revision: i64,
-    ) -> KeyRevision {
-        self.with_transaction(|txn| txn.register_revision(key, revision, sub_revision))
-    }
-
-    /// Register a new `KeyRevision` of the given key
-    pub(super) fn insert(&self, key_revisions: Vec<(Vec<u8>, KeyRevision)>) {
-        self.with_transaction(|txn| txn.insert(key_revisions));
-    }
-
-    /// Mark keys as deleted and return latest revision before deletion and deletion revision
-    /// return all revision pairs and all keys in range
-    pub(super) fn delete(
-        &self,
-        key: &[u8],
-        range_end: &[u8],
-        revision: i64,
-        sub_revision: i64,
-    ) -> (Vec<(Revision, Revision)>, Vec<Vec<u8>>) {
-        self.with_transaction(|txn| txn.delete(key, range_end, revision, sub_revision))
-    }
-
-    /// Executes a function with a transaction
-    fn with_transaction<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut IndexTransaction) -> R,
-    {
-        let mut txn = self.transaction();
-        let res = f(&mut txn);
-        txn.commit();
-        res
-    }
-}
-
-impl IndexTransaction {
-    /// Gets the revisions for a single key
-    fn one_key_revisions(&self, key: &[u8]) -> Vec<KeyRevision> {
-        self.index_ref
-            .read()
-            .get(key)
-            .into_iter()
-            .cloned()
-            .chain(self.state.get(key).into_iter().cloned())
-            .flatten()
-            .collect()
-    }
-
-    /// Gets the revisions for a range of keys
-    fn range_key_revisions(&self, range: KeyRange) -> BTreeMap<Vec<u8>, Vec<KeyRevision>> {
-        let mut map: BTreeMap<Vec<u8>, Vec<KeyRevision>> = BTreeMap::new();
-        for (key, value) in self
-            .index_ref
-            .read()
-            .range(range.clone())
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .chain(self.state.range(range).map(|(k, v)| (k.clone(), v.clone())))
-        {
-            let entry = map.entry(key.clone()).or_default();
-            entry.extend(value);
-        }
-        map
-    }
-
-    /// Gets the revisions for all keys
-    fn all_key_revisions(&self) -> BTreeMap<Vec<u8>, Vec<KeyRevision>> {
-        let mut map: BTreeMap<Vec<u8>, Vec<KeyRevision>> = BTreeMap::new();
-        for (key, value) in self
-            .index_ref
-            .read()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .chain(self.state.clone().into_iter())
-        {
-            let entry = map.entry(key.clone()).or_default();
-            entry.extend(value.clone());
-        }
-        map
-    }
-
-    /// Deletes on key
-    fn delete_one(
-        &mut self,
-        key: &[u8],
-        revision: i64,
-        sub_revision: i64,
-    ) -> Option<((Revision, Revision), Vec<u8>)> {
-        let revs = self.one_key_revisions(key);
-        let last_available_rev = Index::get_revision(&revs, 0)?;
-        let entry = self.state.entry(key.to_vec()).or_insert(vec![]);
-        let del_rev = KeyRevision::new_deletion(revision, sub_revision);
-        entry.push(del_rev);
-        let pair = (last_available_rev, del_rev.as_revision());
-
-        Some((pair, key.to_vec()))
-    }
-
-    /// Deletes a range of keys
-    fn delete_range(
-        &mut self,
-        range: KeyRange,
-        revision: i64,
-        sub_revision: i64,
-    ) -> (Vec<(Revision, Revision)>, Vec<Vec<u8>>) {
-        self.range_key_revisions(range)
-            .into_keys()
-            .zip(0..)
-            .filter_map(|(key, i)| self.delete_one(&key, revision, sub_revision.overflow_add(i)))
-            .unzip()
-    }
-
-    /// Deletes all keys
-    fn delete_all(
-        &mut self,
-        revision: i64,
-        sub_revision: i64,
-    ) -> (Vec<(Revision, Revision)>, Vec<Vec<u8>>) {
-        self.all_key_revisions()
-            .into_keys()
-            .zip(0..)
-            .filter_map(|(key, i)| self.delete_one(&key, revision, sub_revision.overflow_add(i)))
-            .unzip()
-    }
-
-    /// Reads an entry
-    #[allow(clippy::needless_pass_by_value)]
-    fn entry_read(entry: Entry<Vec<u8>, RwLock<Vec<KeyRevision>>>) -> (Vec<u8>, Vec<KeyRevision>) {
-        (entry.key().clone(), entry.value().read().clone())
-    }
-}
-
-/// Operations of Index
-pub(super) trait IndexOperate {
     /// Get `Revision` of keys from one revision
-    fn get_from_rev(&self, key: &[u8], range_end: &[u8], revision: i64) -> Vec<Revision>;
-
-    /// Restore `KeyRevision` of a key
-    fn restore(
+    pub(super) fn get_from_rev(
         &self,
-        key: Vec<u8>,
-        revision: i64,
-        sub_revision: i64,
-        create_revision: i64,
-        version: i64,
-    );
-
-    /// Compact a `KeyRevision` by removing the versions with smaller or equal
-    /// revision than the given atRev except the largest one (If the largest one is
-    /// a tombstone, it will not be kept).
-    fn compact(&self, at_rev: i64) -> Vec<KeyRevision>;
-}
-
-/// Transactional operations for `Index`
-pub(crate) trait IndexTransactionOperate {
-    /// Get `Revision` of keys, get the latest `Revision` when revision <= 0
-    fn get(&self, key: &[u8], range_end: &[u8], revision: i64) -> Vec<Revision>;
-
-    /// Register a new `KeyRevision` of the given key
-    fn register_revision(&self, key: &[u8], revision: i64, sub_revision: i64) -> KeyRevision;
-
-    /// Insert or update `KeyRevision`
-    fn insert(&mut self, key_revisions: Vec<(Vec<u8>, KeyRevision)>);
-
-    /// Mark keys as deleted and return latest revision before deletion and deletion revision
-    /// return all revision pairs and all keys in range
-    fn delete(
-        &mut self,
         key: &[u8],
         range_end: &[u8],
         revision: i64,
-        sub_revision: i64,
-    ) -> (Vec<(Revision, Revision)>, Vec<Vec<u8>>);
-
-    /// Commits all changes
-    fn commit(self);
-
-    /// Rollbacks all changes
-    fn rollback(&mut self);
-}
-
-impl IndexOperate for Index {
-    fn get_from_rev(&self, key: &[u8], range_end: &[u8], revision: i64) -> Vec<Revision> {
+    ) -> Vec<Revision> {
         match RangeType::get_range_type(key, range_end) {
             RangeType::OneKey => self
-                .inner
-                .read()
+                .rev_map
                 .get(key)
-                .map(|revs| Self::filter_revision(revs.as_ref(), revision))
+                .map(|revs| Index::filter_revision(revs.as_ref(), revision))
                 .unwrap_or_default(),
             RangeType::AllKeys => self
-                .inner
-                .read()
+                .rev_map
                 .values()
-                .flat_map(|revs| Self::filter_revision(revs.as_ref(), revision))
+                .flat_map(|revs| Index::filter_revision(revs.as_ref(), revision))
                 .sorted()
                 .collect(),
             RangeType::Range => self
-                .inner
-                .read()
+                .rev_map
                 .range(KeyRange::new(key, range_end))
-                .flat_map(|(_, revs)| Self::filter_revision(revs.as_ref(), revision))
+                .flat_map(|(_, revs)| Index::filter_revision(revs.as_ref(), revision))
                 .sorted()
                 .collect(),
         }
     }
 
-    fn restore(
-        &self,
+    /// Restore `KeyRevision` of a key
+    pub(super) fn restore(
+        &mut self,
         key: Vec<u8>,
         revision: i64,
         sub_revision: i64,
         create_revision: i64,
         version: i64,
     ) {
-        let mut inner_w = self.inner.write();
-        let revisions = inner_w.entry(key).or_default();
+        let revisions = self.rev_map.entry(key).or_default();
         revisions.push(KeyRevision::new(
             create_revision,
             version,
@@ -336,11 +267,14 @@ impl IndexOperate for Index {
         ));
     }
 
-    fn compact(&self, at_rev: i64) -> Vec<KeyRevision> {
+    /// Compact a `KeyRevision` by removing the versions with smaller or equal
+    /// revision than the given atRev except the largest one (If the largest one is
+    /// a tombstone, it will not be kept).
+    pub(super) fn compact(&mut self, at_rev: i64) -> Vec<KeyRevision> {
         let mut revs = Vec::new();
         let mut del_keys = Vec::new();
 
-        self.inner.write().iter_mut().for_each(|(key, revisions)| {
+        self.rev_map.iter_mut().for_each(|(key, revisions)| {
             if let Some(revision) = revisions.first() {
                 if revision.mod_revision < at_rev {
                     let pivot = revisions.partition_point(|rev| rev.mod_revision <= at_rev);
@@ -366,13 +300,253 @@ impl IndexOperate for Index {
             }
         });
         for key in del_keys {
-            let _ignore = self.inner.write().remove(&key);
+            let _ignore = self.rev_map.remove(&key);
         }
         revs
     }
 }
 
-impl IndexTransactionOperate for IndexTransaction {
+impl IndexInner {
+    fn get(&self, key: &[u8], range_end: &[u8], revision: i64) -> Vec<Revision> {
+        match RangeType::get_range_type(key, range_end) {
+            RangeType::OneKey => self
+                .rev_map
+                .get(key)
+                .and_then(|revs| Index::get_revision(revs.as_ref(), revision))
+                .map(|rev| vec![rev])
+                .unwrap_or_default(),
+            RangeType::AllKeys => self
+                .rev_map
+                .values()
+                .filter_map(|revs| Index::get_revision(revs.as_ref(), revision))
+                .collect(),
+            RangeType::Range => self
+                .rev_map
+                .range(KeyRange::new(key, range_end))
+                .filter_map(|(_, revs)| Index::get_revision(revs.as_ref(), revision))
+                .collect(),
+        }
+    }
+
+    fn insert(&mut self, key_revisions: Vec<(Vec<u8>, KeyRevision)>) {
+        for (key, revision) in key_revisions {
+            if let Some(revs) = self.rev_map.get_mut::<[u8]>(key.as_ref()) {
+                revs.push(revision);
+            } else {
+                _ = self.rev_map.insert(key, vec![revision]);
+            }
+        }
+    }
+
+    fn delete(
+        &mut self,
+        key: &[u8],
+        range_end: &[u8],
+        revision: i64,
+        sub_revision: i64,
+    ) -> (Vec<(Revision, Revision)>, Vec<Vec<u8>>) {
+        let (pairs, keys) = match RangeType::get_range_type(key, range_end) {
+            RangeType::OneKey => {
+                let pairs: Vec<(Revision, Revision)> = self
+                    .rev_map
+                    .get_mut(key)
+                    .into_iter()
+                    .filter_map(|revs| {
+                        Index::gen_del_revision(revs.as_mut(), revision, sub_revision)
+                    })
+                    .collect();
+                let keys = if pairs.is_empty() {
+                    vec![]
+                } else {
+                    vec![key.to_vec()]
+                };
+                (pairs, keys)
+            }
+            RangeType::AllKeys => self
+                .rev_map
+                .iter_mut()
+                .zip(0..)
+                .filter_map(|((key, revs), i)| {
+                    Index::gen_del_revision(revs, revision, sub_revision.overflow_add(i))
+                        .map(|pair| (pair, key.clone()))
+                })
+                .unzip(),
+            RangeType::Range => self
+                .rev_map
+                .range_mut(KeyRange::new(key, range_end))
+                .zip(0..)
+                .filter_map(|((key, revs), i)| {
+                    Index::gen_del_revision(revs, revision, sub_revision.overflow_add(i))
+                        .map(|pair| (pair, key.clone()))
+                })
+                .unzip(),
+        };
+        (pairs, keys)
+    }
+
+    fn register_revision(
+        &mut self,
+        key: Vec<u8>,
+        revision: i64,
+        sub_revision: i64,
+    ) -> (KeyRevision, Option<KeyRevision>) {
+        match self.rev_map.entry(key) {
+            btree_map::Entry::Vacant(e) => {
+                let new_rev = KeyRevision::new(revision, 1, revision, sub_revision);
+                let _ignore = e.insert(vec![new_rev]);
+                (new_rev, None)
+            }
+            btree_map::Entry::Occupied(e) => {
+                let revisions = e.into_mut();
+                let last = revisions
+                    .last()
+                    .unwrap_or_else(|| unreachable!("empty revision list"))
+                    .clone();
+                let new_rev = if last.is_deleted() {
+                    KeyRevision::new(revision, 1, revision, sub_revision)
+                } else {
+                    KeyRevision::new(
+                        last.create_revision,
+                        last.version.overflow_add(1),
+                        revision,
+                        sub_revision,
+                    )
+                };
+                revisions.push(new_rev);
+                (new_rev, Some(last))
+            }
+        }
+    }
+
+    fn prev_rev(&self, key: &[u8]) -> Option<KeyRevision> {
+        self.rev_map.get(key).and_then(|revs| revs.last()).copied()
+    }
+}
+
+/// A index with extra state, it won't mutate the index directly before commit
+#[derive(Debug)]
+pub(crate) struct IndexState {
+    /// Inner struct of `Index`
+    index_ref: Arc<RwLock<IndexInner>>,
+    /// State current modification
+    state: KeyRevMap,
+}
+
+impl IndexState {
+    /// Commits all changes
+    pub(crate) fn commit(self) {
+        let mut index_w = self.index_ref.write();
+        for (key, state_revs) in self.state.write().iter() {
+            let revs = index_w.rev_map.entry(key.clone()).or_default();
+            revs.extend_from_slice(state_revs);
+        }
+    }
+
+    /// Discards all changes
+    pub(crate) fn discard(&self) {
+        self.state.write().clear();
+    }
+
+    /// Gets the revisions for a single key
+    fn one_key_revisions(&self, key: &[u8]) -> Vec<KeyRevision> {
+        let index_r = self.index_ref.read();
+        let state_r = self.state.read();
+        let mut result = index_r.rev_map.get(key).cloned().unwrap_or_default();
+        if let Some(revs) = state_r.get(key) {
+            result.extend_from_slice(&revs);
+        }
+        result
+    }
+
+    /// Gets the revisions for a range of keys
+    fn range_key_revisions(&self, range: KeyRange) -> BTreeMap<Vec<u8>, Vec<KeyRevision>> {
+        let mut map: BTreeMap<Vec<u8>, Vec<KeyRevision>> = BTreeMap::new();
+        let state_r = self.state.read();
+        for (key, value) in self
+            .index_ref
+            .read()
+            .rev_map
+            .range(range.clone())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .chain(state_r.range(range).map(|(k, v)| (k.clone(), v.clone())))
+        {
+            let entry = map.entry(key.clone()).or_default();
+            entry.extend(value);
+        }
+        map
+    }
+
+    /// Gets the revisions for all keys
+    fn all_key_revisions(&self) -> BTreeMap<Vec<u8>, Vec<KeyRevision>> {
+        let mut map: BTreeMap<Vec<u8>, Vec<KeyRevision>> = BTreeMap::new();
+        let state_r = self.state.read();
+        for (key, value) in self
+            .index_ref
+            .read()
+            .rev_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .chain(state_r.clone().into_iter())
+        {
+            let entry = map.entry(key.clone()).or_default();
+            entry.extend(value.clone());
+        }
+        map
+    }
+
+    /// Deletes on key
+    fn delete_one(
+        &self,
+        key: &[u8],
+        revision: i64,
+        sub_revision: i64,
+    ) -> Option<((Revision, Revision), Vec<u8>)> {
+        let mut state_w = self.state.write();
+        let revs = self.one_key_revisions(key);
+        let last_available_rev = Index::get_revision(&revs, 0)?;
+        let entry = state_w.entry(key.to_vec()).or_insert(vec![]);
+        let del_rev = KeyRevision::new_deletion(revision, sub_revision);
+        entry.push(del_rev);
+        let pair = (last_available_rev, del_rev.as_revision());
+
+        Some((pair, key.to_vec()))
+    }
+
+    /// Deletes a range of keys
+    fn delete_range(
+        &self,
+        range: KeyRange,
+        revision: i64,
+        sub_revision: i64,
+    ) -> (Vec<(Revision, Revision)>, Vec<Vec<u8>>) {
+        self.range_key_revisions(range)
+            .into_keys()
+            .zip(0..)
+            .filter_map(|(key, i)| self.delete_one(&key, revision, sub_revision.overflow_add(i)))
+            .unzip()
+    }
+
+    /// Deletes all keys
+    fn delete_all(
+        &self,
+        revision: i64,
+        sub_revision: i64,
+    ) -> (Vec<(Revision, Revision)>, Vec<Vec<u8>>) {
+        self.all_key_revisions()
+            .into_keys()
+            .zip(0..)
+            .filter_map(|(key, i)| self.delete_one(&key, revision, sub_revision.overflow_add(i)))
+            .unzip()
+    }
+
+    /// Reads an entry
+    #[allow(clippy::needless_pass_by_value)]
+    fn entry_read(entry: Entry<Vec<u8>, RwLock<Vec<KeyRevision>>>) -> (Vec<u8>, Vec<KeyRevision>) {
+        (entry.key().clone(), entry.value().read().clone())
+    }
+}
+
+impl IndexOperate for IndexState {
     fn get(&self, key: &[u8], range_end: &[u8], revision: i64) -> Vec<Revision> {
         match RangeType::get_range_type(key, range_end) {
             RangeType::OneKey => Index::get_revision(&self.one_key_revisions(key), revision)
@@ -391,36 +565,82 @@ impl IndexTransactionOperate for IndexTransaction {
         }
     }
 
-    fn register_revision(&self, key: &[u8], revision: i64, sub_revision: i64) -> KeyRevision {
-        self.one_key_revisions(key).last().map_or(
-            KeyRevision::new(revision, 1, revision, sub_revision),
-            |rev| {
-                if rev.is_deleted() {
-                    KeyRevision::new(revision, 1, revision, sub_revision)
-                } else {
-                    KeyRevision::new(
-                        rev.create_revision,
-                        rev.version.overflow_add(1),
-                        revision,
-                        sub_revision,
-                    )
-                }
-            },
-        )
+    fn register_revision(
+        &self,
+        key: Vec<u8>,
+        revision: i64,
+        sub_revision: i64,
+    ) -> (KeyRevision, Option<KeyRevision>) {
+        let index_w = &mut self.index_ref.write().rev_map;
+        let mut state_w = self.state.write();
+
+        let next_rev = |revisions: &mut Vec<KeyRevision>| {
+            let last = revisions
+                .last()
+                .unwrap_or_else(|| unreachable!("empty revision list"))
+                .clone();
+            let new_rev = if last.is_deleted() {
+                KeyRevision::new(revision, 1, revision, sub_revision)
+            } else {
+                KeyRevision::new(
+                    last.create_revision,
+                    last.version.overflow_add(1),
+                    revision,
+                    sub_revision,
+                )
+            };
+            (new_rev, Some(last))
+        };
+
+        match (index_w.entry(key.clone()), state_w.entry(key)) {
+            (btree_map::Entry::Vacant(_), btree_map::Entry::Vacant(e)) => {
+                let new_rev = KeyRevision::new(revision, 1, revision, sub_revision);
+                let _ignore = e.insert(vec![new_rev]);
+                (new_rev, None)
+            }
+            (btree_map::Entry::Vacant(_), btree_map::Entry::Occupied(mut e)) => {
+                let (new_rev, last) = next_rev(e.get_mut());
+                e.get_mut().push(new_rev);
+                (new_rev, last)
+            }
+            (btree_map::Entry::Occupied(e), btree_map::Entry::Vacant(se)) => {
+                let (new_rev, last) = next_rev(e.into_mut());
+                let _ignore = se.insert(vec![new_rev]);
+                (new_rev, last)
+            }
+            (btree_map::Entry::Occupied(_), btree_map::Entry::Occupied(mut e)) => {
+                let (new_rev, last) = next_rev(e.get_mut());
+                e.get_mut().push(new_rev);
+                (new_rev, last)
+            }
+        }
     }
 
-    fn insert(&mut self, key_revisions: Vec<(Vec<u8>, KeyRevision)>) {
+    fn prev_rev(&self, key: &[u8]) -> Option<KeyRevision> {
+        let index_r = &self.index_ref.read().rev_map;
+        let mut state_r = self.state.read();
+
+        match (index_r.get(key), state_r.get(key)) {
+            (None, None) => None,
+            (None, Some(revs)) => revs.last().copied(),
+            (Some(revs), None) => revs.last().copied(),
+            (Some(_), Some(revs)) => revs.last().copied(),
+        }
+    }
+
+    fn insert(&self, key_revisions: Vec<(Vec<u8>, KeyRevision)>) {
+        let mut state_w = self.state.write();
         for (key, revision) in key_revisions {
-            if let Some(entry) = self.state.get_mut::<[u8]>(key.as_ref()) {
-                entry.push(revision);
+            if let Some(revs) = state_w.get_mut::<[u8]>(key.as_ref()) {
+                revs.push(revision);
             } else {
-                _ = self.state.insert(key, vec![revision]);
+                _ = state_w.insert(key, vec![revision]);
             }
         }
     }
 
     fn delete(
-        &mut self,
+        &self,
         key: &[u8],
         range_end: &[u8],
         revision: i64,
@@ -439,18 +659,6 @@ impl IndexTransactionOperate for IndexTransaction {
 
         (pairs, keys)
     }
-
-    fn commit(self) {
-        let mut index_w = self.index_ref.write();
-        for (key, state_revs) in self.state {
-            let revs = index_w.entry(key).or_default();
-            revs.extend(state_revs);
-        }
-    }
-
-    fn rollback(&mut self) {
-        self.state.clear();
-    }
 }
 
 #[cfg(test)]
@@ -460,6 +668,7 @@ mod test {
     fn match_values(index: &Index, key: impl AsRef<[u8]>, expected_values: &[KeyRevision]) {
         let inner_r = index.inner.read();
         let revs = inner_r
+            .rev_map
             .get(key.as_ref())
             .expect("index entry should not be None");
         assert_eq!(*revs, expected_values);
@@ -467,23 +676,50 @@ mod test {
 
     fn init_and_test_insert() -> Index {
         let index = Index::new();
-        let mut txn = index.transaction();
+        let mut txn = index.state();
 
         txn.insert(vec![
-            (b"key".to_vec(), txn.register_revision(b"key", 1, 3)),
-            (b"foo".to_vec(), txn.register_revision(b"foo", 4, 5)),
-            (b"bar".to_vec(), txn.register_revision(b"bar", 5, 4)),
+            (
+                b"key".to_vec(),
+                txn.register_revision(b"key".to_vec(), 1, 3).0,
+            ),
+            (
+                b"foo".to_vec(),
+                txn.register_revision(b"foo".to_vec(), 4, 5).0,
+            ),
+            (
+                b"bar".to_vec(),
+                txn.register_revision(b"bar".to_vec(), 5, 4).0,
+            ),
         ]);
 
         txn.insert(vec![
-            (b"key".to_vec(), txn.register_revision(b"key", 2, 2)),
-            (b"foo".to_vec(), txn.register_revision(b"foo", 6, 6)),
-            (b"bar".to_vec(), txn.register_revision(b"bar", 7, 7)),
+            (
+                b"key".to_vec(),
+                txn.register_revision(b"key".to_vec(), 2, 2).0,
+            ),
+            (
+                b"foo".to_vec(),
+                txn.register_revision(b"foo".to_vec(), 6, 6).0,
+            ),
+            (
+                b"bar".to_vec(),
+                txn.register_revision(b"bar".to_vec(), 7, 7).0,
+            ),
         ]);
         txn.insert(vec![
-            (b"key".to_vec(), txn.register_revision(b"key", 3, 1)),
-            (b"foo".to_vec(), txn.register_revision(b"foo", 8, 8)),
-            (b"bar".to_vec(), txn.register_revision(b"bar", 9, 9)),
+            (
+                b"key".to_vec(),
+                txn.register_revision(b"key".to_vec(), 3, 1).0,
+            ),
+            (
+                b"foo".to_vec(),
+                txn.register_revision(b"foo".to_vec(), 8, 8).0,
+            ),
+            (
+                b"bar".to_vec(),
+                txn.register_revision(b"bar".to_vec(), 9, 9).0,
+            ),
         ]);
         txn.commit();
 
@@ -523,7 +759,7 @@ mod test {
     #[test]
     fn test_get() {
         let index = init_and_test_insert();
-        let txn = index.transaction();
+        let txn = index.state();
         assert_eq!(txn.get(b"key", b"", 0), vec![Revision::new(3, 1)]);
         assert_eq!(txn.get(b"key", b"", 1), vec![Revision::new(1, 3)]);
         txn.commit();
@@ -559,7 +795,7 @@ mod test {
     #[test]
     fn test_delete() {
         let index = init_and_test_insert();
-        let mut txn = index.transaction();
+        let mut txn = index.state();
 
         assert_eq!(
             txn.delete(b"key", b"", 10, 0),
@@ -662,12 +898,12 @@ mod test {
     #[test]
     fn test_compact_with_deletion() {
         let index = init_and_test_insert();
-        let mut txn = index.transaction();
+        let mut txn = index.state();
 
         txn.delete(b"a", b"g", 10, 0);
         txn.insert(vec![(
             b"bar".to_vec(),
-            txn.register_revision(b"bar", 11, 0),
+            txn.register_revision(b"bar".to_vec(), 11, 0).0,
         )]);
         txn.commit();
 

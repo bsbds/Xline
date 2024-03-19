@@ -40,7 +40,7 @@ use crate::{
         LeaseRevokeRequest, LeaseRevokeResponse, LeaseStatus, PbLease, RequestWrapper,
         ResponseHeader, ResponseWrapper,
     },
-    storage::{index::IndexTransactionOperate, KvStore},
+    storage::KvStore,
 };
 
 /// Max lease ttl
@@ -352,7 +352,7 @@ impl LeaseStore {
         }
 
         let txn_db = self.db.transaction();
-        let mut txn_index = self.index.transaction();
+        let mut txn_index = self.index.state();
 
         for (key, mut sub_revision) in del_keys.iter().zip(0..) {
             let deleted = KvStore::delete_keys(
