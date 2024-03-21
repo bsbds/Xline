@@ -259,17 +259,21 @@ where
         if self.left_ref(z, Node::is_sentinel) {
             x = self.node_ref(z, Node::right);
             self.transplant(z, x);
+            self.update_max_bottom_up(self.node_ref(z, Node::parent));
         } else if self.right_ref(z, Node::is_sentinel) {
             x = self.node_ref(z, Node::left);
             self.transplant(z, x);
+            self.update_max_bottom_up(self.node_ref(z, Node::parent));
         } else {
             y = self.tree_minimum(self.node_ref(z, Node::right));
+            let mut p = y;
             y_orig_color = self.node_ref(y, Node::color);
             x = self.node_ref(y, Node::right);
             if self.node_ref(y, Node::parent) == z {
                 self.node_mut(x, Node::set_parent(y));
             } else {
                 self.transplant(y, x);
+                p = self.node_ref(y, Node::parent);
                 self.node_mut(y, Node::set_right(self.node_ref(z, Node::right)));
                 self.right_mut(y, Node::set_parent(y));
             }
@@ -278,7 +282,7 @@ where
             self.left_mut(y, Node::set_parent(y));
             self.node_mut(y, Node::set_color(self.node_ref(z, Node::color)));
 
-            self.update_max_bottom_up(y);
+            self.update_max_bottom_up(p);
         }
 
         if matches!(y_orig_color, Color::Black) {
@@ -546,13 +550,10 @@ where
     fn transplant(&mut self, u: NodeIndex<Ix>, v: NodeIndex<Ix>) {
         if self.parent_ref(u, Node::is_sentinel) {
             self.root = v;
+        } else if self.is_left_child(u) {
+            self.parent_mut(u, Node::set_left(v));
         } else {
-            if self.is_left_child(u) {
-                self.parent_mut(u, Node::set_left(v));
-            } else {
-                self.parent_mut(u, Node::set_right(v));
-            }
-            self.update_max_bottom_up(self.node_ref(u, Node::parent));
+            self.parent_mut(u, Node::set_right(v));
         }
         self.node_mut(v, Node::set_parent(self.node_ref(u, Node::parent)));
     }
