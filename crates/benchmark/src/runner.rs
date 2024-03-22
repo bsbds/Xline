@@ -10,7 +10,7 @@ use std::{
 use anyhow::Result;
 use clippy_utilities::{NumericCast, OverflowArithmetic};
 use indicatif::ProgressBar;
-use rand::RngCore;
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use tokio::{
     sync::{
         mpsc::{self, Receiver},
@@ -201,17 +201,19 @@ impl CommandRunner {
         let b = Arc::new(Barrier::new(clients.len().overflow_add(1)));
         let (tx, rx) = mpsc::channel(clients.len());
 
+        let mut val_rng = StdRng::from_seed([0; 32]);
         let mut val = vec![0u8; val_size];
-        rand::thread_rng().fill_bytes(&mut val);
+        val_rng.fill_bytes(&mut val);
         let val = Arc::new(val);
 
         let mut handles = Vec::with_capacity(clients.len());
-        for mut client in clients {
+        for (id, mut client) in clients.into_iter().enumerate() {
             let c = Arc::clone(&b);
             let count_clone = Arc::clone(&count);
             let val_clone = Arc::clone(&val);
             let tx_clone = tx.clone();
             let handle = tokio::spawn(async move {
+                let mut rng = StdRng::seed_from_u64(id.numeric_cast());
                 let mut key = vec![0u8; key_size];
                 _ = c.wait().await;
                 loop {
@@ -224,7 +226,9 @@ impl CommandRunner {
                     } else {
                         Self::fill_usize_to_buf(
                             &mut key,
-                            rand::random::<usize>().overflow_rem(key_space_size),
+                            rng.next_u64()
+                                .numeric_cast::<usize>()
+                                .overflow_rem(key_space_size),
                         );
                     }
                     let start = Instant::now();
