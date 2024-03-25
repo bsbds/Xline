@@ -58,4 +58,16 @@ pub enum Commands {
         #[clap(long, default_value_t = 1)]
         key_space_size: usize,
     },
+    /// Get args
+    Get {
+        /// Key size
+        #[clap(long, default_value_t = 8)]
+        key_size: usize,
+        /// Value size
+        #[clap(long, default_value_t = 8)]
+        val_size: usize,
+        /// Total number of requests
+        #[clap(long, default_value_t = 10000)]
+        total: usize,
+    },
 }

@@ -165,6 +165,11 @@ impl CommandRunner {
                 self.txn_bench(clients, key_size, val_size, total, key_space_size)
                     .await
             }
+            Commands::Get {
+                key_size,
+                val_size,
+                total,
+            } => self.get_bench(clients, key_size, val_size, total).await,
         }
     }
 
@@ -247,6 +252,85 @@ impl CommandRunner {
                     let result = client
                         .put(PutRequest::new(key.as_slice(), val_clone.as_slice()))
                         .await;
+                    let cmd_result = CmdResult {
+                        elapsed: start.elapsed(),
+                        error: result.err().map(|e| format!("{e:?}")),
+                    };
+                    assert!(
+                        tx_clone.send(cmd_result).await.is_ok(),
+                        "failed to send cmd result"
+                    );
+                }
+            });
+            handles.push(handle);
+        }
+        drop(tx);
+        let stats = self.collecter(rx, b).await;
+        for handle in handles {
+            handle.await?;
+        }
+        Ok(stats)
+    }
+
+    /// Run get benchmark
+    async fn get_bench(
+        &mut self,
+        mut clients: Vec<BenchClient>,
+        key_size: usize,
+        val_size: usize,
+        total: usize,
+    ) -> Result<Stats> {
+        let count = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(Barrier::new(clients.len().overflow_add(1)));
+        let (tx, rx) = mpsc::channel(clients.len());
+
+        let mut val_rng = StdRng::from_seed([0; 32]);
+        let mut val = vec![0u8; val_size];
+        val_rng.fill_bytes(&mut val);
+
+        let mut put_handles = Vec::with_capacity(clients.len());
+        for is in (0..total)
+            .collect::<Vec<_>>()
+            .chunks(clients.len())
+            .map(|t| t.to_vec())
+        {
+            let mut client = clients.pop().unwrap();
+            let val_c = val.clone();
+            put_handles.push(tokio::spawn(async move {
+                let mut buf = vec![0u8; key_size];
+                for i in is {
+                    Self::fill_usize_to_buf(&mut buf, i);
+                    let _ignore = client
+                        .put(PutRequest::new(buf.clone(), val_c.clone()))
+                        .await?;
+                }
+                Ok::<_, anyhow::Error>(client)
+            }));
+        }
+        for handle in put_handles {
+            clients.push(handle.await??);
+        }
+
+        let mut handles = Vec::with_capacity(clients.len());
+        for (id, mut client) in clients.into_iter().enumerate() {
+            let c = Arc::clone(&b);
+            let count_clone = Arc::clone(&count);
+            let tx_clone = tx.clone();
+            let handle = tokio::spawn(async move {
+                let mut key = vec![0u8; key_size];
+                let mut rng = StdRng::seed_from_u64(id.numeric_cast());
+                _ = c.wait().await;
+                loop {
+                    let idx = count_clone.fetch_add(1, Ordering::Relaxed);
+                    if idx >= total {
+                        break;
+                    }
+                    Self::fill_usize_to_buf(
+                        &mut key,
+                        rng.next_u64().numeric_cast::<usize>().overflow_rem(total),
+                    );
+                    let start = Instant::now();
+                    let result = client.get(RangeRequest::new(key.as_slice())).await;
                     let cmd_result = CmdResult {
                         elapsed: start.elapsed(),
                         error: result.err().map(|e| format!("{e:?}")),
@@ -383,6 +467,7 @@ impl CommandRunner {
         let bar_len = match self.args.command {
             Commands::Put { total, .. } => total,
             Commands::Txn { total, .. } => total,
+            Commands::Get { total, .. } => total,
         };
         let bar = Arc::new(ProgressBar::new(bar_len.numeric_cast()));
 
