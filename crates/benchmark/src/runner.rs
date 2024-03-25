@@ -20,7 +20,10 @@ use tokio::{
 };
 use tracing::debug;
 use utils::config::ClientConfig;
-use xline_client::{types::kv::PutRequest, ClientOptions};
+use xline_client::{
+    types::kv::{Compare, PutRequest, RangeRequest, TxnOp, TxnRequest},
+    ClientOptions,
+};
 
 use crate::{args::Commands, bench_client::BenchClient, Benchmark};
 
@@ -153,6 +156,15 @@ impl CommandRunner {
                 )
                 .await
             }
+            Commands::Txn {
+                key_size,
+                val_size,
+                total,
+                key_space_size,
+            } => {
+                self.txn_bench(clients, key_size, val_size, total, key_space_size)
+                    .await
+            }
         }
     }
 
@@ -255,6 +267,111 @@ impl CommandRunner {
         Ok(stats)
     }
 
+    /// Run txn benchmark
+    async fn txn_bench(
+        &mut self,
+        clients: Vec<BenchClient>,
+        key_size: usize,
+        val_size: usize,
+        total: usize,
+        key_space_size: usize,
+    ) -> Result<Stats> {
+        let count = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(Barrier::new(clients.len().overflow_add(1)));
+        let (tx, rx) = mpsc::channel(clients.len());
+
+        fn next_val(val: &[u8]) -> Vec<u8> {
+            let mut new_val = val.to_vec();
+            for b in &mut new_val {
+                if *b != u8::MAX {
+                    *b += 1;
+                    return new_val;
+                }
+            }
+            panic!("reach maximum val");
+        }
+
+        let mut handles = Vec::with_capacity(clients.len());
+        for (id, mut client) in clients.into_iter().enumerate() {
+            let c = Arc::clone(&b);
+            let count_clone = Arc::clone(&count);
+            let tx_clone = tx.clone();
+            let handle = tokio::spawn(async move {
+                let mut rng = StdRng::seed_from_u64(id.numeric_cast());
+                let mut key = vec![0u8; key_size];
+                let mut val = vec![0u8; val_size];
+                _ = c.wait().await;
+                loop {
+                    let idx = count_clone.fetch_add(1, Ordering::Relaxed);
+                    if idx >= total {
+                        break;
+                    }
+                    Self::fill_usize_to_buf(
+                        &mut key,
+                        rng.next_u64()
+                            .numeric_cast::<usize>()
+                            .overflow_rem(key_space_size),
+                    );
+                    let start = Instant::now();
+                    let nextval = next_val(&val);
+                    let put_op = TxnOp::put(PutRequest::new(key.clone(), nextval.clone()));
+                    let get_op = TxnOp::range(RangeRequest::new(key.clone()));
+                    let cmp =
+                        Compare::value(key.clone(), xlineapi::CompareResult::Equal, val.clone());
+                    let result = client
+                        .txn(
+                            TxnRequest::new()
+                                .when(vec![cmp])
+                                .and_then(vec![put_op])
+                                .or_else(vec![get_op]),
+                        )
+                        .await;
+                    if let Ok(res) = result.as_ref() {
+                        if res.succeeded {
+                            val = nextval;
+                        } else {
+                            let get = res.responses.first().unwrap();
+                            if let xlineapi::Response::ResponseRange(range) =
+                                get.response.as_ref().unwrap()
+                            {
+                                if let Some(fst) = range.kvs.first().cloned() {
+                                    val = fst.value;
+                                } else {
+                                    Self::initialze_key(&mut client, key.clone(), val_size).await;
+                                }
+                            }
+                        }
+                    }
+                    let cmd_result = CmdResult {
+                        elapsed: start.elapsed(),
+                        error: result.err().map(|e| format!("{e:?}")),
+                    };
+                    assert!(
+                        tx_clone.send(cmd_result).await.is_ok(),
+                        "failed to send cmd result"
+                    );
+                }
+            });
+            handles.push(handle);
+        }
+        drop(tx);
+        let stats = self.collecter(rx, b).await;
+        for handle in handles {
+            handle.await?;
+        }
+        Ok(stats)
+    }
+
+    /// Initialize the key
+    async fn initialze_key(client: &mut BenchClient, key: Vec<u8>, val_size: usize) {
+        let init_value = vec![0; val_size];
+        let cmp = Compare::version(key.clone(), xlineapi::CompareResult::Equal, 0);
+        let put_op = TxnOp::put(PutRequest::new(key.clone(), init_value.clone()));
+        let _ignore = client
+            .txn(TxnRequest::new().when(vec![cmp]).and_then(vec![put_op]))
+            .await;
+    }
+
     /// Collect `CmdResult` and process them to `Stats`
     #[allow(
         clippy::as_conversions,
@@ -265,6 +382,7 @@ impl CommandRunner {
     async fn collecter(&mut self, mut rx: Receiver<CmdResult>, barrier: Arc<Barrier>) -> Stats {
         let bar_len = match self.args.command {
             Commands::Put { total, .. } => total,
+            Commands::Txn { total, .. } => total,
         };
         let bar = Arc::new(ProgressBar::new(bar_len.numeric_cast()));
 

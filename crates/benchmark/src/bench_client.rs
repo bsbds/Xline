@@ -3,11 +3,9 @@ use std::fmt::Debug;
 use anyhow::Result;
 use etcd_client::{Client as EtcdClient, ConnectOptions};
 use thiserror::Error;
-#[cfg(test)]
-use xline_client::types::kv::{RangeRequest, RangeResponse};
 use xline_client::{
     error::XlineClientError,
-    types::kv::{PutRequest, PutResponse},
+    types::kv::{PutRequest, PutResponse, RangeRequest, RangeResponse, TxnRequest, TxnResponse},
     Client, ClientOptions,
 };
 use xlineapi::command::Command;
@@ -116,7 +114,7 @@ impl BenchClient {
     ///
     /// If `XlineClient` or `EtcdClient` failed to send request
     #[inline]
-    #[cfg(test)]
+    #[allow(unused)]
     pub(crate) async fn get(
         &mut self,
         request: RangeRequest,
@@ -132,12 +130,35 @@ impl BenchClient {
             }
         }
     }
+
+    /// Send `TxnRequest` by `XlineClient` or `EtcdClient`
+    ///
+    /// # Errors
+    ///
+    /// If `XlineClient` or `EtcdClient` failed to send request
+    #[inline]
+    pub(crate) async fn txn(
+        &mut self,
+        request: TxnRequest,
+    ) -> Result<TxnResponse, BenchClientError> {
+        match self.kv_client {
+            KVClient::Xline(ref mut xline_client) => {
+                let response = xline_client.kv_client().txn(request).await?;
+                Ok(response)
+            }
+            KVClient::Etcd(ref mut etcd_client) => {
+                let response = etcd_client.txn(convert::txn_req(request.into())).await?;
+                Ok(convert::txn_res(response))
+            }
+        }
+    }
 }
 
 /// Convert utils
 mod convert {
+    use etcd_client::TxnOpResponse;
     use xline_client::types::kv::PutRequest;
-    use xlineapi::{KeyValue, PutResponse, ResponseHeader};
+    use xlineapi::{KeyValue, PutResponse, RangeResponse, Response, ResponseHeader, ResponseOp};
 
     /// transform `PutRequest` into `PutOptions`
     pub(super) fn put_req(req: &PutRequest) -> etcd_client::PutOptions {
@@ -176,10 +197,9 @@ mod convert {
     }
 
     /// transform `etcd_client::GetResponse` into `RangeResponse`
-    #[cfg(test)]
-    pub(super) fn get_res(res: etcd_client::GetResponse) -> xlineapi::RangeResponse {
+    pub(super) fn get_res(res: etcd_client::GetResponse) -> RangeResponse {
         let mut res = res;
-        xlineapi::RangeResponse {
+        RangeResponse {
             header: res.take_header().map(|h| ResponseHeader {
                 cluster_id: h.cluster_id(),
                 member_id: h.member_id(),
@@ -200,6 +220,117 @@ mod convert {
                 .collect(),
             count: res.count(),
             more: res.more(),
+        }
+    }
+
+    /// transform `etcd_client::DeleteRangeResponse` into `RangeResponse`
+    pub(super) fn delete_res(res: etcd_client::DeleteResponse) -> xlineapi::DeleteRangeResponse {
+        let mut res = res;
+        xlineapi::DeleteRangeResponse {
+            header: res.take_header().map(convert_header),
+            deleted: res.deleted(),
+            prev_kvs: res
+                .prev_kvs()
+                .into_iter()
+                .cloned()
+                .map(convert_key_value)
+                .collect(),
+        }
+    }
+
+    /// transform `TxnRequest` into `Txn`
+    pub(super) fn txn_req(txn: xlineapi::TxnRequest) -> etcd_client::Txn {
+        etcd_client::Txn::new()
+            .when(txn.compare.into_iter().map(convert_cmp).collect::<Vec<_>>())
+            .and_then(
+                txn.success
+                    .into_iter()
+                    .map(|t| t.request.unwrap())
+                    .map(convert_txn_op)
+                    .collect::<Vec<_>>(),
+            )
+            .or_else(
+                txn.failure
+                    .into_iter()
+                    .map(|t| t.request.unwrap())
+                    .map(convert_txn_op)
+                    .collect::<Vec<_>>(),
+            )
+    }
+
+    fn convert_cmp(cmp: xlineapi::Compare) -> etcd_client::Compare {
+        let op = match cmp.result {
+            0 => etcd_client::CompareOp::Equal,
+            1 => etcd_client::CompareOp::Greater,
+            2 => etcd_client::CompareOp::Less,
+            3 => etcd_client::CompareOp::NotEqual,
+            _ => unreachable!(),
+        };
+        match cmp.target_union.unwrap() {
+            xlineapi::TargetUnion::Version(v) => etcd_client::Compare::version(cmp.key, op, v),
+            xlineapi::TargetUnion::CreateRevision(c) => {
+                etcd_client::Compare::version(cmp.key, op, c)
+            }
+            xlineapi::TargetUnion::ModRevision(m) => {
+                etcd_client::Compare::mod_revision(cmp.key, op, m)
+            }
+            xlineapi::TargetUnion::Value(v) => etcd_client::Compare::value(cmp.key, op, v),
+            xlineapi::TargetUnion::Lease(l) => etcd_client::Compare::lease(cmp.key, op, l),
+        }
+    }
+
+    // TODO: add options
+    fn convert_txn_op(op: xlineapi::Request) -> etcd_client::TxnOp {
+        match op {
+            xlineapi::Request::RequestRange(r) => etcd_client::TxnOp::get(r.key, None),
+            xlineapi::Request::RequestPut(r) => etcd_client::TxnOp::put(r.key, r.value, None),
+            xlineapi::Request::RequestDeleteRange(r) => etcd_client::TxnOp::delete(r.key, None),
+            xlineapi::Request::RequestTxn(r) => etcd_client::TxnOp::txn(txn_req(r)),
+        }
+    }
+
+    /// transform `etcd_client::TxnResponse` into `TxnResponse`
+    pub(super) fn txn_res(mut res: etcd_client::TxnResponse) -> xlineapi::TxnResponse {
+        xlineapi::TxnResponse {
+            header: res.take_header().map(convert_header),
+            succeeded: res.succeeded(),
+            responses: convert_op_response(res.op_responses()),
+        }
+    }
+
+    fn convert_op_response(op_responses: Vec<TxnOpResponse>) -> Vec<ResponseOp> {
+        let mut result = vec![];
+        for op in op_responses {
+            let xline_op = match op {
+                TxnOpResponse::Put(r) => Response::ResponsePut(put_res(r)),
+                TxnOpResponse::Get(r) => Response::ResponseRange(get_res(r)),
+                TxnOpResponse::Delete(r) => Response::ResponseDeleteRange(delete_res(r)),
+                TxnOpResponse::Txn(r) => Response::ResponseTxn(txn_res(r)),
+            };
+            result.push(ResponseOp {
+                response: Some(xline_op),
+            });
+        }
+        result
+    }
+
+    fn convert_header(h: etcd_client::ResponseHeader) -> ResponseHeader {
+        ResponseHeader {
+            cluster_id: h.cluster_id(),
+            member_id: h.member_id(),
+            revision: h.revision(),
+            raft_term: h.raft_term(),
+        }
+    }
+
+    fn convert_key_value(kv: etcd_client::KeyValue) -> KeyValue {
+        KeyValue {
+            key: kv.key().to_vec(),
+            create_revision: kv.create_revision(),
+            mod_revision: kv.mod_revision(),
+            version: kv.version(),
+            value: kv.value().to_vec(),
+            lease: kv.lease(),
         }
     }
 }
