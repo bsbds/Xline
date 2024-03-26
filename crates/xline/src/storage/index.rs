@@ -571,10 +571,10 @@ impl IndexOperate for IndexState {
         revision: i64,
         sub_revision: i64,
     ) -> (KeyRevision, Option<KeyRevision>) {
-        let index_w = &mut self.index_ref.write().rev_map;
+        let index_r = &self.index_ref.read().rev_map;
         let mut state_w = self.state.write();
 
-        let next_rev = |revisions: &mut Vec<KeyRevision>| {
+        let next_rev = |revisions: &[KeyRevision]| {
             let last = revisions
                 .last()
                 .unwrap_or_else(|| unreachable!("empty revision list"))
@@ -592,23 +592,23 @@ impl IndexOperate for IndexState {
             (new_rev, Some(last))
         };
 
-        match (index_w.entry(key.clone()), state_w.entry(key)) {
-            (btree_map::Entry::Vacant(_), btree_map::Entry::Vacant(e)) => {
+        match (index_r.get(&key), state_w.entry(key)) {
+            (None, btree_map::Entry::Vacant(e)) => {
                 let new_rev = KeyRevision::new(revision, 1, revision, sub_revision);
                 let _ignore = e.insert(vec![new_rev]);
                 (new_rev, None)
             }
-            (btree_map::Entry::Vacant(_), btree_map::Entry::Occupied(mut e)) => {
+            (None, btree_map::Entry::Occupied(mut e)) => {
                 let (new_rev, last) = next_rev(e.get_mut());
                 e.get_mut().push(new_rev);
                 (new_rev, last)
             }
-            (btree_map::Entry::Occupied(e), btree_map::Entry::Vacant(se)) => {
-                let (new_rev, last) = next_rev(e.into_mut());
+            (Some(e), btree_map::Entry::Vacant(se)) => {
+                let (new_rev, last) = next_rev(e);
                 let _ignore = se.insert(vec![new_rev]);
                 (new_rev, last)
             }
-            (btree_map::Entry::Occupied(_), btree_map::Entry::Occupied(mut e)) => {
+            (Some(_), btree_map::Entry::Occupied(mut e)) => {
                 let (new_rev, last) = next_rev(e.get_mut());
                 e.get_mut().push(new_rev);
                 (new_rev, last)
