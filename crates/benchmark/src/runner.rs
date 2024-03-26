@@ -364,44 +364,52 @@ impl CommandRunner {
         let b = Arc::new(Barrier::new(clients.len().overflow_add(1)));
         let (tx, rx) = mpsc::channel(clients.len());
 
-        fn next_val(val: &[u8]) -> Vec<u8> {
-            let mut new_val = val.to_vec();
-            for b in &mut new_val {
-                if *b != u8::MAX {
-                    *b += 1;
-                    return new_val;
-                }
-            }
-            panic!("reach maximum val");
-        }
-
         let mut handles = Vec::with_capacity(clients.len());
         for (id, mut client) in clients.into_iter().enumerate() {
             let c = Arc::clone(&b);
             let count_clone = Arc::clone(&count);
             let tx_clone = tx.clone();
             let handle = tokio::spawn(async move {
-                let mut rng = StdRng::seed_from_u64(id.numeric_cast());
-                let mut key = vec![0u8; key_size];
-                let mut val = vec![0u8; val_size];
+                let mut key_rng = StdRng::seed_from_u64(id.numeric_cast());
+                let mut val_rng = StdRng::seed_from_u64(id.numeric_cast());
+                let mut key_buf = vec![0u8; key_size];
+                let mut val_buf = vec![0u8; val_size];
+                let mut kv_map = HashMap::new();
+                let mut next_key = || -> Vec<u8> {
+                    Self::fill_usize_to_buf(
+                        &mut key_buf,
+                        key_rng
+                            .next_u64()
+                            .numeric_cast::<usize>()
+                            .overflow_rem(key_space_size),
+                    );
+                    key_buf.to_vec()
+                };
+                let mut next_val = || -> Vec<u8> {
+                    val_rng.fill_bytes(&mut val_buf);
+                    val_buf.clone()
+                };
                 _ = c.wait().await;
                 loop {
                     let idx = count_clone.fetch_add(1, Ordering::Relaxed);
                     if idx >= total {
                         break;
                     }
-                    Self::fill_usize_to_buf(
-                        &mut key,
-                        rng.next_u64()
-                            .numeric_cast::<usize>()
-                            .overflow_rem(key_space_size),
-                    );
                     let start = Instant::now();
-                    let nextval = next_val(&val);
-                    let put_op = TxnOp::put(PutRequest::new(key.clone(), nextval.clone()));
+
+                    let key = next_key();
+                    let current_val = kv_map
+                        .entry(key.clone())
+                        .or_insert(vec![0u8; val_size])
+                        .to_vec();
+                    let new_val = next_val();
+                    let put_op = TxnOp::put(PutRequest::new(key.clone(), new_val.clone()));
                     let get_op = TxnOp::range(RangeRequest::new(key.clone()));
-                    let cmp =
-                        Compare::value(key.clone(), xlineapi::CompareResult::Equal, val.clone());
+                    let cmp = Compare::value(
+                        key.clone(),
+                        xlineapi::CompareResult::Equal,
+                        current_val.clone(),
+                    );
                     let result = client
                         .txn(
                             TxnRequest::new()
@@ -412,14 +420,14 @@ impl CommandRunner {
                         .await;
                     if let Ok(res) = result.as_ref() {
                         if res.succeeded {
-                            val = nextval;
+                            let _ignore = kv_map.get_mut(&key).map(|val| *val = new_val);
                         } else {
                             let get = res.responses.first().unwrap();
                             if let xlineapi::Response::ResponseRange(range) =
                                 get.response.as_ref().unwrap()
                             {
                                 if let Some(fst) = range.kvs.first().cloned() {
-                                    val = fst.value;
+                                    let _ignore = kv_map.get_mut(&key).map(|val| *val = fst.value);
                                 } else {
                                     Self::initialze_key(&mut client, key.clone(), val_size).await;
                                 }
