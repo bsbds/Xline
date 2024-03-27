@@ -64,7 +64,7 @@ impl AuthServer {
             None => None,
         };
         let request = request.into_inner().into();
-        let cmd = Command::new_with_auth_info(request.keys(), request, auth_info);
+        let cmd = Command::new_with_auth_info(request, auth_info);
         let res = self.client.propose(&cmd, None, use_fast_path).await??;
         Ok(res)
     }
