@@ -151,10 +151,7 @@ impl Kv for KvServer {
         };
         let is_serializable = range_req.serializable;
         let res = if !is_serializable {
-            let is_fast_path = true;
-            let (cmd_res, sync_res) = self
-                .propose(request.into_inner(), auth_info, is_fast_path)
-                .await?;
+            let (cmd_res, sync_res) = self.propose(request.into_inner(), auth_info, false).await?;
             let mut res = Self::parse_response_op(cmd_res.into_inner().into());
             if let Some(sync_res) = sync_res {
                 let revision = sync_res.revision();
@@ -189,10 +186,7 @@ impl Kv for KvServer {
             Some(token) => Some(self.auth_storage.verify(&token)?),
             None => None,
         };
-        let is_fast_path = true;
-        let (cmd_res, sync_res) = self
-            .propose(request.into_inner(), auth_info, is_fast_path)
-            .await?;
+        let (cmd_res, sync_res) = self.propose(request.into_inner(), auth_info, false).await?;
         let mut res = Self::parse_response_op(cmd_res.into_inner().into());
         if let Some(sync_res) = sync_res {
             let revision = sync_res.revision();
@@ -221,10 +215,7 @@ impl Kv for KvServer {
             Some(token) => Some(self.auth_storage.verify(&token)?),
             None => None,
         };
-        let is_fast_path = true;
-        let (cmd_res, sync_res) = self
-            .propose(request.into_inner(), auth_info, is_fast_path)
-            .await?;
+        let (cmd_res, sync_res) = self.propose(request.into_inner(), auth_info, false).await?;
         let mut res = Self::parse_response_op(cmd_res.into_inner().into());
         if let Some(sync_res) = sync_res {
             let revision = sync_res.revision();
@@ -258,10 +249,7 @@ impl Kv for KvServer {
             Some(token) => Some(self.auth_storage.verify(&token)?),
             None => None,
         };
-        let is_fast_path = true;
-        let (cmd_res, sync_res) = self
-            .propose(request.into_inner(), auth_info, is_fast_path)
-            .await?;
+        let (cmd_res, sync_res) = self.propose(request.into_inner(), auth_info, false).await?;
         let mut res = Self::parse_response_op(cmd_res.into_inner().into());
         if let Some(sync_res) = sync_res {
             let revision = sync_res.revision();
