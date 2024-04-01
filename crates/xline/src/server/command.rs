@@ -18,7 +18,6 @@ use xlineapi::{
     AlarmAction, AlarmRequest, AlarmType,
 };
 
-use super::barriers::IndexBarrier;
 use crate::{
     rpc::{RequestBackend, RequestWrapper},
     storage::{
@@ -73,8 +72,6 @@ pub(crate) struct CommandExecutor {
     alarm_storage: Arc<AlarmStore>,
     /// persistent storage
     persistent: Arc<DB>,
-    /// Barrier for applied index
-    index_barrier: Arc<IndexBarrier>,
     /// Barrier for propose id
     id_barrier: Arc<IdBarrier<InflightId>>,
     /// Compact events
@@ -221,7 +218,6 @@ impl CommandExecutor {
         lease_storage: Arc<LeaseStore>,
         alarm_storage: Arc<AlarmStore>,
         persistent: Arc<DB>,
-        index_barrier: Arc<IndexBarrier>,
         id_barrier: Arc<IdBarrier<InflightId>>,
         compact_events: Arc<DashMap<u64, Arc<Event>>>,
         quota: u64,
@@ -234,7 +230,6 @@ impl CommandExecutor {
             lease_storage,
             alarm_storage,
             persistent,
-            index_barrier,
             id_barrier,
             compact_events,
             quota_checker,
@@ -473,9 +468,8 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         Ok(u64::from_le_bytes(buf))
     }
 
-    fn trigger(&self, id: InflightId, index: LogIndex) {
+    fn trigger(&self, id: InflightId) {
         self.id_barrier.trigger(id);
-        self.index_barrier.trigger(index);
     }
 }
 

@@ -51,7 +51,7 @@ pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
             let er = ce.execute(cmd).await;
             if er.is_err() {
                 remove_from_sp_ucp(&mut sp.lock(), &mut ucp.lock(), &entry);
-                ce.trigger(entry.inflight_id(), entry.index);
+                ce.trigger(entry.inflight_id());
             }
             debug!(
                 "{id} cmd({}) is speculatively executed, exe status: {}",
@@ -119,7 +119,7 @@ async fn after_sync_cmds<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
 
     for (entry, _) in &cmd_entries {
         curp.trigger(entry.propose_id);
-        ce.trigger(entry.inflight_id(), entry.index);
+        ce.trigger(entry.inflight_id());
     }
     let mut sp_l = sp.lock();
     let mut ucp_l = ucp.lock();
@@ -209,7 +209,7 @@ async fn after_sync_others<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
             (EntryData::Empty, _) => {}
             _ => unreachable!(),
         }
-        ce.trigger(entry.inflight_id(), entry.index);
+        ce.trigger(entry.inflight_id());
         debug!("{id} cmd({}) after sync is called", entry.propose_id);
     }
 }
