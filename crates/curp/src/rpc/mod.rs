@@ -148,12 +148,14 @@ impl ProposeRequest {
         cmd: &C,
         cluster_version: u64,
         term: u64,
+        slow_path: bool,
     ) -> Self {
         Self {
             propose_id: Some(propose_id.into()),
             command: cmd.encode(),
             cluster_version,
             term,
+            slow_path,
         }
     }
 

@@ -360,6 +360,7 @@ impl<C: Command> RepeatableClientApi for Unary<C> {
             cmd_arc.as_ref(),
             self.state.cluster_version().await,
             self.state.term().await,
+            !use_fast_path,
         );
         let record_req = RecordRequest::new::<C>(propose_id, cmd_arc.as_ref());
         let superquorum = super_quorum(self.state.connects_len().await);

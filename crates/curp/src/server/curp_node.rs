@@ -173,6 +173,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         self.check_cluster_version(req.cluster_version)?;
         self.curp.check_term(req.term)?;
 
+        if req.slow_path {
+            resp_tx.set_conflict(true);
+        }
+
         let (wait_tx, wait_rx) = flume::bounded(2);
         let propose = Propose::try_new(req, wait_tx, Arc::clone(&resp_tx))?;
         let _ignore = self.propose_tx.send(propose);
