@@ -175,6 +175,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
 
         if req.slow_path {
             resp_tx.set_conflict(true);
+        } else {
+            info!("not using slow path for: {req:?}");
         }
 
         let (wait_tx, wait_rx) = flume::bounded(2);
@@ -184,6 +186,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let to_execute = wait_res?;
 
         if let Some(entry) = to_execute {
+            info!("spec execute entry: {entry:?}");
             let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref()).await;
             let resp = ProposeResponse::new_result::<C>(&er_res, false);
             if let WaitResult::FSynced(Err(e)) = wait_rx.recv_async().await? {
@@ -238,6 +241,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     /// Handle read-only proposes
     async fn handle_read_onlys(curp: &RawCurp<C, RC>, proposes: Vec<Propose<C>>) {
         for propose in proposes {
+            info!("handle read only cmd: {:?}", propose.cmd);
             let Propose { cmd, wait_tx, .. } = propose;
             // Use default value for the entry as we don't need to put it into curp log
             let entry = Arc::new(LogEntry::new(0, 0, ProposeId::default(), Arc::clone(&cmd)));
@@ -264,6 +268,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             .map(|p| PoolEntry::new(p.id, Arc::clone(&p.cmd)));
         let conflicts = curp.leader_record(pool_entries);
         for (p, conflict) in proposes.iter().zip(conflicts) {
+            info!("handle mutative cmd: {:?}, conflict: {conflict}", p.cmd);
             p.resp_tx.set_conflict(conflict);
         }
         let (logs, wait_txs): (Vec<_>, Vec<_>) =

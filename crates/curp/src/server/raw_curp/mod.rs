@@ -555,6 +555,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             let _ignore = resp_txs_l.insert(index, resp_tx);
             to_process.push((index, conflict));
             let result = Ok((!conflict).then_some(Arc::clone(&entry)));
+            tracing::info!(
+                "result is some?: {}, conflict: {conflict}",
+                result.as_ref().is_ok_and(|t| t.is_some())
+            );
             results.push(WaitResult::Result(result));
             log_entries.push(entry);
         }

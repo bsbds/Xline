@@ -80,6 +80,7 @@ async fn after_sync_cmds<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     if cmd_entries.is_empty() {
         return;
     }
+    info!("after sync: {cmd_entries:?}");
     let resp_txs = cmd_entries.iter().map(|(_, tx)| tx);
     let highest_index = cmd_entries
         .last()

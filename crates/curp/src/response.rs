@@ -31,13 +31,13 @@ impl ResponseSender {
     /// Gets whether the command associated with this sender will be
     /// speculatively executed
     pub(super) fn is_conflict(&self) -> bool {
-        self.conflict.load(Ordering::Acquire)
+        self.conflict.load(Ordering::SeqCst)
     }
 
     /// Sets the the command associated with this sender will be
     /// speculatively executed    
     pub(super) fn set_conflict(&self, conflict: bool) {
-        self.conflict.store(conflict, Ordering::Release);
+        let _ignore = self.conflict.fetch_or(conflict, Ordering::SeqCst);
     }
 
     /// Sends propose result

@@ -324,6 +324,10 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
                     RequestBackend::Alarm => Ok(self.alarm_storage.execute(wrapper)),
                 })
                 .transpose()?;
+            tracing::info!("sync cmd: {cmd:?}");
+            if to_execute {
+                tracing::info!("execute in after sync for: {cmd:?}");
+            }
             let (asr, wr_ops) = match wrapper.backend() {
                 RequestBackend::Kv => (self.kv_storage.after_sync(wrapper, &txn_db).await?, vec![]),
                 RequestBackend::Auth => self.auth_storage.after_sync(wrapper)?,

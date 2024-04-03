@@ -813,6 +813,7 @@ impl KvStore {
             .compare
             .iter()
             .all(|compare| Self::check_compare(txn_db, index, compare));
+        tracing::info!("txn success in execute: {success}");
         let requests = if success {
             request.success.iter()
         } else {
@@ -878,6 +879,7 @@ impl KvStore {
 
         let index = self.inner.index.as_ref();
         let next_revision = self.revision.get().overflow_add(1);
+        tracing::info!("with revision: {next_revision}");
 
         #[allow(clippy::wildcard_enum_match_arm)]
         let events = match *wrapper {
@@ -903,6 +905,8 @@ impl KvStore {
             self.notify_updates(next_revision, events).await;
             SyncResponse::new(self.revision.next())
         };
+
+        tracing::info!("sync response: {response:?}");
 
         Ok(response)
     }
@@ -1008,6 +1012,7 @@ impl KvStore {
             .compare
             .iter()
             .all(|compare| Self::check_compare(txn_db, index, compare));
+        tracing::info!("txn success: {success}");
         let requests = if success {
             request.success.iter()
         } else {
