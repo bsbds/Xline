@@ -197,8 +197,14 @@ impl KvStore {
     pub(crate) fn execute(
         &self,
         request: &RequestWrapper,
+        txn_db: Option<&Transaction>,
     ) -> Result<CommandResponse, ExecuteError> {
-        self.execute_request(request).map(CommandResponse::new)
+        if let Some(db) = txn_db {
+            self.execute_request(request, db)
+        } else {
+            self.execute_request(request, &self.inner.db.transaction())
+        }
+        .map(CommandResponse::new)
     }
 
     /// After-Syncs a request
@@ -556,21 +562,23 @@ impl KvStore {
 // Speculatively execute requests
 impl KvStore {
     /// execute requests
-    fn execute_request(&self, wrapper: &RequestWrapper) -> Result<ResponseWrapper, ExecuteError> {
+    fn execute_request(
+        &self,
+        wrapper: &RequestWrapper,
+        txn_db: &Transaction,
+    ) -> Result<ResponseWrapper, ExecuteError> {
         debug!("Execute {:?}", wrapper);
-
-        let txn_db = self.inner.db.transaction();
 
         #[allow(clippy::wildcard_enum_match_arm)]
         let res: ResponseWrapper = match *wrapper {
             RequestWrapper::RangeRequest(ref req) => self
-                .execute_range(&txn_db, self.inner.index.as_ref(), req)
+                .execute_range(txn_db, self.inner.index.as_ref(), req)
                 .map(Into::into)?,
             RequestWrapper::PutRequest(ref req) => self
-                .execute_put(&txn_db, &self.inner.index, req)
+                .execute_put(txn_db, &self.inner.index, req)
                 .map(Into::into)?,
             RequestWrapper::DeleteRangeRequest(ref req) => self
-                .execute_delete_range(&txn_db, &self.inner.index, req)
+                .execute_delete_range(txn_db, &self.inner.index, req)
                 .map(Into::into)?,
             RequestWrapper::TxnRequest(ref req) => {
                 let mut index = self.inner.index.state();

@@ -278,7 +278,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
         let wrapper = cmd.request();
         self.auth_storage.check_permission(wrapper, auth_info)?;
         match wrapper.backend() {
-            RequestBackend::Kv => self.kv_storage.execute(wrapper),
+            RequestBackend::Kv => self.kv_storage.execute(wrapper, None),
             RequestBackend::Auth => self.auth_storage.execute(wrapper),
             RequestBackend::Lease => self.lease_storage.execute(wrapper),
             RequestBackend::Alarm => Ok(self.alarm_storage.execute(wrapper)),
@@ -318,7 +318,7 @@ impl CurpCommandExecutor<Command> for CommandExecutor {
             let wrapper = cmd.request();
             let er = to_execute
                 .then(|| match wrapper.backend() {
-                    RequestBackend::Kv => self.kv_storage.execute(wrapper),
+                    RequestBackend::Kv => self.kv_storage.execute(wrapper, Some(&txn_db)),
                     RequestBackend::Auth => self.auth_storage.execute(wrapper),
                     RequestBackend::Lease => self.lease_storage.execute(wrapper),
                     RequestBackend::Alarm => Ok(self.alarm_storage.execute(wrapper)),
