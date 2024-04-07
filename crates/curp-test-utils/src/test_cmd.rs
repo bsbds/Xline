@@ -9,7 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use curp_external_api::{
-    cmd::{Command, CommandExecutor, ConflictCheck, PbCodec},
+    cmd::{AfterSyncCmd, Command, CommandExecutor, ConflictCheck, PbCodec},
     InflightId, LogIndex,
 };
 use engine::{
@@ -307,6 +307,21 @@ impl CommandExecutor<TestCommand> for TestCE {
 
     async fn after_sync(
         &self,
+        _cmds: Vec<AfterSyncCmd<'_, TestCommand>>,
+        _highest_index: LogIndex,
+    ) -> Result<
+        Vec<(
+            <TestCommand as Command>::ASR,
+            Option<<TestCommand as Command>::ER>,
+        )>,
+        <TestCommand as Command>::Error,
+    > {
+        todo!()
+    }
+
+    #[cfg(ignore)]
+    async fn after_sync(
+        &self,
         cmd: &TestCommand,
         index: LogIndex,
         revision: <TestCommand as Command>::PR,
@@ -414,7 +429,7 @@ impl CommandExecutor<TestCommand> for TestCE {
         Ok(())
     }
 
-    fn trigger(&self, _id: InflightId, _index: LogIndex) {}
+    fn trigger(&self, _id: InflightId) {}
 }
 
 impl TestCE {
