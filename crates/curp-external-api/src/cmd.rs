@@ -49,18 +49,6 @@ pub trait Command: pri::Serializable + ConflictCheck + PbCodec + Unpin {
     /// Returns `true` if the command is read-only
     fn is_read_only(&self) -> bool;
 
-    /// Prepare the command
-    ///
-    /// # Errors
-    /// Return `Self::Error` when `CommandExecutor::prepare` goes wrong
-    #[inline]
-    fn prepare<E>(&self, e: &E) -> Result<Self::PR, Self::Error>
-    where
-        E: CommandExecutor<Self> + Send + Sync,
-    {
-        <E as CommandExecutor<Self>>::prepare(e, self)
-    }
-
     /// Execute the command according to the executor
     ///
     /// # Errors
@@ -105,12 +93,6 @@ pub trait CommandExecutor<C>: pri::ThreadSafe
 where
     C: Command,
 {
-    /// Prepare the command
-    ///
-    /// # Errors
-    /// This function may return an error if there is a problem preparing the command.
-    fn prepare(&self, cmd: &C) -> Result<C::PR, C::Error>;
-
     /// Execute the command
     ///
     /// # Errors
