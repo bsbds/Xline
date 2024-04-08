@@ -42,6 +42,8 @@ enum_with_iter! {
     RevokeExpiredLeases,
     SyncVictims,
     AutoCompactor,
+    AfterSync,
+    HandlePropose,
 }
 
 /// All edges of task graph, the first item in each pair must be shut down before the second item
