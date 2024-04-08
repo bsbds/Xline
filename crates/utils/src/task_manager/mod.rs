@@ -363,6 +363,13 @@ impl Listener {
         self.state()
     }
 
+    /// Checks whether self has shutdown.
+    #[inline]
+    pub fn is_shutdown(&self) -> bool {
+        let state = self.state();
+        matches!(state, State::Shutdown)
+    }
+
     /// Get a sync follower guard
     #[must_use]
     #[inline]
