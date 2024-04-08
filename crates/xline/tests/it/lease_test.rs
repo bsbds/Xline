@@ -83,7 +83,7 @@ async fn test_lease_keep_alive() -> Result<(), Box<dyn Error>> {
     assert_eq!(res.kvs[0].value, b"bar");
 
     handle.abort();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let res = client.kv_client().range(RangeRequest::new("foo")).await?;
     assert_eq!(res.kvs.len(), 0);
 

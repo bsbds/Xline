@@ -204,6 +204,7 @@ impl XlineServer {
     async fn construct_underlying_storages(
         &self,
         persistent: Arc<DB>,
+        index: Arc<Index>,
         lease_collection: Arc<LeaseCollection>,
         header_gen: Arc<HeaderGenerator>,
         key_pair: Option<(EncodingKey, DecodingKey)>,
@@ -215,7 +216,6 @@ impl XlineServer {
         Arc<KvWatcher>,
     )> {
         let (compact_task_tx, compact_task_rx) = channel(COMPACT_CHANNEL_SIZE);
-        let index = Arc::new(Index::new());
         let (kv_update_tx, kv_update_rx) = channel(CHANNEL_SIZE);
         let kv_store_inner = Arc::new(KvStoreInner::new(
             Arc::clone(&index),
@@ -458,10 +458,10 @@ impl XlineServer {
             self.cluster_config.curp_config().heartbeat_interval,
             self.cluster_config.curp_config().candidate_timeout_ticks,
         );
-
         let (kv_storage, lease_storage, auth_storage, alarm_storage, watcher) = self
             .construct_underlying_storages(
                 Arc::clone(&persistent),
+                Arc::new(Index::new()),
                 lease_collection,
                 Arc::clone(&header_gen),
                 key_pair,
@@ -477,8 +477,6 @@ impl XlineServer {
             Arc::clone(&alarm_storage),
             Arc::clone(&persistent),
             Arc::clone(&id_barrier),
-            header_gen.general_revision_arc(),
-            header_gen.auth_revision_arc(),
             Arc::clone(&compact_events),
             self.storage_config.quota,
         ));
