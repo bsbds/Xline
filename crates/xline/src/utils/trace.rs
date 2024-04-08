@@ -9,6 +9,7 @@ use utils::config::{file_appender, LogConfig, TraceConfig};
 /// # Errors
 /// Return error if init failed
 #[inline]
+#[allow(unused)]
 pub fn init_subscriber(
     name: &str,
     log_config: &LogConfig,
