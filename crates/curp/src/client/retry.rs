@@ -183,6 +183,13 @@ where
                         .update_leader(leader_id.as_ref().map(Into::into), term)
                         .await;
                 }
+
+                // update the cluster state if got Zombie
+                CurpError::Zombie(()) => {
+                    if let Err(e) = self.inner.fetch_cluster(true).await {
+                        warn!("fetch cluster failed, error {e:?}");
+                    }
+                }
             }
 
             #[cfg(feature = "client-metrics")]
