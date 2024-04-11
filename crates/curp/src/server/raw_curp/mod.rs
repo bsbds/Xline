@@ -527,7 +527,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     pub(super) fn push_logs(
         &self,
         proposes: Vec<(Arc<C>, ProposeId, u64, Arc<ResponseSender>)>,
-    ) -> (Vec<Arc<LogEntry<C>>>, Vec<WaitResult<C>>) {
+    ) -> Vec<WaitResult<C>> {
         let term = proposes
             .first()
             .unwrap_or_else(|| unreachable!("no propose in proposes"))
@@ -543,7 +543,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             let entry = match entry_result {
                 Ok(e) => e,
                 Err(e) => {
-                    results.push(WaitResult::Result(Err(e.into())));
+                    results.push(Err(e.into()));
                     metrics::get()
                         .proposals_failed
                         .add(1, &[KeyValue::new("reason", "log serialize failed")]);
@@ -559,11 +559,33 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 "result is some?: {}, conflict: {conflict}",
                 result.as_ref().is_ok_and(|t| t.is_some())
             );
-            results.push(WaitResult::Result(result));
+            results.push(result);
             log_entries.push(entry);
         }
         self.entry_process_multi(&mut log_w, to_process, term);
-        (log_entries, results)
+
+        let log_r = RwLockWriteGuard::downgrade(log_w);
+        self.persistent_log_entries(
+            &log_entries.iter().map(Arc::as_ref).collect::<Vec<_>>(),
+            &log_r,
+        );
+
+        results
+    }
+
+    /// Persistent log entries
+    ///
+    /// NOTE: A `&Log<C>` is required because we do not want the `Log` structure gets mutated
+    /// during the persistent
+    #[allow(clippy::panic)]
+    #[allow(dropping_references)]
+    fn persistent_log_entries(&self, entries: &[&LogEntry<C>], _log: &Log<C>) {
+        // We panic when the log persistence fails because it likely indicates an unrecoverable error.
+        // Our WAL implementation does not support rollback on failure, as a file write syscall is not
+        // guaranteed to be atomic.
+        if let Err(e) = self.ctx.curp_storage.put_log_entries(entries) {
+            panic!("log persistent failed: {e}");
+        }
     }
 
     /// Wait synced for all conflict commands
@@ -610,7 +632,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 e
             })?;
         debug!("{} gets new log[{}]", self.id(), entry.index);
-        self.entry_process_single(&mut log_w, entry, true, st_r.term);
+        self.entry_process_single(&mut log_w, Arc::clone(&entry), true, st_r.term);
+
+        let log_r = RwLockWriteGuard::downgrade(log_w);
+        self.persistent_log_entries(&[entry.as_ref()], &log_r);
+
         Ok(())
     }
 
@@ -666,7 +692,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             entry.index,
             FallbackContext::new(Arc::clone(&entry), addrs, name, is_learner),
         );
-        self.entry_process_single(&mut log_w, entry, conflict, st_r.term);
+        self.entry_process_single(&mut log_w, Arc::clone(&entry), conflict, st_r.term);
+
+        let log_r = RwLockWriteGuard::downgrade(log_w);
+        self.persistent_log_entries(&[entry.as_ref()], &log_r);
+
         Ok(())
     }
 
@@ -692,7 +722,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             e
         })?;
         debug!("{} gets new log[{}]", self.id(), entry.index);
-        self.entry_process_single(&mut log_w, entry, false, st_r.term);
+        self.entry_process_single(&mut log_w, Arc::clone(&entry), false, st_r.term);
+
+        let log_r = RwLockWriteGuard::downgrade(log_w);
+        self.persistent_log_entries(&[entry.as_ref()], &log_r);
+
         Ok(())
     }
 
@@ -1801,6 +1835,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let mut sp_l = self.ctx.new_sp.lock();
 
         let term = st.term;
+        let mut entries = vec![];
         for entry in recovered_cmds {
             let _ig_sync = cb_w.sync.insert(entry.id); // may have been inserted before
             let _ig_spec = sp_l.insert(entry.clone()); // may have been inserted before
@@ -1814,7 +1849,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 entry.propose_id,
                 entry.index,
             );
+            entries.push(entry);
         }
+
+        self.persistent_log_entries(&entries.iter().map(Arc::as_ref).collect::<Vec<_>>(), log);
     }
 
     /// Recover the ucp from uncommitted log entries
