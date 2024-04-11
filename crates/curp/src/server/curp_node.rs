@@ -85,15 +85,12 @@ pub(super) struct Propose<C> {
     /// for the propose to be accepted.
     pub(super) term: u64,
     /// Tx used for sending back result by the propose handling task
-    pub(super) wait_tx: flume::Sender<WaitResult<C>>,
+    pub(super) wait_tx: oneshot::Sender<WaitResult<C>>,
     /// Tx used for sending the streaming response back to client
     pub(super) resp_tx: Arc<ResponseSender>,
 }
 
-pub(super) enum WaitResult<C> {
-    Result(Result<Option<Arc<LogEntry<C>>>, CurpError>),
-    FSynced(Result<(), CurpError>),
-}
+pub(super) type WaitResult<C> = Result<Option<Arc<LogEntry<C>>>, CurpError>;
 
 impl<C> Propose<C>
 where
@@ -102,7 +99,7 @@ where
     /// Attempts to create a new `Propose` from request
     fn try_new(
         req: ProposeRequest,
-        wait_tx: flume::Sender<WaitResult<C>>,
+        wait_tx: oneshot::Sender<WaitResult<C>>,
         resp_tx: Arc<ResponseSender>,
     ) -> Result<Self, CurpError> {
         let cmd: Arc<C> = Arc::new(req.cmd()?);
@@ -125,7 +122,7 @@ where
         self,
     ) -> (
         (Arc<C>, ProposeId, u64, Arc<ResponseSender>),
-        flume::Sender<WaitResult<C>>,
+        oneshot::Sender<WaitResult<C>>,
     ) {
         let Self {
             cmd,
@@ -179,21 +176,15 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             info!("not using slow path for: {req:?}");
         }
 
-        let (wait_tx, wait_rx) = flume::bounded(2);
+        let (wait_tx, wait_rx) = oneshot::channel();
         let propose = Propose::try_new(req, wait_tx, Arc::clone(&resp_tx))?;
         let _ignore = self.propose_tx.send(propose);
-        let WaitResult::Result(wait_res) = wait_rx.recv_async().await? else {
-            unreachable!()
-        };
-        let to_execute = wait_res?;
+        let to_execute = wait_rx.await??;
 
         if let Some(entry) = to_execute {
             info!("spec execute entry: {entry:?}");
             let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref()).await;
             let resp = ProposeResponse::new_result::<C>(&er_res, false);
-            if let WaitResult::FSynced(Err(e)) = wait_rx.recv_async().await? {
-                return Err(e);
-            }
             resp_tx.send_propose(resp);
         }
 
@@ -215,7 +206,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     /// Handle propose task
     async fn handle_propose_task(
         curp: Arc<RawCurp<C, RC>>,
-        storage: Arc<dyn StorageApi<Command = C>>,
         rx: flume::Receiver<Propose<C>>,
         shutdown_listener: Listener,
     ) {
@@ -236,7 +226,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             let (read_onlys, mutatives): (Vec<_>, Vec<_>) =
                 addition.into_iter().partition(Propose::is_read_only);
             Self::handle_read_onlys(&curp, read_onlys).await;
-            Self::handle_mutatives(&curp, storage.as_ref(), mutatives).await;
+            Self::handle_mutatives(&curp, mutatives).await;
         }
     }
 
@@ -250,18 +240,13 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             let wait_fut = curp.wait_conflicts_synced(cmd);
             let _ignore = tokio::spawn(async move {
                 wait_fut.await;
-                let _ignore = wait_tx.send(WaitResult::Result(Ok(Some(entry))));
-                let _ignore = wait_tx.send(WaitResult::FSynced(Ok(())));
+                let _ignore = wait_tx.send(Ok(Some(entry)));
             });
         }
     }
 
     /// Handle read-only proposes
-    async fn handle_mutatives(
-        curp: &RawCurp<C, RC>,
-        storage: &dyn StorageApi<Command = C>,
-        proposes: Vec<Propose<C>>,
-    ) {
+    async fn handle_mutatives(curp: &RawCurp<C, RC>, proposes: Vec<Propose<C>>) {
         if proposes.len() == 0 {
             return;
         }
@@ -275,22 +260,9 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         }
         let (logs, wait_txs): (Vec<_>, Vec<_>) =
             proposes.into_iter().map(Propose::into_parts).unzip();
-        let (log_entries, push_results) = curp.push_logs(logs);
-        for (wait_tx, result) in wait_txs.iter().zip(push_results) {
+        let push_results = curp.push_logs(logs);
+        for (wait_tx, result) in wait_txs.into_iter().zip(push_results) {
             let _ignore = wait_tx.send(result);
-        }
-        if let Err(e) =
-            storage.put_log_entries(&log_entries.iter().map(Arc::as_ref).collect::<Vec<_>>())
-        {
-            error!("Failed to persistent log: {e}");
-            for wait_tx in wait_txs {
-                let err = CurpError::Internal(format!("log persistent failed: {}", e));
-                let _ignore = wait_tx.send(WaitResult::FSynced(Err(err)));
-            }
-        } else {
-            for wait_tx in wait_txs {
-                let _ignore = wait_tx.send(WaitResult::FSynced(Ok(())));
-            }
         }
     }
 
@@ -866,7 +838,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         Self::run_bg_tasks(
             Arc::clone(&curp),
             Arc::clone(&cmd_executor),
-            Arc::clone(&storage),
             propose_rx,
             as_rx,
         );
@@ -886,7 +857,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     fn run_bg_tasks(
         curp: Arc<RawCurp<C, RC>>,
         cmd_executor: Arc<CE>,
-        storage: Arc<impl StorageApi<Command = C> + 'static>,
         propose_rx: flume::Receiver<Propose<C>>,
         as_rx: flume::Receiver<TaskType<C>>,
     ) {
@@ -917,7 +887,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             Self::conf_change_handler(Arc::clone(&curp), remove_events, n)
         });
         task_manager.spawn(TaskName::HandlePropose, |n| {
-            Self::handle_propose_task(Arc::clone(&curp), storage, propose_rx, n)
+            Self::handle_propose_task(Arc::clone(&curp), propose_rx, n)
         });
         task_manager.spawn(TaskName::AfterSync, |n| {
             Self::after_sync_task(curp, cmd_executor, as_rx, n)
