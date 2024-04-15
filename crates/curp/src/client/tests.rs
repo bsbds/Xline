@@ -248,7 +248,7 @@ async fn test_unary_fetch_clusters_linearizable_failed() {
     let unary = init_unary_client(connects, None, None, 0, 0, None);
     let res = unary.fetch_cluster(true).await.unwrap_err();
     // only server(0, 1)'s responses are valid, less than majority quorum(3), got a mocked RpcTransport to retry
-    assert_eq!(res, CurpError::RpcTransport(()));
+    assert_eq!(res.into_curp_err(), CurpError::RpcTransport(()));
 }
 
 // TODO: rewrite this tests

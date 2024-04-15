@@ -5,7 +5,9 @@ use futures::Future;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use super::{ClientApi, LeaderStateUpdate, ProposeResponse, RepeatableClientApi};
+use super::{
+    unary::UnaryError, ClientApi, LeaderStateUpdate, ProposeResponse, RepeatableClientApi,
+};
 use crate::{
     members::ServerId,
     rpc::{ConfChange, CurpError, FetchClusterResponse, Member, ReadState, Redirect},
@@ -117,7 +119,7 @@ impl<Api> Drop for Retry<Api> {
 
 impl<Api> Retry<Api>
 where
-    Api: RepeatableClientApi<Error = CurpError> + LeaderStateUpdate + Send + Sync + 'static,
+    Api: RepeatableClientApi<Error = UnaryError> + LeaderStateUpdate + Send + Sync + 'static,
 {
     /// Create a retry client
     pub(super) fn new(inner: Api, config: RetryConfig, bg_handle: Option<JoinHandle<()>>) -> Self {
@@ -131,7 +133,7 @@ where
     /// Takes a function f and run retry.
     async fn retry<'a, R, F>(&'a self, f: impl Fn(&'a Api) -> F) -> Result<R, tonic::Status>
     where
-        F: Future<Output = Result<R, CurpError>>,
+        F: Future<Output = Result<R, UnaryError>>,
     {
         let mut backoff = self.config.init_backoff();
         let mut last_err = None;
@@ -141,23 +143,8 @@ where
                 Err(err) => err,
             };
 
-            match err {
-                // some errors that should not retry
-                CurpError::Duplicated(())
-                | CurpError::ShuttingDown(())
-                | CurpError::InvalidConfig(())
-                | CurpError::NodeNotExists(())
-                | CurpError::NodeAlreadyExists(())
-                | CurpError::LearnerNotCatchUp(()) => {
-                    return Err(tonic::Status::from(err));
-                }
-
-                // some errors that could have a retry
-                CurpError::ExpiredClientId(())
-                | CurpError::KeyConflict(())
-                | CurpError::Internal(_)
-                | CurpError::LeaderTransfer(_) => {}
-
+            // Needs to update the client state when encounter some errors
+            match *err.curp_err() {
                 // update leader state if we got a rpc transport error
                 CurpError::RpcTransport(()) => {
                     if let Err(e) = self.inner.fetch_leader_id(true).await {
@@ -184,6 +171,32 @@ where
                         warn!("fetch cluster failed, error {e:?}");
                     }
                 }
+
+                CurpError::KeyConflict(_)
+                | CurpError::Duplicated(_)
+                | CurpError::ExpiredClientId(_)
+                | CurpError::InvalidConfig(_)
+                | CurpError::NodeNotExists(_)
+                | CurpError::NodeAlreadyExists(_)
+                | CurpError::LearnerNotCatchUp(_)
+                | CurpError::ShuttingDown(_)
+                | CurpError::Internal(_)
+                | CurpError::LeaderTransfer(_) => {}
+            }
+
+            if !err.retriable()
+                || matches!(
+                    *err.curp_err(),
+                    // some errors that should not retry
+                    CurpError::Duplicated(_)
+                        | CurpError::ShuttingDown(_)
+                        | CurpError::InvalidConfig(_)
+                        | CurpError::NodeNotExists(_)
+                        | CurpError::NodeAlreadyExists(_)
+                        | CurpError::LearnerNotCatchUp(_)
+                )
+            {
+                return Err(tonic::Status::from(err.into_curp_err()));
             }
 
             #[cfg(feature = "client-metrics")]
@@ -207,7 +220,7 @@ where
 #[async_trait]
 impl<Api> ClientApi for Retry<Api>
 where
-    Api: RepeatableClientApi<Error = CurpError> + LeaderStateUpdate + Send + Sync + 'static,
+    Api: RepeatableClientApi<Error = UnaryError> + LeaderStateUpdate + Send + Sync + 'static,
 {
     /// The client error
     type Error = tonic::Status;
@@ -223,7 +236,10 @@ where
         token: Option<&String>,
         use_fast_path: bool,
     ) -> Result<ProposeResponse<Self::Cmd>, tonic::Status> {
-        let propose_id = self.inner.gen_propose_id()?;
+        let propose_id = self
+            .inner
+            .gen_propose_id()
+            .map_err(UnaryError::into_curp_err)?;
         self.retry::<_, _>(|client| {
             RepeatableClientApi::propose(client, propose_id, cmd, token, use_fast_path)
         })
@@ -235,7 +251,10 @@ where
         &self,
         changes: Vec<ConfChange>,
     ) -> Result<Vec<Member>, tonic::Status> {
-        let propose_id = self.inner.gen_propose_id()?;
+        let propose_id = self
+            .inner
+            .gen_propose_id()
+            .map_err(UnaryError::into_curp_err)?;
         self.retry::<_, _>(|client| {
             let changes_c = changes.clone();
             RepeatableClientApi::propose_conf_change(client, propose_id, changes_c)
@@ -245,7 +264,10 @@ where
 
     /// Send propose to shutdown cluster
     async fn propose_shutdown(&self) -> Result<(), tonic::Status> {
-        let propose_id = self.inner.gen_propose_id()?;
+        let propose_id = self
+            .inner
+            .gen_propose_id()
+            .map_err(UnaryError::into_curp_err)?;
         self.retry::<_, _>(|client| RepeatableClientApi::propose_shutdown(client, propose_id))
             .await
     }
@@ -257,7 +279,10 @@ where
         node_name: String,
         node_client_urls: Vec<String>,
     ) -> Result<(), Self::Error> {
-        let propose_id = self.inner.gen_propose_id()?;
+        let propose_id = self
+            .inner
+            .gen_propose_id()
+            .map_err(UnaryError::into_curp_err)?;
         self.retry::<_, _>(|client| {
             let name_c = node_name.clone();
             let node_client_urls_c = node_client_urls.clone();

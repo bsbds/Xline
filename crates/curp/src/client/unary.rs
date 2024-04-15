@@ -2,14 +2,14 @@ use std::{cmp::Ordering, marker::PhantomData, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use curp_external_api::cmd::Command;
-use futures::{future, stream::FuturesUnordered, Future, Stream, StreamExt};
+use futures::{stream::FuturesUnordered, Future, Stream, StreamExt};
 use tonic::Response;
 use tracing::{debug, warn};
 
 use super::{state::State, ClientApi, LeaderStateUpdate, ProposeResponse, RepeatableClientApi};
 use crate::{
     members::ServerId,
-    quorum,
+    quorum, recover_quorum,
     response::ResponseReceiver,
     rpc::{
         connect::ConnectApi, ConfChange, CurpError, FetchClusterRequest, FetchClusterResponse,
@@ -70,21 +70,26 @@ impl<C: Command> Unary<C> {
     async fn map_leader<R, F: Future<Output = Result<R, CurpError>>>(
         &self,
         f: impl FnOnce(Arc<dyn ConnectApi>) -> F,
-    ) -> Result<R, CurpError> {
+    ) -> Result<R, UnaryError> {
         let cached_leader = self.state.leader_id().await;
         let leader_id = match cached_leader {
             Some(id) => id,
             None => <Unary<C> as ClientApi>::fetch_leader_id(self, false).await?,
         };
 
-        self.state.map_server(leader_id, f).await
+        self.state
+            .map_server(leader_id, f)
+            .await
+            .map_err(Into::into)
     }
 
-    async fn leader_id(&self) -> Result<u64, CurpError> {
+    async fn leader_id(&self) -> Result<u64, UnaryError> {
         let cached_leader = self.state.leader_id().await;
         match cached_leader {
             Some(id) => Ok(id),
-            None => <Unary<C> as ClientApi>::fetch_leader_id(self, false).await,
+            None => <Unary<C> as ClientApi>::fetch_leader_id(self, false)
+                .await
+                .map_err(Into::into),
         }
     }
 
@@ -99,7 +104,7 @@ impl<C: Command> Unary<C> {
     /// Propose for read only commands
     ///
     /// For read-only commands, we only need to send propose to leader
-    async fn propose_read_only<PF>(propose_fut: PF) -> Result<ProposeResponse<C>, CurpError>
+    async fn propose_read_only<PF>(propose_fut: PF) -> Result<ProposeResponse<C>, UnaryError>
     where
         PF: Future<
             Output = Result<
@@ -108,19 +113,22 @@ impl<C: Command> Unary<C> {
             >,
         >,
     {
-        let propose_res = propose_fut.await;
+        let propose_res = propose_fut.await.map_err(UnaryError::new_idempotent);
         let resp_stream = propose_res?.into_inner();
         let mut response_rx = ResponseReceiver::new(resp_stream);
-        response_rx.recv::<C>(false).await
+        response_rx
+            .recv::<C>(false)
+            .await
+            .map_err(UnaryError::new_idempotent)
     }
 
     /// Propose for mutative commands
     async fn propose_mutative<PF, RF>(
         propose_fut: PF,
-        record_futs: FuturesUnordered<RF>,
+        mut record_futs: FuturesUnordered<RF>,
         use_fast_path: bool,
-        superquorum: usize,
-    ) -> Result<ProposeResponse<C>, CurpError>
+        size: usize,
+    ) -> Result<ProposeResponse<C>, UnaryError>
     where
         PF: Future<
             Output = Result<
@@ -130,26 +138,43 @@ impl<C: Command> Unary<C> {
         >,
         RF: Future<Output = Result<Response<RecordResponse>, CurpError>>,
     {
-        let record_futs_filtered = record_futs
-            .filter_map(|res| future::ready(res.ok()))
-            .filter(|resp| future::ready(!resp.get_ref().conflict))
-            .take(superquorum.wrapping_sub(1))
-            .collect::<Vec<_>>();
-        let (propose_res, record_resps) = tokio::join!(propose_fut, record_futs_filtered);
+        let superquorum = super_quorum(size);
+        let recover_quorum = recover_quorum(size);
 
-        let resp_stream = propose_res?.into_inner();
-        let mut response_rx = ResponseReceiver::new(resp_stream);
-        let fast_path_failed = record_resps.len() < superquorum.wrapping_sub(1);
-        response_rx
-            .recv::<C>(fast_path_failed || !use_fast_path)
-            .await
+        let propose_result = propose_fut.await;
+        // A successful propose to the leader also record the command
+        let mut ok_cnt: usize = if propose_result.is_ok() { 1 } else { 0 };
+
+        while let Some(result) = record_futs.next().await {
+            if result.map(|r| !r.get_ref().conflict).unwrap_or(false) {
+                ok_cnt = ok_cnt.wrapping_add(1);
+                if ok_cnt == superquorum {
+                    break;
+                }
+            }
+        }
+        // Adds one to `ok_cnt` because the when an error occurs in the leader's
+        // response, it does not necessarily guarantee a record failure
+        let definite = ok_cnt.wrapping_add(1) < recover_quorum;
+
+        match propose_result {
+            Ok(resp) => {
+                let mut response_rx = ResponseReceiver::new(resp.into_inner());
+                let fast_path_failed = ok_cnt < superquorum;
+                response_rx
+                    .recv::<C>(fast_path_failed || !use_fast_path)
+                    .await
+                    .map_err(|err| UnaryError::new_propose(err, definite))
+            }
+            Err(err) => Err(UnaryError::new_propose(err, definite)),
+        }
     }
 }
 
 #[async_trait]
 impl<C: Command> ClientApi for Unary<C> {
     /// The error is generated from server
-    type Error = CurpError;
+    type Error = UnaryError;
 
     /// The command type
     type Cmd = C;
@@ -161,7 +186,7 @@ impl<C: Command> ClientApi for Unary<C> {
         cmd: &C,
         token: Option<&String>,
         use_fast_path: bool,
-    ) -> Result<ProposeResponse<C>, CurpError> {
+    ) -> Result<ProposeResponse<C>, Self::Error> {
         let propose_id = self.gen_propose_id()?;
         RepeatableClientApi::propose(self, propose_id, cmd, token, use_fast_path).await
     }
@@ -170,13 +195,13 @@ impl<C: Command> ClientApi for Unary<C> {
     async fn propose_conf_change(
         &self,
         changes: Vec<ConfChange>,
-    ) -> Result<Vec<Member>, CurpError> {
+    ) -> Result<Vec<Member>, Self::Error> {
         let propose_id = self.gen_propose_id()?;
         RepeatableClientApi::propose_conf_change(self, propose_id, changes).await
     }
 
     /// Send propose to shutdown cluster
-    async fn propose_shutdown(&self) -> Result<(), CurpError> {
+    async fn propose_shutdown(&self) -> Result<(), Self::Error> {
         let propose_id = self.gen_propose_id()?;
         RepeatableClientApi::propose_shutdown(self, propose_id).await
     }
@@ -204,7 +229,7 @@ impl<C: Command> ClientApi for Unary<C> {
     }
 
     /// Send fetch read state from leader
-    async fn fetch_read_state(&self, cmd: &C) -> Result<ReadState, CurpError> {
+    async fn fetch_read_state(&self, cmd: &C) -> Result<ReadState, Self::Error> {
         // Same as fast_round, we blame the serializing error to the server even
         // thought it is the local error
         let req = FetchReadStateRequest::new(cmd, self.state.cluster_version().await).map_err(
@@ -225,7 +250,7 @@ impl<C: Command> ClientApi for Unary<C> {
 
     /// Send fetch cluster requests to all servers
     /// Note: The fetched cluster may still be outdated if `linearizable` is false
-    async fn fetch_cluster(&self, linearizable: bool) -> Result<FetchClusterResponse, CurpError> {
+    async fn fetch_cluster(&self, linearizable: bool) -> Result<FetchClusterResponse, Self::Error> {
         let timeout = self.config.wait_synced_timeout;
         if !linearizable {
             // firstly, try to fetch the local server
@@ -273,7 +298,7 @@ impl<C: Command> ClientApi for Unary<C> {
                     warn!("fetch cluster from {} failed, {:?}", id, e);
                     // similar to fast round
                     if e.should_abort_fast_round() {
-                        return Err(e);
+                        return Err(e.into());
                     }
                     if let Some(old_err) = err.as_ref() {
                         if old_err.priority() <= e.priority() {
@@ -322,11 +347,11 @@ impl<C: Command> ClientApi for Unary<C> {
         }
 
         if let Some(err) = err {
-            return Err(err);
+            return Err(err.into());
         }
 
         // It seems that the max term has not reached the majority here. Mock a transport error and return it to the external to retry.
-        return Err(CurpError::RpcTransport(()));
+        return Err(CurpError::RpcTransport(()).into());
     }
 }
 
@@ -429,5 +454,71 @@ impl<C: Command> LeaderStateUpdate for Unary<C> {
     /// Update leader
     async fn update_leader(&self, leader_id: Option<ServerId>, term: u64) -> bool {
         self.state.check_and_update_leader(leader_id, term).await
+    }
+}
+
+/// Error during propose in unary client
+#[derive(Debug)]
+pub(super) enum UnaryError {
+    /// Idempotent operations
+    ///
+    /// This consist of two types of errors
+    /// * Errors that does not related to propose
+    /// * Propose errors but idempotent
+    Idempotent(CurpError),
+    /// Propose errors
+    Propose {
+        /// The error returned by the leader
+        leader_err: CurpError,
+        /// The command is committed through witnesses
+        ///
+        /// If the client finds that the command is accepted by less than `⌈f/2⌉+1` witnesses
+        /// Then the error is definite a failure.
+        definite: bool,
+    },
+}
+
+impl UnaryError {
+    /// Creates a new none propose error
+    fn new_idempotent(err: CurpError) -> Self {
+        Self::Idempotent(err)
+    }
+
+    /// Creates a propose error
+    fn new_propose(leader_err: CurpError, definite: bool) -> Self {
+        Self::Propose {
+            leader_err,
+            definite,
+        }
+    }
+
+    /// Gets the `CurpError`
+    pub(super) fn curp_err(&self) -> &CurpError {
+        match *self {
+            UnaryError::Idempotent(ref err) => err,
+            UnaryError::Propose { ref leader_err, .. } => leader_err,
+        }
+    }
+
+    /// Converts self into `CurpError`
+    pub(super) fn into_curp_err(self) -> CurpError {
+        match self {
+            UnaryError::Idempotent(err) => err,
+            UnaryError::Propose { leader_err, .. } => leader_err,
+        }
+    }
+
+    /// Retruns `true` if a retry could proceed
+    pub(super) fn retriable(&self) -> bool {
+        match *self {
+            UnaryError::Idempotent(_) => true,
+            UnaryError::Propose { definite, .. } => definite,
+        }
+    }
+}
+
+impl From<CurpError> for UnaryError {
+    fn from(err: CurpError) -> Self {
+        UnaryError::new_idempotent(err)
     }
 }
