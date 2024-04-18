@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{anyhow, Result};
 use clippy_utilities::{NumericCast, OverflowArithmetic};
 use curp::{
-    client::ClientBuilder as CurpClientBuilder,
+    client::{ClientApi, ClientBuilder as CurpClientBuilder},
     members::{get_cluster_info_from_remote, ClusterInfo},
     rpc::{InnerProtocolServer, ProtocolServer},
     server::{Rpc, SpObject, StorageApi as _, UcpObject, DB as CurpDB},
@@ -166,8 +166,9 @@ impl XlineServer {
             (None, InitialClusterState::Existing) => {
                 info!("get cluster_info from remote");
                 let cluster_info = get_cluster_info_from_remote(
-                    &ClusterInfo::from_members_map(all_members, self_client_urls, &name),
+                    &ClusterInfo::from_members_map(all_members, self_client_urls.clone(), &name),
                     &self_peer_urls,
+                    &self_client_urls,
                     cluster_config.name(),
                     *cluster_config.client_config().wait_synced_timeout(),
                     tls_config,
@@ -392,10 +393,17 @@ impl XlineServer {
                     _ = curp_router.serve_with_incoming_shutdown(curp_incoming, n2.wait()) => {},
                 }
             });
-        if let Err(e) = self.publish(curp_client).await {
-            warn!("publish name to cluster failed: {e:?}");
-        };
-        Ok(())
+
+        info!("publishing name to cluster");
+        for _ in 0..10 {
+            if let Err(e) = self.publish(curp_client.as_ref()).await {
+                warn!("publish name to cluster failed: {e:?}");
+            } else {
+                return Ok(());
+            }
+        }
+
+        panic!("failed to publish node");
     }
 
     /// Start `XlineServer`
@@ -596,7 +604,10 @@ impl XlineServer {
     }
 
     /// Publish the name of current node to cluster
-    async fn publish(&self, curp_client: Arc<CurpClient>) -> Result<(), tonic::Status> {
+    async fn publish(
+        &self,
+        curp_client: &dyn ClientApi<Error = tonic::Status, Cmd = Command>,
+    ) -> Result<(), tonic::Status> {
         curp_client
             .propose_publish(
                 self.cluster_info.self_id(),

@@ -371,7 +371,7 @@ pub const fn default_server_wait_synced_timeout() -> Duration {
 #[must_use]
 #[inline]
 pub const fn default_initial_retry_timeout() -> Duration {
-    Duration::from_millis(1500)
+    Duration::from_millis(500)
 }
 
 /// default max retry timeout
