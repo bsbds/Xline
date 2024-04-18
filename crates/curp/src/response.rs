@@ -1,6 +1,7 @@
 use std::{
     pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
 
 use curp_external_api::cmd::Command;
@@ -107,11 +108,10 @@ impl ResponseReceiver {
     }
 
     async fn recv_resp<C: Command>(&mut self) -> Result<ResponseOp, CurpError> {
-        let resp = self
-            .resp_stream
-            .next()
-            .await
-            .ok_or(CurpError::internal("stream reaches on an end".to_owned()))??;
+        let Ok(resp_opt) = tokio::time::timeout(Duration::from_millis(100), self.resp_stream.next()).await else {
+            return Err(CurpError::internal("streaming timeout"));
+        };
+        let resp = resp_opt.ok_or(CurpError::internal("stream reaches on an end".to_owned()))??;
         Ok(resp
             .op
             .unwrap_or_else(|| unreachable!("op should always exist")))
