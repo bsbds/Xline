@@ -1975,18 +1975,18 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         if modified {
             self.ctx.cluster_info.cluster_version_update();
         }
-        if self.is_leader() {
-            self.ctx
-                .change_tx
-                .send(conf_change)
-                .unwrap_or_else(|_e| unreachable!("change_rx should not be dropped"));
-            if self
+        self.ctx
+            .change_tx
+            .send(conf_change)
+            .unwrap_or_else(|_e| unreachable!("change_rx should not be dropped"));
+        // TODO: We could wrap lst inside a role checking to prevent accidental lst mutation
+        if self.is_leader()
+            && self
                 .lst
                 .get_transferee()
                 .is_some_and(|transferee| !cst_l.config.voters().contains(&transferee))
-            {
-                self.lst.reset_transferee();
-            }
+        {
+            self.lst.reset_transferee();
         }
         fallback_info
     }
