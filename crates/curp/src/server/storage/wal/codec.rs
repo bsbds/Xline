@@ -345,7 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn frame_encode_decode_is_ok() {
-        let codec = WAL::<TestCommand>::new();
+        let mut codec = WAL::<TestCommand>::new();
         let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
         let data_frame = DataFrameOwned::Entry(entry.clone());
         let seal_frame = DataFrameOwned::<TestCommand>::SealIndex(1);
@@ -354,20 +354,20 @@ mod tests {
 
         let (data_frame_get, len) = codec.decode(&encoded).unwrap();
         let (seal_frame_get, _) = codec.decode(&encoded[len..]).unwrap();
-        let DataFrameOwned::Entry(entry_get) = data_frame_get[0] else {
+        let DataFrameOwned::Entry(ref entry_get) = data_frame_get[0] else {
             panic!("frame should be type: DataFrame::Entry");
         };
         let DataFrameOwned::SealIndex(index) = seal_frame_get[0] else {
             panic!("frame should be type: DataFrame::Entry");
         };
 
-        assert_eq!(entry_get, entry);
+        assert_eq!(*entry_get, entry);
         assert_eq!(index, 1);
     }
 
     #[tokio::test]
     async fn frame_zero_write_will_be_detected() {
-        let codec = WAL::<TestCommand>::new();
+        let mut codec = WAL::<TestCommand>::new();
         let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
         let data_frame = DataFrameOwned::Entry(entry.clone());
         let seal_frame = DataFrameOwned::<TestCommand>::SealIndex(1);
@@ -383,7 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn frame_corrupt_will_be_detected() {
-        let codec = WAL::<TestCommand>::new();
+        let mut codec = WAL::<TestCommand>::new();
         let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
         let data_frame = DataFrameOwned::Entry(entry.clone());
         let seal_frame = DataFrameOwned::<TestCommand>::SealIndex(1);
