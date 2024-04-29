@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use curp::{rpc::ProposeId, server::conflict::CommandEntry};
+use curp::rpc::{PoolEntry, ProposeId};
 use curp_external_api::conflict::{ConflictPoolOp, SpeculativePoolOp, UncommittedPoolOp};
 use xlineapi::{
     command::{Command, KeyRange},
@@ -191,7 +191,7 @@ fn exclusive_ucp_operations_are_ok() {
     assert_eq!(ucp.len(), 0);
 }
 
-fn compare_commands(mut a: Vec<CommandEntry<Command>>, mut b: Vec<CommandEntry<Command>>) {
+fn compare_commands(mut a: Vec<PoolEntry<Command>>, mut b: Vec<PoolEntry<Command>>) {
     a.sort_unstable();
     b.sort_unstable();
     assert_eq!(a, b);
@@ -203,7 +203,7 @@ struct EntryGenerator {
 }
 
 impl EntryGenerator {
-    fn gen_put(&mut self, key: &str) -> CommandEntry<Command> {
+    fn gen_put(&mut self, key: &str) -> PoolEntry<Command> {
         self.gen_entry(
             vec![KeyRange::new_one_key(key)],
             RequestWrapper::PutRequest(PutRequest {
@@ -213,7 +213,7 @@ impl EntryGenerator {
         )
     }
 
-    fn gen_delete_range(&mut self, key: &str, range_end: &str) -> CommandEntry<Command> {
+    fn gen_delete_range(&mut self, key: &str, range_end: &str) -> PoolEntry<Command> {
         self.gen_entry(
             vec![KeyRange::new(key, range_end)],
             RequestWrapper::DeleteRangeRequest(DeleteRangeRequest {
@@ -224,7 +224,7 @@ impl EntryGenerator {
         )
     }
 
-    fn gen_lease_grant(&mut self, id: i64) -> CommandEntry<Command> {
+    fn gen_lease_grant(&mut self, id: i64) -> PoolEntry<Command> {
         self.gen_entry(
             vec![],
             RequestWrapper::LeaseGrantRequest(LeaseGrantRequest {
@@ -234,30 +234,30 @@ impl EntryGenerator {
         )
     }
 
-    fn gen_lease_revoke(&mut self, id: i64) -> CommandEntry<Command> {
+    fn gen_lease_revoke(&mut self, id: i64) -> PoolEntry<Command> {
         self.gen_entry(
             vec![],
             RequestWrapper::LeaseRevokeRequest(LeaseRevokeRequest { id }),
         )
     }
 
-    fn gen_auth_enable(&mut self) -> CommandEntry<Command> {
+    fn gen_auth_enable(&mut self) -> PoolEntry<Command> {
         self.gen_entry(
             vec![],
             RequestWrapper::AuthEnableRequest(AuthEnableRequest {}),
         )
     }
 
-    fn gen_role_add(&mut self) -> CommandEntry<Command> {
+    fn gen_role_add(&mut self) -> PoolEntry<Command> {
         self.gen_entry(
             vec![],
             RequestWrapper::AuthRoleAddRequest(AuthRoleAddRequest::default()),
         )
     }
 
-    fn gen_entry(&mut self, keys: Vec<KeyRange>, req: RequestWrapper) -> CommandEntry<Command> {
+    fn gen_entry(&mut self, keys: Vec<KeyRange>, req: RequestWrapper) -> PoolEntry<Command> {
         self.id += 1;
         let cmd = Command::new(keys, req);
-        CommandEntry::new(ProposeId(0, self.id), Arc::new(cmd))
+        PoolEntry::new(ProposeId(0, self.id), Arc::new(cmd))
     }
 }

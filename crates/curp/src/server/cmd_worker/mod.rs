@@ -30,8 +30,10 @@ fn remove_from_sp_ucp<C: Command>(
 ) {
     let pool_entry = match entry.entry_data {
         EntryData::Command(ref c) => PoolEntry::new(entry.propose_id, Arc::clone(c)),
-        EntryData::ConfChange(ref c) => PoolEntry::new(entry.propose_id, c.clone()),
-        EntryData::Empty | EntryData::Shutdown | EntryData::SetNodeState(_, _, _) => {
+        EntryData::ConfChange(_)
+        | EntryData::Empty
+        | EntryData::Shutdown
+        | EntryData::SetNodeState(_, _, _) => {
             unreachable!()
         }
     };

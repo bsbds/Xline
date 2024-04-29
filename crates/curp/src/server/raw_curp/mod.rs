@@ -668,17 +668,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         self.check_new_config(&conf_changes)?;
 
         self.deduplicate(propose_id, None)?;
-        let mut conflict = self
-            .ctx
-            .new_sp
-            .lock()
-            .insert(PoolEntry::new(propose_id, conf_changes.clone()))
-            .is_some();
-        conflict |= self
-            .ctx
-            .new_ucp
-            .lock()
-            .insert(PoolEntry::new(propose_id, conf_changes.clone()));
 
         let mut log_w = self.log.write();
         let entry = log_w
@@ -700,7 +689,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 FallbackContext::new(Arc::clone(&entry), addrs, name, is_learner),
             );
         }
-        self.entry_process_single(&mut log_w, Arc::clone(&entry), conflict, st_r.term);
+        self.entry_process_single(&mut log_w, Arc::clone(&entry), false, st_r.term);
 
         let log_r = RwLockWriteGuard::downgrade(log_w);
         self.persistent_log_entries(&[entry.as_ref()], &log_r);
@@ -1858,7 +1847,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             let _ig_spec = sp_l.insert(entry.clone()); // may have been inserted before
             #[allow(clippy::expect_used)]
             let entry = log
-                .push(term, entry.id, entry.inner)
+                .push(term, entry.id, entry.cmd)
                 .expect("cmd {cmd:?} cannot be serialized");
             debug!(
                 "{} recovers speculatively executed cmd({}) in log[{}]",
@@ -1885,10 +1874,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 EntryData::Command(ref cmd) => {
                     let _ignore = ucp_l.insert(PoolEntry::new(propose_id, Arc::clone(cmd)));
                 }
-                EntryData::ConfChange(ref conf_change) => {
-                    let _ignore = ucp_l.insert(PoolEntry::new(propose_id, conf_change.clone()));
-                }
-                EntryData::Shutdown | EntryData::Empty | EntryData::SetNodeState(_, _, _) => {}
+                EntryData::ConfChange(_)
+                | EntryData::Shutdown
+                | EntryData::Empty
+                | EntryData::SetNodeState(_, _, _) => {}
             }
         }
     }
