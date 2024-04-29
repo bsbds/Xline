@@ -197,7 +197,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
 
         if let Some(entry) = to_execute {
             info!("spec execute entry: {entry:?}");
-            let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref()).await;
+            let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref());
             let resp = ProposeResponse::new_result::<C>(&er_res, false);
             resp_tx.send_propose(resp);
         }

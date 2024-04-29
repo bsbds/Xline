@@ -239,11 +239,11 @@ pub struct TestCE {
 
 #[async_trait]
 impl CommandExecutor<TestCommand> for TestCE {
-    async fn execute(
+    fn execute(
         &self,
         cmd: &TestCommand,
     ) -> Result<<TestCommand as Command>::ER, <TestCommand as Command>::Error> {
-        sleep(cmd.exe_dur).await;
+        std::thread::sleep(cmd.exe_dur);
         if cmd.exe_should_fail {
             return Err(ExecuteError("fail".to_owned()));
         }

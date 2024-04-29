@@ -54,11 +54,11 @@ pub trait Command: pri::Serializable + ConflictCheck + PbCodec + Unpin {
     /// # Errors
     /// Return `Self::Error` when `CommandExecutor::execute` goes wrong
     #[inline]
-    async fn execute<E>(&self, e: &E) -> Result<Self::ER, Self::Error>
+    fn execute<E>(&self, e: &E) -> Result<Self::ER, Self::Error>
     where
         E: CommandExecutor<Self> + Send + Sync,
     {
-        <E as CommandExecutor<Self>>::execute(e, self).await
+        <E as CommandExecutor<Self>>::execute(e, self)
     }
 }
 
@@ -97,7 +97,7 @@ where
     ///
     /// # Errors
     /// This function may return an error if there is a problem executing the command.
-    async fn execute(&self, cmd: &C) -> Result<C::ER, C::Error>;
+    fn execute(&self, cmd: &C) -> Result<C::ER, C::Error>;
 
     /// Batch execute the after_sync callback
     async fn after_sync(

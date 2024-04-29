@@ -40,7 +40,7 @@ fn remove_from_sp_ucp<C: Command>(
 }
 
 /// Cmd worker execute handler
-pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
+pub(super) fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     entry: Arc<LogEntry<C>>,
     ce: &CE,
     curp: &RawCurp<C, RC>,
@@ -49,7 +49,7 @@ pub(super) async fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     let id = curp.id();
     match entry.entry_data {
         EntryData::Command(ref cmd) => {
-            let er = ce.execute(cmd).await;
+            let er = ce.execute(cmd);
             if er.is_err() {
                 remove_from_sp_ucp(&mut sp.lock(), &mut ucp.lock(), &entry);
                 ce.trigger(entry.inflight_id());
