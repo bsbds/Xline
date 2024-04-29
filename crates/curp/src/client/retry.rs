@@ -3,7 +3,7 @@ use std::{ops::SubAssign, time::Duration};
 use async_trait::async_trait;
 use futures::Future;
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::{
     unary::UnaryError, ClientApi, LeaderStateUpdate, ProposeResponse, RepeatableClientApi,
@@ -112,6 +112,7 @@ pub(super) struct Retry<Api> {
 impl<Api> Drop for Retry<Api> {
     fn drop(&mut self) {
         if let Some(handle) = self.bg_handle.as_ref() {
+            info!("stopping background task");
             handle.abort();
         }
     }
@@ -241,7 +242,7 @@ where
             .gen_propose_id()
             .map_err(UnaryError::into_curp_err)?;
         self.retry::<_, _>(|client| {
-            RepeatableClientApi::propose(client, propose_id, cmd, token, use_fast_path)
+            RepeatableClientApi::propose(client, *propose_id, cmd, token, use_fast_path)
         })
         .await
     }
@@ -257,7 +258,7 @@ where
             .map_err(UnaryError::into_curp_err)?;
         self.retry::<_, _>(|client| {
             let changes_c = changes.clone();
-            RepeatableClientApi::propose_conf_change(client, propose_id, changes_c)
+            RepeatableClientApi::propose_conf_change(client, *propose_id, changes_c)
         })
         .await
     }
@@ -268,7 +269,7 @@ where
             .inner
             .gen_propose_id()
             .map_err(UnaryError::into_curp_err)?;
-        self.retry::<_, _>(|client| RepeatableClientApi::propose_shutdown(client, propose_id))
+        self.retry::<_, _>(|client| RepeatableClientApi::propose_shutdown(client, *propose_id))
             .await
     }
 
@@ -288,7 +289,7 @@ where
             let node_client_urls_c = node_client_urls.clone();
             RepeatableClientApi::propose_publish(
                 client,
-                propose_id,
+                *propose_id,
                 node_id,
                 name_c,
                 node_client_urls_c,

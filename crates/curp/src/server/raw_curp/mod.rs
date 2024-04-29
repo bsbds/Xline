@@ -471,6 +471,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 }
 
 // Curp handlers
+// TODO: Tidy up the handlers
+//   Possible improvements:
+//    * split metrics collection from CurpError into a separate function
+//    * split the handlers into separate modules
 impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     /// Checks the if term are up-to-date
     pub(super) fn check_term(&self, term: u64) -> Result<(), CurpError> {
@@ -622,6 +626,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         if self.lst.get_transferee().is_some() {
             return Err(CurpError::LeaderTransfer("leader transferring".to_owned()));
         }
+        self.deduplicate(propose_id, None)?;
         let mut log_w = self.log.write();
         let entry = log_w
             .push(st_r.term, propose_id, EntryData::Shutdown)
@@ -662,6 +667,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         }
         self.check_new_config(&conf_changes)?;
 
+        self.deduplicate(propose_id, None)?;
         let mut conflict = self
             .ctx
             .new_sp
@@ -716,6 +722,9 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         if self.lst.get_transferee().is_some() {
             return Err(CurpError::leader_transfer("leader transferring"));
         }
+
+        self.deduplicate(req.propose_id(), None)?;
+
         let mut log_w = self.log.write();
         let entry = log_w.push(st_r.term, req.propose_id(), req).map_err(|e| {
             metrics::get()
@@ -1627,6 +1636,12 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         None
     }
 
+    /// Mark a client id as bypassed
+    pub(super) fn mark_client_id_bypassed(&self, client_id: u64) {
+        let mut lm_w = self.ctx.lm.write();
+        lm_w.bypass(client_id);
+    }
+
     /// Get client tls config
     pub(super) fn client_tls_config(&self) -> Option<&ClientTlsConfig> {
         self.ctx.client_tls_config.as_ref()
@@ -1835,13 +1850,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             })
             .collect_vec();
 
-        let mut cb_w = self.ctx.cb.write();
         let mut sp_l = self.ctx.new_sp.lock();
 
         let term = st.term;
         let mut entries = vec![];
         for entry in recovered_cmds {
-            let _ig_sync = cb_w.sync.insert(entry.id); // may have been inserted before
             let _ig_spec = sp_l.insert(entry.clone()); // may have been inserted before
             #[allow(clippy::expect_used)]
             let entry = log
@@ -2056,4 +2069,37 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         self.notify_sync_events(log_w);
         self.update_index_single_node(log_w, index, term);
     }
+
+    /// Process deduplication and acknowledge the `first_incomplete` for this client id
+    pub(crate) fn deduplicate(
+        &self,
+        ProposeId(client_id, seq_num): ProposeId,
+        first_incomplete: Option<u64>,
+    ) -> Result<(), CurpError> {
+        // deduplication
+        if self.ctx.lm.read().check_alive(client_id) {
+            let mut cb_w = self.ctx.cb.write();
+            let tracker = cb_w.tracker(client_id);
+            if tracker.only_record(seq_num) {
+                // TODO: obtain the previous ER from cmd_board and packed into CurpError::Duplicated as an entry.
+                return Err(CurpError::duplicated());
+            }
+            if let Some(first_incomplete) = first_incomplete {
+                let before = tracker.first_incomplete();
+                if tracker.must_advance_to(first_incomplete) {
+                    for seq_num_ack in before..first_incomplete {
+                        self.ack(ProposeId(client_id, seq_num_ack));
+                    }
+                }
+            }
+        } else {
+            self.ctx.cb.write().client_expired(client_id);
+            return Err(CurpError::expired_client_id());
+        }
+        Ok(())
+    }
+
+    /// Acknowledge the propose id and GC it's cmd board result
+    #[allow(clippy::unused_self)] // TODO refactor cmd board gc
+    fn ack(&self, _id: ProposeId) {}
 }

@@ -20,11 +20,11 @@ use crate::{
     members::{ClusterInfo, ServerId},
     role_change::RoleChange,
     rpc::{
-        AppendEntriesRequest, AppendEntriesResponse, FetchClusterRequest, FetchClusterResponse,
-        FetchReadStateRequest, FetchReadStateResponse, InstallSnapshotRequest,
-        InstallSnapshotResponse, LeaseKeepAliveMsg, MoveLeaderRequest, MoveLeaderResponse,
-        ProposeConfChangeRequest, ProposeConfChangeResponse, ProposeRequest, PublishRequest,
-        PublishResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
+        connect::Bypass, AppendEntriesRequest, AppendEntriesResponse, FetchClusterRequest,
+        FetchClusterResponse, FetchReadStateRequest, FetchReadStateResponse,
+        InstallSnapshotRequest, InstallSnapshotResponse, LeaseKeepAliveMsg, MoveLeaderRequest,
+        MoveLeaderResponse, ProposeConfChangeRequest, ProposeConfChangeResponse, ProposeRequest,
+        PublishRequest, PublishResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
         TriggerShutdownResponse, TryBecomeLeaderNowRequest, TryBecomeLeaderNowResponse,
         VoteRequest, VoteResponse,
     },
@@ -84,10 +84,11 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol fo
         &self,
         request: tonic::Request<ProposeRequest>,
     ) -> Result<tonic::Response<Self::ProposeStreamStream>, tonic::Status> {
+        let bypassed = request.metadata().is_bypassed();
         let (tx, rx) = flume::bounded(2);
         let resp_tx = Arc::new(ResponseSender::new(tx));
         self.inner
-            .propose_stream(request.into_inner(), resp_tx)
+            .propose_stream(request.into_inner(), resp_tx, bypassed)
             .await?;
 
         Ok(tonic::Response::new(rx.into_stream()))
@@ -107,9 +108,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol fo
         &self,
         request: tonic::Request<ShutdownRequest>,
     ) -> Result<tonic::Response<ShutdownResponse>, tonic::Status> {
+        let bypassed = request.metadata().is_bypassed();
         request.metadata().extract_span();
         Ok(tonic::Response::new(
-            self.inner.shutdown(request.into_inner()).await?,
+            self.inner.shutdown(request.into_inner(), bypassed).await?,
         ))
     }
 
@@ -118,9 +120,12 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol fo
         &self,
         request: tonic::Request<ProposeConfChangeRequest>,
     ) -> Result<tonic::Response<ProposeConfChangeResponse>, tonic::Status> {
+        let bypassed = request.metadata().is_bypassed();
         request.metadata().extract_span();
         Ok(tonic::Response::new(
-            self.inner.propose_conf_change(request.into_inner()).await?,
+            self.inner
+                .propose_conf_change(request.into_inner(), bypassed)
+                .await?,
         ))
     }
 
@@ -129,9 +134,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol fo
         &self,
         request: tonic::Request<PublishRequest>,
     ) -> Result<tonic::Response<PublishResponse>, tonic::Status> {
+        let bypassed = request.metadata().is_bypassed();
         request.metadata().extract_span();
         Ok(tonic::Response::new(
-            self.inner.publish(request.into_inner())?,
+            self.inner.publish(request.into_inner(), bypassed)?,
         ))
     }
 
