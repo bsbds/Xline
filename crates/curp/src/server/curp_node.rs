@@ -193,13 +193,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let (wait_tx, wait_rx) = oneshot::channel();
         let propose = Propose::try_new(req, wait_tx, Arc::clone(&resp_tx))?;
         let _ignore = self.propose_tx.send(propose);
-        let to_execute = wait_rx.await??;
 
+        let to_execute = wait_rx.await??;
         if let Some(entry) = to_execute {
-            info!("spec execute entry: {entry:?}");
-            let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref());
-            let resp = ProposeResponse::new_result::<C>(&er_res, false);
-            resp_tx.send_propose(resp);
+            self.execute_cmd(entry, &resp_tx);
         }
 
         Ok(())
@@ -278,6 +275,14 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         for (wait_tx, result) in wait_txs.into_iter().zip(push_results) {
             let _ignore = wait_tx.send(result);
         }
+    }
+
+    /// Speculatively execute a command
+    fn execute_cmd(&self, entry: Arc<LogEntry<C>>, resp_tx: &ResponseSender) {
+        info!("spec execute entry: {entry:?}");
+        let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref());
+        let resp = ProposeResponse::new_result::<C>(&er_res, false);
+        resp_tx.send_propose(resp);
     }
 
     /// Handle `Shutdown` requests
