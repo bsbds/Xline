@@ -78,18 +78,10 @@ impl<C: Command> CommandBoard<C> {
 
     /// Insert er to internal buffer
     pub(super) fn insert_er(&mut self, id: ProposeId, er: Result<C::ER, C::Error>) {
-        let er_ok = er.is_ok();
         assert!(
             self.er_buffer.insert(id, er).is_none(),
             "er should not be inserted twice"
         );
-
-        self.notify_er(&id);
-
-        // wait_synced response is also ready when execution fails
-        if !er_ok {
-            self.notify_asr(&id);
-        }
     }
 
     /// Insert asr to internal buffer
@@ -98,8 +90,6 @@ impl<C: Command> CommandBoard<C> {
             self.asr_buffer.insert(id, asr).is_none(),
             "asr should not be inserted twice"
         );
-
-        self.notify_asr(&id);
     }
 
     /// Insert conf change result to internal buffer
@@ -108,8 +98,6 @@ impl<C: Command> CommandBoard<C> {
             self.conf_buffer.insert(id),
             "conf should not be inserted twice"
         );
-
-        self.notify_conf(&id);
     }
 
     /// Get a listener for execution result
@@ -147,30 +135,9 @@ impl<C: Command> CommandBoard<C> {
         listener
     }
 
-    /// Notify execution results
-    fn notify_er(&mut self, id: &ProposeId) {
-        if let Some(notifier) = self.er_notifiers.remove(id) {
-            notifier.notify(usize::MAX);
-        }
-    }
-
-    /// Notify `wait_synced` requests
-    fn notify_asr(&mut self, id: &ProposeId) {
-        if let Some(notifier) = self.asr_notifiers.remove(id) {
-            notifier.notify(usize::MAX);
-        }
-    }
-
     /// Notify `shutdown` requests
     pub(super) fn notify_shutdown(&mut self) {
         self.shutdown_notifier.notify(usize::MAX);
-    }
-
-    /// Notify `wait_synced` requests
-    fn notify_conf(&mut self, id: &ProposeId) {
-        if let Some(notifier) = self.conf_notifier.remove(id) {
-            notifier.notify(usize::MAX);
-        }
     }
 
     /// Wait for an execution result
