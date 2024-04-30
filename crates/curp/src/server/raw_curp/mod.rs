@@ -2032,12 +2032,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             let mut cb_w = self.ctx.cb.write();
             let tracker = cb_w.tracker(client_id);
             if tracker.only_record(seq_num) {
-                let er = self
-                    .ctx
-                    .cb
-                    .read()
-                    .er_buffer
-                    .get(&ProposeId(client_id, seq_num));
                 // TODO: obtain the previous ER from cmd_board and packed into CurpError::Duplicated as an entry.
                 return Err(CurpError::duplicated());
             }

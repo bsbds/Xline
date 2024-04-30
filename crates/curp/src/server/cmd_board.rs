@@ -194,13 +194,12 @@ impl<C: Command> CommandBoard<C> {
     pub(super) async fn wait_for_er_asr(
         cb: &CmdBoardRef<C>,
         id: ProposeId,
-    ) -> (Result<C::ER, C::Error>, Option<Result<C::ASR, C::Error>>) {
+    ) -> (Result<C::ER, C::Error>, Result<C::ASR, C::Error>) {
         loop {
             {
                 let cb_r = cb.read();
                 match (cb_r.er_buffer.get(&id), cb_r.asr_buffer.get(&id)) {
-                    (Some(er), None) if er.is_err() => return (er.clone(), None),
-                    (Some(er), Some(asr)) => return (er.clone(), Some(asr.clone())),
+                    (Some(er), Some(asr)) => return (er.clone(), asr.clone()),
                     _ => {}
                 }
             }
