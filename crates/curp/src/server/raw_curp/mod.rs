@@ -1846,6 +1846,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     /// Apply new logs
     fn apply(&self, log: &mut Log<C>) {
         let mut entries = Vec::new();
+        let mut resp_txs_l = self.ctx.resp_txs.lock();
         for i in (log.last_as + 1)..=log.commit_index {
             metrics::get().proposals_applied.observe(i, &[]);
             let entry = log.get(i).unwrap_or_else(|| {
@@ -1854,7 +1855,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                     log.last_log_index()
                 )
             });
-            let tx = self.ctx.resp_txs.lock().remove(&i);
+            let tx = resp_txs_l.remove(&i);
             entries.push((Arc::clone(&entry), tx));
             log.last_as = i;
             if log.last_exe < log.last_as {
@@ -2031,6 +2032,12 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             let mut cb_w = self.ctx.cb.write();
             let tracker = cb_w.tracker(client_id);
             if tracker.only_record(seq_num) {
+                let er = self
+                    .ctx
+                    .cb
+                    .read()
+                    .er_buffer
+                    .get(&ProposeId(client_id, seq_num));
                 // TODO: obtain the previous ER from cmd_board and packed into CurpError::Duplicated as an entry.
                 return Err(CurpError::duplicated());
             }

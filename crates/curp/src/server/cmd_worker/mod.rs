@@ -77,6 +77,7 @@ async fn after_sync_cmds<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     cmd_entries: Vec<(Arc<LogEntry<C>>, Option<Arc<ResponseSender>>)>,
     ce: &CE,
     curp: &RawCurp<C, RC>,
+    cb: &RwLock<CommandBoard<C>>,
     sp: &Mutex<SpeculativePool<C>>,
     ucp: &Mutex<UncommittedPool<C>>,
 ) {
@@ -85,6 +86,7 @@ async fn after_sync_cmds<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     }
     info!("after sync: {cmd_entries:?}");
     let resp_txs = cmd_entries.iter().map(|(_, tx)| tx);
+    let propose_ids = cmd_entries.iter().map(|(e, _)| e.propose_id);
     let highest_index = cmd_entries
         .last()
         .map(|(entry, _)| entry.index)
@@ -97,28 +99,55 @@ async fn after_sync_cmds<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
             };
             AfterSyncCmd::new(
                 cmd.as_ref(),
-                tx.as_ref().map_or(false, |tx| tx.is_conflict()),
+                // If the response sender is absent, it indicates that a new leader
+                // has been elected, and the entry has been recovered from the log
+                // or the speculative pool. In such cases, these entries needs to
+                // be re-executed.
+                tx.as_ref().map_or(true, |tx| tx.is_conflict()),
             )
         })
         .collect();
 
     match ce.after_sync(cmds, highest_index).await {
         Ok(resps) => {
-            for ((asr, er_opt), tx) in resps
+            let (current, recovered): (Vec<_>, Vec<_>) = resps
                 .into_iter()
+                .zip(propose_ids)
                 .zip(resp_txs)
-                .map(|(resp, tx_opt)| tx_opt.as_ref().map(|tx| (resp, tx)))
-                .flatten()
-            {
+                .partition(|(_, tx)| tx.is_some());
+
+            #[allow(clippy::unwrap_used)]
+            for (((asr, er_opt), _), tx) in current.into_iter() {
+                let tx = tx.as_ref().unwrap();
                 if let Some(er) = er_opt {
                     tx.send_propose(ProposeResponse::new_result::<C>(&Ok(er), true));
                 }
                 tx.send_synced(SyncedResponse::new_result::<C>(&Ok(asr)));
             }
+
+            #[allow(clippy::unwrap_used)]
+            let mut cb_w = cb.write();
+            for (((asr, er), id), _) in recovered {
+                cb_w.insert_er(id, Ok(er.unwrap()));
+                cb_w.insert_asr(id, Ok(asr));
+            }
         }
         Err(e) => {
-            for tx in resp_txs.flatten() {
-                tx.send_synced(SyncedResponse::new_result::<C>(&Err(e.clone())));
+            let (current, recovered): (Vec<_>, Vec<_>) =
+                resp_txs.zip(propose_ids).partition(|(tx, _)| tx.is_some());
+
+            #[allow(clippy::unwrap_used)]
+            for (tx, _) in current {
+                tx.as_ref()
+                    .unwrap()
+                    .send_synced(SyncedResponse::new_result::<C>(&Err(e.clone())));
+            }
+
+            #[allow(clippy::unwrap_used)]
+            let mut cb_w = cb.write();
+            for (_, id) in recovered {
+                cb_w.insert_er(id, Err(e.clone()));
+                cb_w.insert_asr(id, Err(e.clone()));
             }
         }
     }
@@ -235,7 +264,7 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
     let (cmd_entries, others): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|(entry, _)| matches!(entry.entry_data, EntryData::Command(_)));
-    after_sync_cmds(cmd_entries, ce, curp, &sp, &ucp).await;
+    after_sync_cmds(cmd_entries, ce, curp, &cb, &sp, &ucp).await;
     after_sync_others(others, ce, curp, &cb, &sp, &ucp).await;
 }
 
