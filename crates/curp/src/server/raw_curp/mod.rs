@@ -49,12 +49,8 @@ use self::{
     state::{CandidateState, LeaderState, State},
 };
 use super::{
-    conflict::spec_pool_new::SpeculativePool,
-    conflict::uncommitted_pool::UncommittedPool,
-    curp_node::{TaskType, WaitResult},
-    lease_manager::LeaseManagerRef,
-    storage::StorageApi,
-    DB,
+    conflict::spec_pool_new::SpeculativePool, conflict::uncommitted_pool::UncommittedPool,
+    curp_node::TaskType, lease_manager::LeaseManagerRef, storage::StorageApi, DB,
 };
 use crate::{
     cmd::Command,
@@ -531,40 +527,26 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     pub(super) fn push_logs(
         &self,
         proposes: Vec<(Arc<C>, ProposeId, u64, Arc<ResponseSender>)>,
-    ) -> Vec<WaitResult<C>> {
+    ) -> Vec<Arc<LogEntry<C>>> {
         let term = proposes
             .first()
             .unwrap_or_else(|| unreachable!("no propose in proposes"))
             .2;
         let mut log_entries = Vec::with_capacity(proposes.len());
-        let mut results = Vec::with_capacity(proposes.len());
         let mut to_process = Vec::with_capacity(proposes.len());
         let mut log_w = self.log.write();
-        let mut resp_txs_l = self.ctx.resp_txs.lock();
+        let mut tx_map_l = self.ctx.resp_txs.lock();
         for propose in proposes {
             let (cmd, id, term, resp_tx) = propose;
-            let entry_result = log_w.push(term, id, cmd);
-            let entry = match entry_result {
-                Ok(e) => e,
-                Err(e) => {
-                    results.push(Err(e.into()));
-                    metrics::get()
-                        .proposals_failed
-                        .add(1, &[KeyValue::new("reason", "log serialize failed")]);
-                    continue;
-                }
-            };
+            let entry = log_w.push(term, id, cmd);
             let index = entry.index;
             let conflict = resp_tx.is_conflict();
-            let _ignore = resp_txs_l.insert(index, resp_tx);
             to_process.push((index, conflict));
-            let result = Ok((!conflict).then_some(Arc::clone(&entry)));
-            tracing::info!(
-                "result is some?: {}, conflict: {conflict}",
-                result.as_ref().is_ok_and(|t| t.is_some())
-            );
-            results.push(result);
             log_entries.push(entry);
+            assert!(
+                tx_map_l.insert(index, resp_tx.clone()).is_none(),
+                "Should not insert resp_tx twice"
+            );
         }
         self.entry_process_multi(&mut log_w, to_process, term);
 
@@ -574,7 +556,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             &log_r,
         );
 
-        results
+        log_entries
     }
 
     /// Persistent log entries
@@ -628,14 +610,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         }
         self.deduplicate(propose_id, None)?;
         let mut log_w = self.log.write();
-        let entry = log_w
-            .push(st_r.term, propose_id, EntryData::Shutdown)
-            .map_err(|e| {
-                metrics::get()
-                    .proposals_failed
-                    .add(1, &[KeyValue::new("reason", "log serialize failed")]);
-                e
-            })?;
+        let entry = log_w.push(st_r.term, propose_id, EntryData::Shutdown);
         debug!("{} gets new log[{}]", self.id(), entry.index);
         self.entry_process_single(&mut log_w, Arc::clone(&entry), true, st_r.term);
 
@@ -670,14 +645,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         self.deduplicate(propose_id, None)?;
 
         let mut log_w = self.log.write();
-        let entry = log_w
-            .push(st_r.term, propose_id, conf_changes.clone())
-            .map_err(|e| {
-                metrics::get()
-                    .proposals_failed
-                    .add(1, &[KeyValue::new("reason", "log serialize failed")]);
-                e
-            })?;
+        let entry = log_w.push(st_r.term, propose_id, conf_changes.clone());
         debug!("{} gets new log[{}]", self.id(), entry.index);
         let apply_opt = self.apply_conf_change(conf_changes);
         self.ctx
@@ -715,12 +683,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         self.deduplicate(req.propose_id(), None)?;
 
         let mut log_w = self.log.write();
-        let entry = log_w.push(st_r.term, req.propose_id(), req).map_err(|e| {
-            metrics::get()
-                .proposals_failed
-                .add(1, &[KeyValue::new("reason", "log serialize failed")]);
-            e
-        })?;
+        let entry = log_w.push(st_r.term, req.propose_id(), req);
         debug!("{} gets new log[{}]", self.id(), entry.index);
         self.entry_process_single(&mut log_w, Arc::clone(&entry), false, st_r.term);
 
@@ -1846,9 +1809,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         for entry in recovered_cmds {
             let _ig_spec = sp_l.insert(entry.clone()); // may have been inserted before
             #[allow(clippy::expect_used)]
-            let entry = log
-                .push(term, entry.id, entry.cmd)
-                .expect("cmd {cmd:?} cannot be serialized");
+            let entry = log.push(term, entry.id, entry.cmd);
             debug!(
                 "{} recovers speculatively executed cmd({}) in log[{}]",
                 self.id(),

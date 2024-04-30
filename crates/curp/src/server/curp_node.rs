@@ -85,30 +85,21 @@ pub(super) struct Propose<C> {
     /// NOTE: this term should be equal to the cluster's latest term
     /// for the propose to be accepted.
     pub(super) term: u64,
-    /// Tx used for sending back result by the propose handling task
-    pub(super) wait_tx: oneshot::Sender<WaitResult<C>>,
     /// Tx used for sending the streaming response back to client
     pub(super) resp_tx: Arc<ResponseSender>,
 }
-
-pub(super) type WaitResult<C> = Result<Option<Arc<LogEntry<C>>>, CurpError>;
 
 impl<C> Propose<C>
 where
     C: Command,
 {
     /// Attempts to create a new `Propose` from request
-    fn try_new(
-        req: ProposeRequest,
-        wait_tx: oneshot::Sender<WaitResult<C>>,
-        resp_tx: Arc<ResponseSender>,
-    ) -> Result<Self, CurpError> {
+    fn try_new(req: ProposeRequest, resp_tx: Arc<ResponseSender>) -> Result<Self, CurpError> {
         let cmd: Arc<C> = Arc::new(req.cmd()?);
         Ok(Self {
             cmd,
             id: req.propose_id(),
             term: req.term,
-            wait_tx,
             resp_tx,
         })
     }
@@ -118,23 +109,25 @@ where
         self.cmd.is_read_only()
     }
 
+    /// Gets response sender
+    fn response_tx(&self) -> Arc<ResponseSender> {
+        Arc::clone(&self.resp_tx)
+    }
+
     /// Convert self into parts
-    fn into_parts(
-        self,
-    ) -> (
-        (Arc<C>, ProposeId, u64, Arc<ResponseSender>),
-        oneshot::Sender<WaitResult<C>>,
-    ) {
+    fn into_parts(self) -> (Arc<C>, ProposeId, u64, Arc<ResponseSender>) {
         let Self {
             cmd,
             id,
             term,
-            wait_tx,
             resp_tx,
         } = self;
-        ((cmd, id, term, resp_tx), wait_tx)
+        (cmd, id, term, resp_tx)
     }
 }
+
+/// Entry to execute
+type ExecutorEntry<C> = (Arc<LogEntry<C>>, Arc<ResponseSender>);
 
 /// `CurpNode` represents a single node of curp cluster
 pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
@@ -190,14 +183,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 e
             })?;
 
-        let (wait_tx, wait_rx) = oneshot::channel();
-        let propose = Propose::try_new(req, wait_tx, Arc::clone(&resp_tx))?;
+        let propose = Propose::try_new(req, Arc::clone(&resp_tx))?;
         let _ignore = self.propose_tx.send(propose);
-
-        let to_execute = wait_rx.await??;
-        if let Some(entry) = to_execute {
-            self.execute_cmd(entry, &resp_tx);
-        }
 
         Ok(())
     }
@@ -216,6 +203,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
 
     /// Handle propose task
     async fn handle_propose_task(
+        ce: Arc<CE>,
         curp: Arc<RawCurp<C, RC>>,
         rx: flume::Receiver<Propose<C>>,
         shutdown_listener: Listener,
@@ -224,6 +212,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             .unwrap_or("1024".to_string())
             .parse()
             .unwrap();
+
+        let cmd_executor = Self::build_executor(ce, Arc::clone(&curp));
         loop {
             let first = rx.recv_async().await.unwrap();
             let mut addition: Vec<_> = std::iter::repeat_with(|| rx.try_recv())
@@ -236,28 +226,42 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             }
             let (read_onlys, mutatives): (Vec<_>, Vec<_>) =
                 addition.into_iter().partition(Propose::is_read_only);
-            Self::handle_read_onlys(&curp, read_onlys).await;
-            Self::handle_mutatives(&curp, mutatives).await;
+
+            Self::handle_read_onlys(cmd_executor.clone(), &curp, read_onlys).await;
+            Self::handle_mutatives(cmd_executor.clone(), &curp, mutatives).await;
         }
     }
 
     /// Handle read-only proposes
-    async fn handle_read_onlys(curp: &RawCurp<C, RC>, proposes: Vec<Propose<C>>) {
+    async fn handle_read_onlys<Executor>(
+        cmd_executor: Executor,
+        curp: &RawCurp<C, RC>,
+        proposes: Vec<Propose<C>>,
+    ) where
+        Executor: Fn(ExecutorEntry<C>) + Clone + Send + 'static,
+    {
         for propose in proposes {
             info!("handle read only cmd: {:?}", propose.cmd);
-            let Propose { cmd, wait_tx, .. } = propose;
+            let Propose { cmd, resp_tx, .. } = propose;
             // Use default value for the entry as we don't need to put it into curp log
             let entry = Arc::new(LogEntry::new(0, 0, ProposeId::default(), Arc::clone(&cmd)));
             let wait_fut = curp.wait_conflicts_synced(cmd);
+            let cmd_executor_c = cmd_executor.clone();
             let _ignore = tokio::spawn(async move {
                 wait_fut.await;
-                let _ignore = wait_tx.send(Ok(Some(entry)));
+                cmd_executor_c((entry, resp_tx));
             });
         }
     }
 
     /// Handle read-only proposes
-    async fn handle_mutatives(curp: &RawCurp<C, RC>, proposes: Vec<Propose<C>>) {
+    async fn handle_mutatives<Executor>(
+        cmd_executor: Executor,
+        curp: &RawCurp<C, RC>,
+        proposes: Vec<Propose<C>>,
+    ) where
+        Executor: Fn(ExecutorEntry<C>),
+    {
         if proposes.len() == 0 {
             return;
         }
@@ -269,20 +273,24 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             info!("handle mutative cmd: {:?}, conflict: {conflict}", p.cmd);
             p.resp_tx.set_conflict(conflict);
         }
-        let (logs, wait_txs): (Vec<_>, Vec<_>) =
-            proposes.into_iter().map(Propose::into_parts).unzip();
-        let push_results = curp.push_logs(logs);
-        for (wait_tx, result) in wait_txs.into_iter().zip(push_results) {
-            let _ignore = wait_tx.send(result);
-        }
+        let resp_txs: Vec<_> = proposes.iter().map(Propose::response_tx).collect();
+        let logs: Vec<_> = proposes.into_iter().map(Propose::into_parts).collect();
+        let entries = curp.push_logs(logs);
+        entries
+            .into_iter()
+            .zip(resp_txs)
+            .filter(|(_, tx)| !tx.is_conflict())
+            .for_each(cmd_executor);
     }
 
     /// Speculatively execute a command
-    fn execute_cmd(&self, entry: Arc<LogEntry<C>>, resp_tx: &ResponseSender) {
-        info!("spec execute entry: {entry:?}");
-        let er_res = execute(entry, self.cmd_executor.as_ref(), self.curp.as_ref());
-        let resp = ProposeResponse::new_result::<C>(&er_res, false);
-        resp_tx.send_propose(resp);
+    fn build_executor(ce: Arc<CE>, curp: Arc<RawCurp<C, RC>>) -> impl Fn(ExecutorEntry<C>) + Clone {
+        move |(entry, resp_tx): (_, Arc<ResponseSender>)| {
+            info!("spec execute entry: {entry:?}");
+            let er_res = execute(entry, ce.as_ref(), curp.as_ref());
+            let resp = ProposeResponse::new_result::<C>(&er_res, false);
+            resp_tx.send_propose(resp);
+        }
     }
 
     /// Handle `Shutdown` requests
@@ -921,7 +929,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             Self::conf_change_handler(Arc::clone(&curp), remove_events, n)
         });
         task_manager.spawn(TaskName::HandlePropose, |n| {
-            Self::handle_propose_task(Arc::clone(&curp), propose_rx, n)
+            Self::handle_propose_task(Arc::clone(&cmd_executor), Arc::clone(&curp), propose_rx, n)
         });
         task_manager.spawn(TaskName::AfterSync, |n| {
             Self::after_sync_task(curp, cmd_executor, as_rx, n)

@@ -106,8 +106,10 @@ impl<C: Command> LogEntryVecDeque<C> {
     }
 
     /// push a log entry into the back of queue
-    fn push_back(&mut self, entry: Arc<LogEntry<C>>) -> Result<(), bincode::Error> {
-        let entry_size = serialized_size(&entry)?;
+    fn push_back(&mut self, entry: Arc<LogEntry<C>>) {
+        let entry_size = serialized_size(&entry).unwrap_or_else(|err| {
+            unreachable!("Bincode serialization should always succeed, error: {err}")
+        });
 
         self.entries.push_back(entry);
         let Some(&pre_entries_size) = self.batch_index.back() else {
@@ -115,7 +117,6 @@ impl<C: Command> LogEntryVecDeque<C> {
         };
         self.batch_index
             .push_back(pre_entries_size.overflow_add(entry_size));
-        Ok(())
     }
 
     /// pop a log entry from the front of queue
@@ -304,10 +305,7 @@ impl<C: Command> Log<C> {
             if matches!(entry.entry_data, EntryData::ConfChange(_)) {
                 conf_changes.push(Arc::clone(&entry));
             }
-            #[allow(clippy::expect_used)] // It's safe to expect here.
-            self.entries
-                .push_back(Arc::clone(&entry))
-                .expect("log entry {entry:?} cannot be serialized");
+            self.entries.push_back(Arc::clone(&entry));
 
             to_persist.push(entry);
         }
@@ -334,11 +332,11 @@ impl<C: Command> Log<C> {
         term: u64,
         propose_id: ProposeId,
         entry: impl Into<EntryData<C>>,
-    ) -> Result<Arc<LogEntry<C>>, bincode::Error> {
+    ) -> Arc<LogEntry<C>> {
         let index = self.last_log_index() + 1;
         let entry = Arc::new(LogEntry::new(index, term, propose_id, entry));
-        self.entries.push_back(Arc::clone(&entry))?;
-        Ok(entry)
+        self.entries.push_back(Arc::clone(&entry));
+        entry
     }
 
     /// check whether the log entry range [li,..) exceeds the batch limit or not
@@ -552,7 +550,7 @@ mod tests {
         let _res = repeat(Arc::clone(&test_cmd))
             .take(10)
             .enumerate()
-            .map(|(idx, cmd)| log.push(1, ProposeId(0, idx.numeric_cast()), cmd).unwrap())
+            .map(|(idx, cmd)| log.push(1, ProposeId(0, idx.numeric_cast()), cmd))
             .collect::<Vec<_>>();
         let log_entry_size = log.entries.batch_index[1];
 
@@ -666,8 +664,7 @@ mod tests {
         let mut log = Log::<TestCommand>::new(default_batch_max_size(), 10);
 
         for i in 0..30 {
-            log.push(0, ProposeId(0, i), Arc::new(TestCommand::default()))
-                .unwrap();
+            log.push(0, ProposeId(0, i), Arc::new(TestCommand::default()));
         }
         log.last_as = 22;
         log.last_exe = 22;
