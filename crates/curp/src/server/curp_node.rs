@@ -877,7 +877,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 .curp_storage(Arc::clone(&storage))
                 .client_tls_config(client_tls_config)
                 .new_sp(Arc::clone(&sp))
-                .new_ucp(Arc::clone(&ucp))
+                .new_ucp(ucp)
                 .as_tx(as_tx.clone())
                 .resp_txs(Arc::new(Mutex::default()))
                 .id_barrier(Arc::new(IdBarrier::new()))
@@ -892,7 +892,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 lease_manager,
                 Arc::clone(&cmd_board),
                 sp,
-                ucp,
                 curp_cfg.gc_interval,
                 n,
             )
