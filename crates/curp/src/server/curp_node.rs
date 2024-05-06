@@ -32,7 +32,7 @@ use super::{
     cmd_worker::execute,
     conflict::spec_pool_new::{SpObject, SpeculativePool},
     conflict::uncommitted_pool::{UcpObject, UncommittedPool},
-    gc::gc_cmd_board,
+    gc::gc_client_lease,
     lease_manager::LeaseManager,
     raw_curp::{AppendEntries, RawCurp, Vote},
     storage::StorageApi,
@@ -856,7 +856,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         // TODO: after sync task
         let (as_tx, as_rx) = flume::unbounded();
         let (propose_tx, propose_rx) = flume::bounded(4096);
-
+        let sp = Arc::new(Mutex::new(SpeculativePool::new(sps)));
+        let ucp = Arc::new(Mutex::new(UncommittedPool::new(ucps)));
         // create curp state machine
         let (voted_for, entries) = storage.recover()?;
         let curp = Arc::new(
@@ -875,8 +876,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 .entries(entries)
                 .curp_storage(Arc::clone(&storage))
                 .client_tls_config(client_tls_config)
-                .new_sp(Arc::new(Mutex::new(SpeculativePool::new(sps))))
-                .new_ucp(Arc::new(Mutex::new(UncommittedPool::new(ucps))))
+                .new_sp(Arc::clone(&sp))
+                .new_ucp(Arc::clone(&ucp))
                 .as_tx(as_tx.clone())
                 .resp_txs(Arc::new(Mutex::default()))
                 .id_barrier(Arc::new(IdBarrier::new()))
@@ -887,9 +888,11 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         metrics::Metrics::register_callback(Arc::clone(&curp))?;
 
         task_manager.spawn(TaskName::GcCmdBoard, |n| {
-            gc_cmd_board(
-                Arc::clone(&cmd_board),
+            gc_client_lease(
                 lease_manager,
+                Arc::clone(&cmd_board),
+                sp,
+                ucp,
                 curp_cfg.gc_interval,
                 n,
             )

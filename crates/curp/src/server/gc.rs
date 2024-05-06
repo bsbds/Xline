@@ -4,14 +4,16 @@ use utils::task_manager::Listener;
 
 use crate::{cmd::Command, rpc::ProposeId, server::cmd_board::CmdBoardRef};
 
-use super::lease_manager::LeaseManagerRef;
+use super::{
+    conflict::{spec_pool_new::SpeculativePoolRef, uncommitted_pool::UncommittedPoolRef},
+    lease_manager::LeaseManagerRef,
+};
 
-// TODO: Speculative pool GC
-
-/// Cleanup cmd board
-pub(super) async fn gc_cmd_board<C: Command>(
-    cmd_board: CmdBoardRef<C>,
+pub(super) async fn gc_client_lease<C: Command>(
     lease_mamanger: LeaseManagerRef,
+    cmd_board: CmdBoardRef<C>,
+    sp: SpeculativePoolRef<C>,
+    ucp: UncommittedPoolRef<C>,
     interval: Duration,
     shutdown_listener: Listener,
 ) {
@@ -22,24 +24,26 @@ pub(super) async fn gc_cmd_board<C: Command>(
             _ = tokio::time::sleep(interval) => {}
             _ = shutdown_listener.wait() => break,
         }
+
+        let mut lm_w = lease_mamanger.write();
         let mut board = cmd_board.write();
-        let expired_er_ids: Vec<_> = board
-            .er_buffer
-            .keys()
-            .copied()
-            .filter(|ProposeId(client_id, _)| !lease_mamanger.read().check_alive(*client_id))
-            .collect();
-        for id in expired_er_ids {
-            let _ignore = board.er_buffer.swap_remove(&id);
+        let mut sp_l = sp.lock();
+        let mut ucp_l = ucp.lock();
+        let expired_ids = lm_w.gc_expired();
+
+        let mut expired_propose_ids = Vec::new();
+        for id in expired_ids {
+            if let Some(tracker) = board.trackers.get(&id) {
+                let incompleted_nums = tracker.all_incompleted();
+                expired_propose_ids
+                    .extend(incompleted_nums.into_iter().map(|num| ProposeId(id, num)))
+            }
         }
-        let expired_asr_ids: Vec<_> = board
-            .asr_buffer
-            .keys()
-            .copied()
-            .filter(|ProposeId(client_id, _)| !lease_mamanger.read().check_alive(*client_id))
-            .collect();
-        for id in expired_asr_ids {
-            let _ignore = board.asr_buffer.swap_remove(&id);
+        for id in &expired_propose_ids {
+            let _ignore = board.er_buffer.swap_remove(id);
+            let _ignore = board.asr_buffer.swap_remove(id);
+            sp_l.remove_by_id(id);
+            ucp_l.remove_by_id(id);
         }
     }
 }
@@ -49,7 +53,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use curp_test_utils::test_cmd::{TestCommand, TestCommandResult};
-    use parking_lot::RwLock;
+    use parking_lot::{Mutex, RwLock};
     use test_macros::abort_on_panic;
     use utils::task_manager::{tasks::TaskName, TaskManager};
 
@@ -57,7 +61,8 @@ mod tests {
         rpc::ProposeId,
         server::{
             cmd_board::{CmdBoardRef, CommandBoard},
-            gc::gc_cmd_board,
+            conflict::{spec_pool_new::SpeculativePool, uncommitted_pool::UncommittedPool},
+            gc::gc_client_lease,
             lease_manager::LeaseManager,
         },
     };
@@ -68,10 +73,14 @@ mod tests {
         let task_manager = TaskManager::new();
         let board: CmdBoardRef<TestCommand> = Arc::new(RwLock::new(CommandBoard::new()));
         let lease_manager = Arc::new(RwLock::new(LeaseManager::new()));
+        let sp = Arc::new(Mutex::new(SpeculativePool::new(vec![])));
+        let ucp = Arc::new(Mutex::new(UncommittedPool::new(vec![])));
         task_manager.spawn(TaskName::GcCmdBoard, |n| {
-            gc_cmd_board(
-                Arc::clone(&board),
+            gc_client_lease(
                 lease_manager,
+                Arc::clone(&board),
+                sp,
+                ucp,
                 Duration::from_millis(500),
                 n,
             )

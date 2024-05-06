@@ -49,19 +49,23 @@ impl LeaseManager {
         }
         let expiry = Instant::now().add(DEFAULT_LEASE_TTL);
         _ = self.expiry_queue.push(client_id, Reverse(expiry));
-        // gc all expired client id while granting a new client id
-        self.gc_expired();
         client_id
     }
 
     /// GC the expired client ids
-    pub(crate) fn gc_expired(&mut self) {
+    pub(crate) fn gc_expired(&mut self) -> Vec<u64> {
+        let mut expired = Vec::new();
         while let Some(expiry) = self.expiry_queue.peek().map(|(_, v)| v.0) {
             if expiry > Instant::now() {
-                return;
+                break;
             }
-            _ = self.expiry_queue.pop();
+            let (id, _) = self
+                .expiry_queue
+                .pop()
+                .unwrap_or_else(|| unreachable!("Expiry queue should not be empty"));
+            expired.push(id);
         }
+        expired
     }
 
     /// Renew a client id
