@@ -8,10 +8,7 @@ use crate::{
     rpc::ProposeId,
 };
 
-use super::{
-    codec::{DataFrameOwned, WAL},
-    framed::Encoder,
-};
+use super::codec::{DataFrameOwned, WAL};
 
 pub(super) struct EntryGenerator {
     inner: Mutex<Inner>,

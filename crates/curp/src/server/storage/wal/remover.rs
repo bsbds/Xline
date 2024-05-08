@@ -7,11 +7,11 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
 };
-
-use super::{
-    segment::WALSegment,
-    util::{get_checksum, get_file_paths_with_ext, is_exist, parse_u64, validate_data, LockedFile},
+use utils::wal::{
+    get_checksum, get_file_paths_with_ext, is_exist, parse_u64, validate_data, LockedFile,
 };
+
+use super::segment::WALSegment;
 
 /// The name of the RWAL file
 const REMOVER_WAL_FILE_NAME: &str = "segments.rwal";

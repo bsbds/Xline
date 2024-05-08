@@ -5,12 +5,12 @@ use curp_external_api::LogIndex;
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-
-use super::{
-    error::{CorruptType, WALError},
+use utils::wal::{
     framed::{Decoder, Encoder},
-    util::{get_checksum, validate_data},
+    get_checksum,
 };
+
+use super::error::{CorruptType, WALError};
 use crate::log_entry::LogEntry;
 
 /// Invalid frame type

@@ -9,9 +9,7 @@ use tokio_util::codec::Encoder;
 use crate::{
     log_entry::{EntryData, LogEntry},
     rpc::ProposeId,
-    server::storage::wal::{
-        codec::DataFrameOwned, test_util::EntryGenerator, util::get_file_paths_with_ext,
-    },
+    server::storage::wal::{codec::DataFrameOwned, test_util::EntryGenerator},
 };
 
 use super::*;

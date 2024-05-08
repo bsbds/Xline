@@ -9,9 +9,6 @@ pub(super) mod config;
 /// WAL errors
 mod error;
 
-/// File pipeline
-mod pipeline;
-
 /// Remover of the segment file
 mod remover;
 
@@ -26,12 +23,6 @@ mod test_util;
 #[cfg(test)]
 mod tests;
 
-/// File utils
-mod util;
-
-/// Framed
-mod framed;
-
 use std::{io, marker::PhantomData};
 
 use clippy_utilities::OverflowArithmetic;
@@ -41,6 +32,7 @@ use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::codec::Framed;
 use tracing::{debug, error, info, warn};
+use utils::wal::{get_file_paths_with_ext, pipeline::FilePipeline, LockedFile};
 
 use crate::log_entry::LogEntry;
 
@@ -48,10 +40,8 @@ use self::{
     codec::{DataFrame, DataFrameOwned, WAL},
     config::WALConfig,
     error::{CorruptType, WALError},
-    pipeline::FilePipeline,
     remover::SegmentRemover,
     segment::WALSegment,
-    util::LockedFile,
 };
 
 /// The magic of the WAL file
@@ -107,7 +97,7 @@ where
         // We try to recover the removal first
         SegmentRemover::recover(&self.config.dir)?;
 
-        let file_paths = util::get_file_paths_with_ext(&self.config.dir, WAL_FILE_EXT)?;
+        let file_paths = get_file_paths_with_ext(&self.config.dir, WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
             .into_iter()
             .map(LockedFile::open_rw)

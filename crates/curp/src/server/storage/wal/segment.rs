@@ -16,14 +16,16 @@ use tokio::{
     sync::Mutex,
 };
 use tokio_stream::StreamExt;
+use utils::wal::{
+    framed::{Decoder, Encoder},
+    get_checksum, parse_u64, validate_data, LockedFile,
+};
 
 use crate::log_entry::LogEntry;
 
 use super::{
     codec::{DataFrame, DataFrameOwned, WAL},
     error::{CorruptType, WALError},
-    framed::{Decoder, Encoder},
-    util::{get_checksum, parse_u64, validate_data, LockedFile},
     WAL_FILE_EXT, WAL_MAGIC, WAL_VERSION,
 };
 
