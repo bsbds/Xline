@@ -1,6 +1,6 @@
 use std::io;
 
-pub(super) trait Decoder {
+pub trait Decoder {
     /// The type of decoded frames.
     type Item;
 
@@ -12,7 +12,7 @@ pub(super) trait Decoder {
 }
 
 /// Trait of helper objects to write out messages as bytes
-pub(super) trait Encoder<Item> {
+pub trait Encoder<Item> {
     /// The type of encoding errors.
     type Error: From<io::Error>;
 

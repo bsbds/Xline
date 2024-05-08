@@ -23,7 +23,7 @@ use super::util::LockedFile;
 const TEMP_FILE_EXT: &str = ".tmp";
 
 /// The file pipeline, used for pipelining the creation of temp file
-pub(super) struct FilePipeline {
+pub struct FilePipeline {
     /// The directory where the temp files are created
     dir: PathBuf,
     /// The size of the temp file
@@ -36,7 +36,7 @@ pub(super) struct FilePipeline {
 
 impl FilePipeline {
     /// Creates a new `FilePipeline`
-    pub(super) fn new(dir: PathBuf, file_size: u64) -> io::Result<Self> {
+    pub fn new(dir: PathBuf, file_size: u64) -> io::Result<Self> {
         Self::clean_up(&dir)?;
 
         let (file_tx, file_rx) = flume::bounded(1);
@@ -103,7 +103,7 @@ impl FilePipeline {
     }
 
     /// Stops the pipeline
-    pub(super) fn stop(&mut self) {
+    pub fn stop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
     }
 
