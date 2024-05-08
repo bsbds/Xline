@@ -302,7 +302,7 @@ impl CommitFrame {
     /// Creates a commit frame of data
     fn new_from_data(data: &[u8]) -> Self {
         Self {
-            checksum: get_checksum(data).to_vec(),
+            checksum: get_checksum::<Sha256>(data).to_vec(),
         }
     }
 

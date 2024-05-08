@@ -24,17 +24,4 @@ pub(crate) enum CorruptType {
     /// Corrupt because of checksum failure
     #[error("Checksumming for the file has failed")]
     Checksum,
-    /// Corrupt because of some logs is missing
-    #[error("The recovered logs are not continue")]
-    LogNotContinue,
-}
-
-impl WALError {
-    pub(super) fn io_or_corrupt(self) -> io::Result<CorruptType> {
-        match self {
-            WALError::Corrupted(e) => Ok(e),
-            WALError::IO(e) => return Err(e),
-            WALError::UnexpectedEof => unreachable!("Should not call on WALError::MaybeEnded"),
-        }
-    }
 }

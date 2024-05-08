@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use sha2::Sha256;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -59,7 +60,7 @@ impl SegmentRemover {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
         let checksum = buf.split_off(n - 32);
-        if !validate_data(&buf, &checksum) {
+        if !validate_data::<Sha256>(&buf, &checksum) {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
 
@@ -99,7 +100,7 @@ impl SegmentRemover {
                     .chain(s.id().to_le_bytes().into_iter())
             })
             .collect();
-        wal_data.append(&mut get_checksum(&wal_data).to_vec());
+        wal_data.append(&mut get_checksum::<Sha256>(&wal_data).to_vec());
 
         let mut wal = LockedFile::open_rw(&wal_path)?.into_std();
         wal.write_all(&wal_data)?;
