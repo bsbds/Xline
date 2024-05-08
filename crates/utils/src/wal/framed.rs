@@ -1,5 +1,6 @@
 use std::io;
 
+/// Decode bytes to messages
 pub trait Decoder {
     /// The type of decoded frames.
     type Item;

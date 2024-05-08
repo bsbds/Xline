@@ -1,23 +1,15 @@
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    task::Poll,
 };
 
-use clippy_utilities::OverflowArithmetic;
-use event_listener::Event;
-use flume::r#async::RecvStream;
-use futures::{FutureExt, StreamExt};
-use thiserror::Error;
-use tokio::task::JoinHandle;
-use tokio_stream::Stream;
 use tracing::error;
 
-use super::util::LockedFile;
+use super::LockedFile;
 
 /// The temp file extension
 const TEMP_FILE_EXT: &str = ".tmp";
@@ -159,7 +151,6 @@ impl std::fmt::Debug for FilePipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::storage::wal::util::get_file_paths_with_ext;
 
     #[tokio::test]
     async fn file_pipeline_is_ok() {
