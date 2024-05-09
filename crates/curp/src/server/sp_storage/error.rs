@@ -25,3 +25,15 @@ pub(crate) enum CorruptType {
     #[error("Checksumming for the file has failed")]
     Checksum,
 }
+
+impl From<WALError> for io::Error {
+    fn from(err: WALError) -> Self {
+        match err {
+            WALError::UnexpectedEof => {
+                io::Error::new(io::ErrorKind::UnexpectedEof, err.to_string())
+            }
+            WALError::Corrupted(_) => io::Error::new(io::ErrorKind::InvalidData, err.to_string()),
+            WALError::IO(e) => e,
+        }
+    }
+}

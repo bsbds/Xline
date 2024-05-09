@@ -4,6 +4,7 @@ use std::{
 };
 
 use clippy_utilities::{NumericCast, OverflowArithmetic};
+use itertools::Itertools;
 use sha2::Sha256;
 use utils::wal::{
     framed::{Decoder, Encoder},
@@ -29,10 +30,12 @@ const WAL_HEADER_SIZE: usize = 48;
 pub trait SegmentAttr {
     /// Segment file extension
     fn ext() -> String;
+    /// The type of this segment
+    fn r#type() -> Self;
 }
 
 // TODO: merge reusable wal code
-struct Segment<T, Codec> {
+pub(super) struct Segment<T, Codec> {
     /// The opened file of this segment
     file: File,
     /// The id of this segment
@@ -198,24 +201,69 @@ impl<T, Codec> Segment<T, Codec> {
     }
 
     /// Recover all entries of this segment
-    fn recover<C>(&mut self) -> Result<Vec<C>, WALError>
+    pub(super) fn recover<C>(&mut self) -> Result<Vec<DataFrame<C>>, WALError>
     where
         Codec: Decoder<Item = Vec<DataFrame<C>>, Error = WALError>,
     {
         let frames: Vec<_> = self.get_all()?.into_iter().flatten().collect();
-        for frame in frames {
-            match frame {
-                DataFrame::Insert { propose_id, cmd } => todo!(),
-                DataFrame::Remove(_) => todo!(),
-            }
-        }
+        assert!(
+            frames.iter().map(std::mem::discriminant).all_equal(),
+            "Recovered frames containing different variants"
+        );
+        Ok(frames)
+    }
+
+    /// Checks if the segment is full
+    pub(super) fn is_full(&self) -> bool {
+        self.size >= self.size_limit
+    }
+
+    /// Gets the segment id
+    pub(super) fn segment_id(&self) -> u64 {
+        self.segment_id
     }
 }
 
-struct Insert {}
+impl<T, Codec> PartialEq for Segment<T, Codec> {
+    fn eq(&self, other: &Self) -> bool {
+        self.segment_id.eq(&other.segment_id)
+    }
+}
+
+impl<T, Codec> Eq for Segment<T, Codec> {}
+
+impl<T, Codec> PartialOrd for Segment<T, Codec> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.segment_id.cmp(&other.segment_id))
+    }
+}
+
+impl<T, Codec> Ord for Segment<T, Codec> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.segment_id.cmp(&other.segment_id)
+    }
+}
+
+pub(super) struct Insert;
 
 impl SegmentAttr for Insert {
     fn ext() -> String {
         ".inswal".to_string()
+    }
+
+    fn r#type() -> Insert {
+        Insert
+    }
+}
+
+pub(super) struct Remove;
+
+impl SegmentAttr for Remove {
+    fn ext() -> String {
+        ".rmwal".to_string()
+    }
+
+    fn r#type() -> Remove {
+        Remove
     }
 }
