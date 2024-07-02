@@ -45,6 +45,8 @@ pub use self::proto::{
         ProposeResponse,
         PublishRequest,
         PublishResponse,
+        ReadIndexRequest,
+        ReadIndexResponse,
         RecordRequest,
         RecordResponse,
         ShutdownRequest,
