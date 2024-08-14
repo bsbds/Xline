@@ -105,7 +105,10 @@ impl<C: Command> Unary<C> {
     /// Propose for read only commands
     ///
     /// For read-only commands, we only need to send propose to leader
-    async fn propose_read_only<PF>(propose_fut: PF) -> Result<ProposeResponse<C>, CurpError>
+    async fn propose_read_only<PF>(
+        propose_fut: PF,
+        use_fast_path: bool,
+    ) -> Result<ProposeResponse<C>, CurpError>
     where
         PF: Future<
             Output = Result<
@@ -117,7 +120,7 @@ impl<C: Command> Unary<C> {
         let propose_res = propose_fut.await;
         let resp_stream = propose_res?.into_inner();
         let mut response_rx = ResponseReceiver::new(resp_stream);
-        response_rx.recv::<C>(false).await
+        response_rx.recv::<C>(!use_fast_path).await
     }
 
     /// Propose for mutative commands
@@ -389,7 +392,7 @@ impl<C: Command> RepeatableClientApi for Unary<C> {
             .await;
 
         if cmd.is_read_only() {
-            Self::propose_read_only(propose_fut).await
+            Self::propose_read_only(propose_fut, use_fast_path).await
         } else {
             Self::propose_mutative(propose_fut, record_futs, use_fast_path, superquorum).await
         }
