@@ -105,8 +105,7 @@ impl Auth for AuthServer {
         request: tonic::Request<AuthStatusRequest>,
     ) -> Result<tonic::Response<AuthStatusResponse>, tonic::Status> {
         debug!("Receive AuthStatusRequest {:?}", request);
-        let is_fast_path = true;
-        self.handle_req(request, is_fast_path).await
+        self.handle_req(request, false).await
     }
 
     async fn authenticate(
@@ -136,8 +135,7 @@ impl Auth for AuthServer {
         request: tonic::Request<AuthUserGetRequest>,
     ) -> Result<tonic::Response<AuthUserGetResponse>, tonic::Status> {
         debug!("Receive AuthUserGetRequest {:?}", request);
-        let is_fast_path = true;
-        self.handle_req(request, is_fast_path).await
+        self.handle_req(request, false).await
     }
 
     async fn user_list(
@@ -145,8 +143,7 @@ impl Auth for AuthServer {
         request: tonic::Request<AuthUserListRequest>,
     ) -> Result<tonic::Response<AuthUserListResponse>, tonic::Status> {
         debug!("Receive AuthUserListRequest {:?}", request);
-        let is_fast_path = true;
-        self.handle_req(request, is_fast_path).await
+        self.handle_req(request, false).await
     }
 
     async fn user_delete(
@@ -200,8 +197,7 @@ impl Auth for AuthServer {
         request: tonic::Request<AuthRoleGetRequest>,
     ) -> Result<tonic::Response<AuthRoleGetResponse>, tonic::Status> {
         debug!("Receive AuthRoleGetRequest {:?}", request);
-        let is_fast_path = true;
-        self.handle_req(request, is_fast_path).await
+        self.handle_req(request, false).await
     }
 
     async fn role_list(
@@ -209,8 +205,7 @@ impl Auth for AuthServer {
         request: tonic::Request<AuthRoleListRequest>,
     ) -> Result<tonic::Response<AuthRoleListResponse>, tonic::Status> {
         debug!("Receive AuthRoleListRequest {:?}", request);
-        let is_fast_path = true;
-        self.handle_req(request, is_fast_path).await
+        self.handle_req(request, false).await
     }
 
     async fn role_delete(
