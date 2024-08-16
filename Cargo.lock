@@ -344,6 +344,7 @@ dependencies = [
  "clap",
  "clippy-utilities",
  "etcd-client",
+ "futures",
  "indicatif",
  "rand",
  "thiserror",
