@@ -50,7 +50,7 @@ use crate::{
         InstallSnapshotRequest, InstallSnapshotResponse, LeaseKeepAliveMsg, MoveLeaderRequest,
         MoveLeaderResponse, PoolEntry, ProposeConfChangeRequest, ProposeConfChangeResponse,
         ProposeId, ProposeRequest, ProposeResponse, PublishRequest, PublishResponse, RecordRequest,
-        RecordResponse, ShutdownRequest, ShutdownResponse, TriggerShutdownRequest,
+        RecordResponse, ShutdownRequest, ShutdownResponse, SyncedResponse, TriggerShutdownRequest,
         TriggerShutdownResponse, TryBecomeLeaderNowRequest, TryBecomeLeaderNowResponse,
         VoteRequest, VoteResponse,
     },

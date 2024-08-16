@@ -45,7 +45,6 @@ pub(super) fn execute<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     ce: &CE,
     curp: &RawCurp<C, RC>,
 ) -> Result<ErAsr<C>, <C as Command>::Error> {
-    let cb = curp.cmd_board();
     let id = curp.id();
     let EntryData::Command(ref cmd) = entry.entry_data else {
         unreachable!("should not speculative execute {:?}", entry.entry_data);
