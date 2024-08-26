@@ -441,7 +441,7 @@ pub const fn default_propose_timeout() -> Duration {
 #[must_use]
 #[inline]
 pub const fn default_client_id_keep_alive_interval() -> Duration {
-    Duration::from_secs(1)
+    Duration::from_secs(10)
 }
 
 /// default follower timeout
