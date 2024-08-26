@@ -188,6 +188,7 @@ impl CommandRunner {
             .await
             .into_iter()
             .collect::<Result<_, _>>()?;
+        debug!("clients created");
 
         Ok(clients)
     }
@@ -211,7 +212,7 @@ impl CommandRunner {
         let val = Arc::new(val);
 
         let mut handles = Vec::with_capacity(clients.len());
-        for mut client in clients {
+        for (i, mut client) in clients.into_iter().enumerate() {
             let c = Arc::clone(&b);
             let count_clone = Arc::clone(&count);
             let val_clone = Arc::clone(&val);
@@ -234,6 +235,7 @@ impl CommandRunner {
                     }
                     let start = Instant::now();
                     let result = client.put(key.as_slice(), val_clone.as_slice(), None).await;
+                    debug!("client {i} put");
                     let cmd_result = CmdResult {
                         elapsed: start.elapsed(),
                         error: result.err().map(|e| format!("{e:?}")),
@@ -282,6 +284,7 @@ impl CommandRunner {
         let start = Instant::now();
         while let Some(result) = rx.recv().await {
             if let Some(err) = result.error {
+                debug!("recv err: {err}");
                 let entry = self.errors.entry(err).or_insert(0);
                 *entry = entry.overflow_add(1);
                 continue;
