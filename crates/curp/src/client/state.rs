@@ -327,7 +327,7 @@ impl State {
                     .remove(&diff)
                     .unwrap_or_else(|| unreachable!("{diff} must in new member addrs"));
                 debug!("client connects to a new server({diff}), address({addrs:?})");
-                let new_conn = rpc::connect(diff, addrs, self.immutable.tls_config.clone()).await?;
+                let new_conn = rpc::connect(diff, addrs, self.immutable.tls_config.clone());
                 let _ig = e.insert(new_conn);
             } else {
                 debug!("client removes old server({diff})");
@@ -395,24 +395,22 @@ impl StateBuilder {
     }
 
     /// Build the state with local server
-    pub(super) async fn build_bypassed<P: Protocol>(
+    pub(super) fn build_bypassed<P: Protocol>(
         mut self,
         local_server_id: ServerId,
         local_server: P,
-    ) -> Result<State, tonic::transport::Error> {
+    ) -> State {
         debug!("client bypassed server({local_server_id})");
 
         let _ig = self.all_members.remove(&local_server_id);
         let mut connects: HashMap<_, _> =
-            rpc::connects(self.all_members.clone(), self.tls_config.as_ref())
-                .await?
-                .collect();
+            rpc::connects(self.all_members.clone(), self.tls_config.as_ref()).collect();
         let __ig = connects.insert(
             local_server_id,
             Arc::new(BypassedConnect::new(local_server_id, local_server)),
         );
 
-        Ok(State {
+        State {
             mutable: RwLock::new(StateMut {
                 leader: self.leader_state.map(|state| state.0),
                 term: self.leader_state.map_or(0, |state| state.1),
@@ -426,16 +424,14 @@ impl StateBuilder {
                 is_raw_curp: self.is_raw_curp,
             },
             client_id: Arc::new(AtomicU64::new(0)),
-        })
+        }
     }
 
     /// Build the state
-    pub(super) async fn build(self) -> Result<State, tonic::transport::Error> {
+    pub(super) fn build(self) -> State {
         let connects: HashMap<_, _> =
-            rpc::connects(self.all_members.clone(), self.tls_config.as_ref())
-                .await?
-                .collect();
-        Ok(State {
+            rpc::connects(self.all_members.clone(), self.tls_config.as_ref()).collect();
+        State {
             mutable: RwLock::new(StateMut {
                 leader: self.leader_state.map(|state| state.0),
                 term: self.leader_state.map_or(0, |state| state.1),
@@ -449,6 +445,6 @@ impl StateBuilder {
                 is_raw_curp: self.is_raw_curp,
             },
             client_id: Arc::new(AtomicU64::new(0)),
-        })
+        }
     }
 }

@@ -425,12 +425,7 @@ impl ClientBuilder {
         &self,
     ) -> Result<impl ClientApi<Error = tonic::Status, Cmd = C> + Send + Sync + 'static, tonic::Status>
     {
-        let state = Arc::new(
-            self.init_state_builder()
-                .build()
-                .await
-                .map_err(|e| tonic::Status::internal(e.to_string()))?,
-        );
+        let state = Arc::new(self.init_state_builder().build());
         let client = Retry::new(
             Unary::new(Arc::clone(&state), self.init_unary_config()),
             self.init_retry_config(),
@@ -488,9 +483,7 @@ impl<P: Protocol> ClientBuilderWithBypass<P> {
         let state = self
             .inner
             .init_state_builder()
-            .build_bypassed::<P>(self.local_server_id, self.local_server)
-            .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            .build_bypassed::<P>(self.local_server_id, self.local_server);
         let state = Arc::new(state);
         let client = Retry::new(
             Unary::new(Arc::clone(&state), self.inner.init_unary_config()),
