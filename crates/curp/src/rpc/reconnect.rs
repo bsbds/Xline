@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use event_listener::Event;
 use futures::Stream;
 
 use crate::{
@@ -25,6 +26,8 @@ pub(super) struct Reconnect<C> {
     connect: tokio::sync::RwLock<Option<C>>,
     /// The connect builder
     builder: Box<dyn Fn() -> C + Send + Sync + 'static>,
+    /// Signal to abort heartbeat
+    event: Event,
 }
 
 impl<C: ConnectApi> Reconnect<C> {
@@ -35,21 +38,29 @@ impl<C: ConnectApi> Reconnect<C> {
             id: init_connect.id(),
             connect: tokio::sync::RwLock::new(Some(init_connect)),
             builder,
+            event: Event::new(),
         }
     }
 
     /// Creating a new connection to replace the current
     async fn reconnect(&self) {
         let new_connect = (self.builder)();
+        // Cancel the leader keep alive loop task because it hold a read lock
+        let _cancel = self.event.notify(1);
         let _ignore = self.connect.write().await.replace(new_connect);
+        // After connection is updated, notify to start the keep alive loop
+        let _continue = self.event.notify(1);
     }
 
     /// Try to reconnect if the result is `Err`
     async fn try_reconnect<R>(&self, result: Result<R, CurpError>) -> Result<R, CurpError> {
+        // TODO: use `tonic::Status` instead of `CurpError`, we can't tell
+        // if a reconnect is required from `CurpError`.
         if matches!(
             result,
             Err(CurpError::RpcTransport(()) | CurpError::Internal(_))
         ) {
+            tracing::info!("client reconnecting");
             self.reconnect().await;
         }
         result
@@ -78,7 +89,6 @@ impl<C: ConnectApi> ConnectApi for Reconnect<C> {
 
     /// Update server addresses, the new addresses will override the old ones
     async fn update_addrs(&self, addrs: Vec<String>) -> Result<(), tonic::transport::Error> {
-        println!("update addrs to: {addrs:?}");
         let connect = self.connect.read().await;
         connect.as_ref().unwrap().update_addrs(addrs).await
     }
@@ -169,11 +179,20 @@ impl<C: ConnectApi> ConnectApi for Reconnect<C> {
 
     /// Keep send lease keep alive to server and mutate the client id
     async fn lease_keep_alive(&self, client_id: Arc<AtomicU64>, interval: Duration) -> CurpError {
-        let connect = self.connect.read().await;
-        connect
-            .as_ref()
-            .unwrap()
-            .lease_keep_alive(client_id, interval)
-            .await
+        loop {
+            let connect = self.connect.read().await;
+            let connect_ref = connect.as_ref().unwrap();
+            tokio::select! {
+                err = connect_ref.lease_keep_alive(Arc::clone(&client_id), interval) => {
+                    return err;
+                }
+                _empty = self.event.listen() => {},
+            }
+            // Creates the listener before dropping the read lock.
+            // This prevents us from losting the event.
+            let listener = self.event.listen();
+            drop(connect);
+            let _connection_updated = listener.await;
+        }
     }
 }
