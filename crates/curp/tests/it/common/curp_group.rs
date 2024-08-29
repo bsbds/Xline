@@ -323,7 +323,6 @@ impl CurpGroup {
             .await
             .unwrap()
             .build()
-            .await
             .unwrap()
     }
 

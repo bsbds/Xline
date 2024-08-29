@@ -23,7 +23,7 @@ mod tests;
 
 #[cfg(madsim)]
 use std::sync::atomic::AtomicU64;
-use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc};
 
 use async_trait::async_trait;
 use curp_external_api::cmd::Command;
@@ -163,7 +163,7 @@ impl Drop for ProposeIdGuard<'_> {
 #[async_trait]
 trait RepeatableClientApi: ClientApi {
     /// Generate a unique propose id during the retry process.
-    fn gen_propose_id(&self) -> Result<ProposeIdGuard<'_>, Self::Error>;
+    async fn gen_propose_id(&self) -> Result<ProposeIdGuard<'_>, Self::Error>;
 
     /// Send propose to the whole cluster, `use_fast_path` set to `false` to fallback into ordered
     /// requests (event the requests are commutative).
@@ -392,36 +392,13 @@ impl ClientBuilder {
         })
     }
 
-    /// Wait for client id
-    async fn wait_for_client_id(&self, state: Arc<state::State>) -> Result<(), tonic::Status> {
-        /// Max retry count for waiting for a client ID
-        ///
-        /// TODO: This retry count is set relatively high to avoid test cluster startup timeouts.
-        /// We should consider setting this to a more reasonable value.
-        const RETRY_COUNT: usize = 30;
-        /// The interval for each retry
-        const RETRY_INTERVAL: Duration = Duration::from_secs(1);
-
-        for _ in 0..RETRY_COUNT {
-            if state.client_id() != 0 {
-                return Ok(());
-            }
-            debug!("waiting for client_id");
-            tokio::time::sleep(RETRY_INTERVAL).await;
-        }
-
-        Err(tonic::Status::deadline_exceeded(
-            "timeout waiting for client id",
-        ))
-    }
-
     /// Build the client
     ///
     /// # Errors
     ///
     /// Return `tonic::transport::Error` for connection failure.
     #[inline]
-    pub async fn build<C: Command>(
+    pub fn build<C: Command>(
         &self,
     ) -> Result<impl ClientApi<Error = tonic::Status, Cmd = C> + Send + Sync + 'static, tonic::Status>
     {
@@ -431,7 +408,7 @@ impl ClientBuilder {
             self.init_retry_config(),
             Some(self.spawn_bg_tasks(Arc::clone(&state))),
         );
-        self.wait_for_client_id(state).await?;
+
         Ok(client)
     }
 
@@ -442,7 +419,7 @@ impl ClientBuilder {
     ///
     /// Return `tonic::transport::Error` for connection failure.
     #[inline]
-    pub async fn build_with_client_id<C: Command>(
+    pub fn build_with_client_id<C: Command>(
         &self,
     ) -> Result<
         (
@@ -464,7 +441,6 @@ impl ClientBuilder {
             Some(self.spawn_bg_tasks(Arc::clone(&state))),
         );
         let client_id = state.clone_client_id();
-        self.wait_for_client_id(state).await?;
 
         Ok((client, client_id))
     }
@@ -477,7 +453,7 @@ impl<P: Protocol> ClientBuilderWithBypass<P> {
     ///
     /// Return `tonic::transport::Error` for connection failure.
     #[inline]
-    pub async fn build<C: Command>(
+    pub fn build<C: Command>(
         self,
     ) -> Result<impl ClientApi<Error = tonic::Status, Cmd = C>, tonic::Status> {
         let state = self
@@ -490,7 +466,7 @@ impl<P: Protocol> ClientBuilderWithBypass<P> {
             self.inner.init_retry_config(),
             Some(self.inner.spawn_bg_tasks(Arc::clone(&state))),
         );
-        self.inner.wait_for_client_id(state).await?;
+
         Ok(client)
     }
 }
