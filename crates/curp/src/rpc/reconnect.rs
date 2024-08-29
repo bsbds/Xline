@@ -59,9 +59,11 @@ impl<C: ConnectApi> Reconnect<C> {
 /// Execute with reconnect
 macro_rules! execute_with_reconnect {
     ($self:expr, $trait_method:path, $($arg:expr),*) => {{
-        let connect = $self.connect.read().await;
-        let connect_ref = connect.as_ref().unwrap();
-        let result = ($trait_method)(connect_ref, $($arg),*).await;
+        let result = {
+            let connect = $self.connect.read().await;
+            let connect_ref = connect.as_ref().unwrap();
+            ($trait_method)(connect_ref, $($arg),*).await
+        };
         $self.try_reconnect(result).await
     }};
 }
@@ -76,6 +78,7 @@ impl<C: ConnectApi> ConnectApi for Reconnect<C> {
 
     /// Update server addresses, the new addresses will override the old ones
     async fn update_addrs(&self, addrs: Vec<String>) -> Result<(), tonic::transport::Error> {
+        println!("update addrs to: {addrs:?}");
         let connect = self.connect.read().await;
         connect.as_ref().unwrap().update_addrs(addrs).await
     }
