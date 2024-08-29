@@ -22,7 +22,7 @@ pub(super) struct Reconnect<C> {
     /// Connect id
     id: ServerId,
     /// The connection
-    connect: tokio::sync::Mutex<Option<C>>,
+    connect: tokio::sync::RwLock<Option<C>>,
     /// The connect builder
     builder: Box<dyn Fn() -> C + Send + Sync + 'static>,
 }
@@ -33,7 +33,7 @@ impl<C: ConnectApi> Reconnect<C> {
         let init_connect = builder();
         Self {
             id: init_connect.id(),
-            connect: tokio::sync::Mutex::new(Some(init_connect)),
+            connect: tokio::sync::RwLock::new(Some(init_connect)),
             builder,
         }
     }
@@ -41,7 +41,7 @@ impl<C: ConnectApi> Reconnect<C> {
     /// Creating a new connection to replace the current
     async fn reconnect(&self) {
         let new_connect = (self.builder)();
-        let _ignore = self.connect.lock().await.replace(new_connect);
+        let _ignore = self.connect.write().await.replace(new_connect);
     }
 
     /// Try to reconnect if the result is `Err`
@@ -59,7 +59,7 @@ impl<C: ConnectApi> Reconnect<C> {
 /// Execute with reconnect
 macro_rules! execute_with_reconnect {
     ($self:expr, $trait_method:path, $($arg:expr),*) => {{
-        let connect = $self.connect.lock().await;
+        let connect = $self.connect.read().await;
         let connect_ref = connect.as_ref().unwrap();
         let result = ($trait_method)(connect_ref, $($arg),*).await;
         $self.try_reconnect(result).await
@@ -76,7 +76,7 @@ impl<C: ConnectApi> ConnectApi for Reconnect<C> {
 
     /// Update server addresses, the new addresses will override the old ones
     async fn update_addrs(&self, addrs: Vec<String>) -> Result<(), tonic::transport::Error> {
-        let connect = self.connect.lock().await;
+        let connect = self.connect.read().await;
         connect.as_ref().unwrap().update_addrs(addrs).await
     }
 
@@ -166,7 +166,7 @@ impl<C: ConnectApi> ConnectApi for Reconnect<C> {
 
     /// Keep send lease keep alive to server and mutate the client id
     async fn lease_keep_alive(&self, client_id: Arc<AtomicU64>, interval: Duration) -> CurpError {
-        let connect = self.connect.lock().await;
+        let connect = self.connect.read().await;
         connect
             .as_ref()
             .unwrap()
