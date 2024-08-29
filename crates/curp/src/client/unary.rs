@@ -373,10 +373,10 @@ impl<C: Command> ClientApi for Unary<C> {
 impl<C: Command> RepeatableClientApi for Unary<C> {
     /// Generate a unique propose id during the retry process.
     async fn gen_propose_id(&self) -> Result<ProposeIdGuard<'_>, Self::Error> {
-        let client_id = self.state.client_id();
+        let mut client_id = self.state.client_id();
         if client_id == 0 {
-            self.state.wait_for_client_id().await?;
-        }
+            client_id = self.state.wait_for_client_id().await?;
+        };
         let seq_num = self.new_seq_num();
         Ok(ProposeIdGuard::new(
             &self.tracker,

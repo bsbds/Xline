@@ -349,7 +349,7 @@ impl State {
     }
 
     /// Wait for client id
-    pub(super) async fn wait_for_client_id(&self) -> Result<(), tonic::Status> {
+    pub(super) async fn wait_for_client_id(&self) -> Result<u64, tonic::Status> {
         /// Max retry count for waiting for a client ID
         ///
         /// TODO: This retry count is set relatively high to avoid test cluster startup timeouts.
@@ -359,8 +359,9 @@ impl State {
         const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
         for _ in 0..RETRY_COUNT {
-            if self.client_id() != 0 {
-                return Ok(());
+            let client_id = self.client_id();
+            if client_id != 0 {
+                return Ok(client_id);
             }
             debug!("waiting for client_id");
             tokio::time::sleep(RETRY_INTERVAL).await;
