@@ -95,7 +95,8 @@ impl State {
                 tls_config,
                 is_raw_curp: true,
             },
-            client_id: Arc::new(AtomicU64::new(0)),
+            // Sets the client id to non-zero to avoid waiting for client id in tests
+            client_id: Arc::new(AtomicU64::new(1)),
         })
     }
 
