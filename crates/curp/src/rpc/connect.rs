@@ -76,13 +76,13 @@ fn connect_to<Client: FromTonicChannel>(
     addrs: Vec<String>,
     tls_config: Option<ClientTlsConfig>,
 ) -> Connect<Client> {
-    let (channel, change_tx) = Channel::balance_channel(DEFAULT_BUFFER_SIZE);
+    let (channel, change_tx) = Channel::balance_channel(DEFAULT_BUFFER_SIZE.max(addrs.len()));
     for addr in &addrs {
         let endpoint = build_endpoint(addr, tls_config.as_ref())
             .unwrap_or_else(|_| unreachable!("address is ill-formated"));
         change_tx
             .try_send(tower::discover::Change::Insert(addr.clone(), endpoint))
-            .unwrap_or_else(|_| unreachable!("too many address"));
+            .unwrap_or_else(|_| unreachable!("unknown channel tx send error"));
     }
     let client = Client::from_channel(channel);
     Connect {
