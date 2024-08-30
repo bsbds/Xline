@@ -419,21 +419,14 @@ impl ClientBuilder {
     ///
     /// Return `tonic::transport::Error` for connection failure.
     #[inline]
+    #[must_use]
     pub fn build_with_client_id<C: Command>(
         &self,
-    ) -> Result<
-        (
-            impl ClientApi<Error = tonic::Status, Cmd = C> + Send + Sync + 'static,
-            Arc<AtomicU64>,
-        ),
-        tonic::Status,
-    > {
-        let state = Arc::new(
-            self.init_state_builder()
-                .build()
-                .await
-                .map_err(|e| tonic::Status::internal(e.to_string()))?,
-        );
+    ) -> (
+        impl ClientApi<Error = tonic::Status, Cmd = C> + Send + Sync + 'static,
+        Arc<AtomicU64>,
+    ) {
+        let state = Arc::new(self.init_state_builder().build());
 
         let client = Retry::new(
             Unary::new(Arc::clone(&state), self.init_unary_config()),
@@ -442,7 +435,7 @@ impl ClientBuilder {
         );
         let client_id = state.clone_client_id();
 
-        Ok((client, client_id))
+        (client, client_id)
     }
 }
 

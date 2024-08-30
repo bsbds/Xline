@@ -344,8 +344,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> Rpc<C, CE, RC> {
             client_tls_config,
             sps,
             ucps,
-        )
-        .await;
+        );
 
         tonic::transport::Server::builder()
             .add_service(ProtocolServer::new(server.clone()))

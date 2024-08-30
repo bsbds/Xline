@@ -147,8 +147,8 @@ impl State {
         };
         let resp = rand_conn
             .fetch_cluster(FetchClusterRequest::default(), REFRESH_TIMEOUT)
-            .await?;
-        self.check_and_update(&resp.into_inner()).await?;
+            .await;
+        self.check_and_update(&resp?.into_inner()).await?;
         Ok(())
     }
 
