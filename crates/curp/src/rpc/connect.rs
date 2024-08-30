@@ -79,7 +79,7 @@ fn connect_to<Client: FromTonicChannel>(
     let (channel, change_tx) = Channel::balance_channel(DEFAULT_BUFFER_SIZE.max(addrs.len()));
     for addr in &addrs {
         let endpoint = build_endpoint(addr, tls_config.as_ref())
-            .unwrap_or_else(|_| unreachable!("address is ill-formated"));
+            .unwrap_or_else(|_| unreachable!("address is ill-formatted"));
         change_tx
             .try_send(tower::discover::Change::Insert(addr.clone(), endpoint))
             .unwrap_or_else(|_| unreachable!("unknown channel tx send error"));
