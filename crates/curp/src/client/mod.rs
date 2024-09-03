@@ -23,7 +23,7 @@ mod tests;
 
 #[cfg(madsim)]
 use std::sync::atomic::AtomicU64;
-use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use curp_external_api::cmd::Command;
