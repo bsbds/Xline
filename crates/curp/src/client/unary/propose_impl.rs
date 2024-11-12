@@ -1,13 +1,20 @@
-use std::{pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 use curp_external_api::cmd::Command;
-use futures::{future, stream, FutureExt, Stream, StreamExt};
+use futures::{future, stream, Future, FutureExt, Stream, StreamExt};
 use tonic::Response;
 
 use crate::{
-    client::{connect::ProposeResponse, retry::Context},
+    client::{
+        cluster_state::{AllFollowerOperation, Until},
+        connect::ProposeResponse,
+        retry::Context,
+    },
     quorum::QuorumSet,
-    rpc::{connect::ConnectApi, CurpError, OpResponse, ProposeRequest, RecordRequest, ResponseOp},
+    rpc::{
+        connect::ConnectApi, CurpError, OpResponse, ProposeRequest, RecordRequest, RecordResponse,
+        ResponseOp,
+    },
 };
 
 use super::Unary;
@@ -36,6 +43,60 @@ enum ProposeEvent<C: Command> {
         /// Speculative pool version
         sp_version: Option<u64>,
     },
+}
+
+/// A record containing a request and timeout duration.
+struct RecordOperation {
+    /// The record request to be processed
+    request: RecordRequest,
+    /// Timeout duration for the request
+    timeout: Duration,
+}
+
+impl RecordOperation {
+    /// Creates a new Record with the given request and timeout.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The record request to be processed
+    /// * `timeout` - Timeout duration for the request
+    fn new(request: RecordRequest, timeout: Duration) -> Self {
+        Self { request, timeout }
+    }
+}
+
+impl AllFollowerOperation for RecordOperation {
+    type R = Result<RecordResponse, CurpError>;
+    type T = u64;
+    type Acc = u64;
+
+    fn execute(&self, conn: Arc<dyn ConnectApi>) -> Pin<Box<dyn Future<Output = Self::R> + Send>> {
+        let request = self.request.clone();
+        let timeout = self.timeout;
+        Box::pin(async move {
+            conn.record(request, timeout)
+                .await
+                .map(Response::into_inner)
+        })
+    }
+
+    fn filter_map(&self, result: Self::R) -> Option<Self::T> {
+        result.ok().filter(|r| !r.conflict).map(|r| r.sp_version)
+    }
+
+    fn fold(&self, ids: &mut Vec<u64>, id: u64, latest: Self::Acc, version: Self::T) -> Self::Acc {
+        if version > latest {
+            ids.clear();
+            ids.push(id);
+            version
+        } else {
+            latest
+        }
+    }
+
+    fn until(&self) -> Until {
+        Until::SuperQuorum
+    }
 }
 
 impl<C: Command> Unary<C> {
@@ -198,32 +259,10 @@ impl<C: Command> Unary<C> {
     fn send_record(&self, cmd: &C, ctx: &Context) -> EventStream<'_, C> {
         let timeout = self.config.propose_timeout();
         let record_req = RecordRequest::new::<C>(ctx.propose_id(), cmd);
-        let record = move |conn: Arc<dyn ConnectApi>| {
-            let record_req_c = record_req.clone();
-            async move {
-                conn.record(record_req_c, timeout)
-                    .await
-                    .map(Response::into_inner)
-            }
-        };
 
         let stream = ctx
             .cluster_state()
-            .for_each_follower_until(
-                record,
-                |res| res.ok().filter(|r| !r.conflict).map(|r| r.sp_version),
-                0,
-                |(ids, latest), (id, sp_version)| {
-                    if sp_version > latest {
-                        ids.clear();
-                        ids.push(id);
-                        sp_version
-                    } else {
-                        latest
-                    }
-                },
-                |qs, ids| qs.is_super_quorum(ids),
-            )
+            .for_each_follower_until1(RecordOperation::new(record_req, timeout))
             .map(move |ok| ProposeEvent::Record { sp_version: ok })
             .map(Ok)
             .into_stream();

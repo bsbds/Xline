@@ -1,6 +1,7 @@
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
     hash::{Hash, Hasher},
+    pin::Pin,
     sync::Arc,
 };
 
@@ -20,6 +21,51 @@ pub(crate) trait ForEachServer {
         &self,
         f: impl FnMut(Arc<dyn ConnectApi>) -> F,
     ) -> FuturesUnordered<F>;
+}
+
+/// A trait for operations that can be executed on follower nodes in a distributed system.
+///
+/// This trait defines the interface for operations that need to be performed across multiple
+/// follower nodes, with support for aggregating and processing results.
+pub(crate) trait AllFollowerOperation {
+    /// The result type returned by the execute operation
+    type R;
+    /// The transformed result type after filtering/mapping
+    type T;
+    /// The accumulator type for folding results, must implement Default
+    type Acc: Default;
+
+    /// Executes the operation on a given connection
+    fn execute(&self, conn: Arc<dyn ConnectApi>) -> Pin<Box<dyn Future<Output = Self::R> + Send>>;
+
+    /// Filters and transforms the result into an optional value
+    fn filter_map(&self, result: Self::R) -> Option<Self::T>;
+
+    /// Folds a single result value into an accumulator, tracking the node ID
+    ///
+    /// # Arguments
+    /// * `ids` - Current IDs
+    /// * `id` - ID to fold in
+    /// * `acc` - Current accumulator value
+    /// * `value` - Value to fold in
+    fn fold(&self, ids: &mut Vec<u64>, id: u64, acc: Self::Acc, value: Self::T) -> Self::Acc {
+        ids.push(id);
+        acc
+    }
+
+    /// Until a quorum has been reached
+    fn until(&self) -> Until;
+}
+
+/// Represents different quorum types for cluster operations.
+#[derive(Debug)]
+pub(crate) enum Until {
+    /// Quorum
+    Quorum,
+    /// Super quorum
+    SuperQuorum,
+    /// Recover quorum
+    RecoverQuorum,
 }
 
 #[allow(variant_size_differences)] // not an issue
@@ -178,6 +224,40 @@ impl ClusterStateFull {
             .map(Arc::clone)
             .map(f)
             .collect()
+    }
+
+    /// Execute an operation on each follower, until a quorum is reached.
+    pub(crate) async fn for_each_follower_until1<Op>(self, mut op: Op) -> Option<Op::Acc>
+    where
+        Op: AllFollowerOperation,
+    {
+        let qs = self.membership.as_joint();
+        let leader_id = self.leader_id();
+
+        #[allow(clippy::pattern_type_mismatch)]
+        let stream: FuturesUnordered<_> = self
+            .member_connects()
+            .filter(|(id, _)| *id != leader_id)
+            .map(|(id, conn)| op.execute(Arc::clone(conn)).map(move |r| (id, r)))
+            .collect();
+        let mut filtered =
+            stream.filter_map(|(id, r)| futures::future::ready(op.filter_map(r).map(|t| (id, t))));
+
+        let mut ids = vec![];
+        let mut acc = Op::Acc::default();
+        while let Some((id, t)) = filtered.next().await {
+            acc = op.fold(&mut ids, id, acc, t);
+            let with_leader: Vec<_> = ids.clone().into_iter().chain([leader_id]).collect();
+            if match op.until() {
+                Until::Quorum => qs.is_quorum(with_leader),
+                Until::SuperQuorum => qs.is_super_quorum(with_leader),
+                Until::RecoverQuorum => qs.is_recover_quorum(with_leader),
+            } {
+                return Some(acc);
+            }
+        }
+
+        None
     }
 
     /// Execute an operation on each follower, until a quorum is reached.
