@@ -43,6 +43,37 @@ impl Cluster {
         Self::new_with_configs(configs).await
     }
 
+    /// New `Cluster` with given addrs
+    pub async fn new_with_addrs(addrs: Vec<impl AsRef<str>>) -> Self {
+        let configs: Vec<_> = iter::repeat_with(XlineServerConfig::default)
+            .take(addrs.len())
+            .collect();
+        let mut listeners = Vec::new();
+        for addr in addrs {
+            let listener1 = TcpListener::bind(addr.as_ref()).await.unwrap();
+            let listener2 = TcpListener::bind("0.0.0.0:0").await.unwrap();
+            listeners.push((listener1, listener2));
+        }
+        let server_tls_enabled = configs.iter().any(|c| c.tls().server_tls_enabled());
+        let scheme = if server_tls_enabled { "https" } else { "http" };
+        let all_members_client_urls = listeners
+            .iter()
+            .map(|l| format!("{scheme}://{}", l.0.local_addr().unwrap()))
+            .collect();
+        let all_members_peer_urls = listeners
+            .iter()
+            .map(|l| format!("{scheme}://{}", l.1.local_addr().unwrap()))
+            .collect();
+        Self {
+            listeners,
+            all_members_peer_urls,
+            all_members_client_urls,
+            configs,
+            servers: Vec::new(),
+            client: None,
+        }
+    }
+
     /// New `Cluster` with rocksdb
     pub async fn new_rocks(size: usize) -> Self {
         let configs = iter::repeat_with(|| {

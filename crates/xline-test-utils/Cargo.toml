@@ -22,6 +22,7 @@ tokio = { version = "0.2.25", package = "madsim-tokio", features = [
     "signal",
 ] }
 tonic = { version = "0.5.0", package = "madsim-tonic" }
+tracing-subscriber = "0.3.18"
 utils = { path = "../utils", features = ["parking_lot"] }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 xline = { path = "../xline" }

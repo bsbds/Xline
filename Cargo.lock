@@ -3823,6 +3823,7 @@ dependencies = [
  "madsim-tokio",
  "madsim-tonic",
  "rand",
+ "tracing-subscriber",
  "utils",
  "workspace-hack",
  "xline",
