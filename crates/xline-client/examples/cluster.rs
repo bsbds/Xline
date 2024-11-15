@@ -1,5 +1,5 @@
 use anyhow::Result;
-use xline_client::{Client, ClientOptions};
+use xline_client::{clients::EtcdMembership, Client, ClientOptions};
 
 #[tokio::main]
 async fn main() -> Result<()> {

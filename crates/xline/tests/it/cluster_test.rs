@@ -3,7 +3,7 @@ use std::{error::Error, time::Duration};
 use etcd_client::Client as EtcdClient;
 use test_macros::abort_on_panic;
 use tokio::{net::TcpListener, time::sleep};
-use xline_client::{Client, ClientOptions};
+use xline_client::{clients::EtcdMembership, Client, ClientOptions};
 use xline_test_utils::Cluster;
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,52 +1,22 @@
 use std::sync::Arc;
 
-use curp::rpc::WaitLearnerResponse;
-use futures::{Stream, StreamExt};
+use async_trait::async_trait;
+use futures::StreamExt;
 use tonic::transport::Channel;
 
-use crate::{error::Result, AuthService, CurpClient};
+use crate::{
+    error::Result,
+    types::cluster::{Change, WaitLearner},
+    AuthService, CurpClient,
+};
 use xlineapi::{
     MemberAddResponse, MemberListResponse, MemberPromoteResponse, MemberRemoveResponse,
     MemberUpdateResponse,
 };
 
-/// Client for Cluster operations.
-#[derive(Clone)]
-#[non_exhaustive]
-pub struct ClusterClient {
-    /// Inner client
-    #[cfg(not(madsim))]
-    inner: xlineapi::ClusterClient<AuthService<Channel>>,
-    /// The client running the CURP protocol, communicate with all servers.
-    curp_client: Arc<CurpClient>,
-    /// Inner client
-    #[cfg(madsim)]
-    inner: xlineapi::ClusterClient<Channel>,
-}
-
-impl std::fmt::Debug for ClusterClient {
-    #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClusterClient")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl ClusterClient {
-    /// Create a new cluster client
-    #[inline]
-    #[must_use]
-    pub fn new(curp_client: Arc<CurpClient>, channel: Channel, token: Option<String>) -> Self {
-        Self {
-            inner: xlineapi::ClusterClient::new(AuthService::new(
-                channel,
-                token.and_then(|t| t.parse().ok().map(Arc::new)),
-            )),
-            curp_client,
-        }
-    }
-
+/// Etcd competible membership operation
+#[async_trait]
+pub trait EtcdMembership {
     /// Add a new member to the cluster.
     ///
     /// # Errors
@@ -77,21 +47,14 @@ impl ClusterClient {
     ///     Ok(())
     /// }
     /// ```
-    #[inline]
-    pub async fn member_add<I: Into<String>>(
+    async fn member_add<U, I>(
         &mut self,
-        peer_urls: impl Into<Vec<I>>,
+        peer_urls: I,
         is_learner: bool,
-    ) -> Result<MemberAddResponse> {
-        Ok(self
-            .inner
-            .member_add(xlineapi::MemberAddRequest {
-                peer_ur_ls: peer_urls.into().into_iter().map(Into::into).collect(),
-                is_learner,
-            })
-            .await?
-            .into_inner())
-    }
+    ) -> Result<MemberAddResponse>
+    where
+        U: AsRef<str> + Send,
+        I: IntoIterator<Item = U> + Send;
 
     /// Remove an existing member from the cluster.
     ///
@@ -119,14 +82,7 @@ impl ClusterClient {
     ///     Ok(())
     ///  }
     ///
-    #[inline]
-    pub async fn member_remove(&mut self, id: u64) -> Result<MemberRemoveResponse> {
-        Ok(self
-            .inner
-            .member_remove(xlineapi::MemberRemoveRequest { id })
-            .await?
-            .into_inner())
-    }
+    async fn member_remove(&mut self, id: u64) -> Result<MemberRemoveResponse>;
 
     /// Promote an existing member to be the leader of the cluster.
     ///
@@ -154,14 +110,7 @@ impl ClusterClient {
     ///     Ok(())
     /// }
     ///
-    #[inline]
-    pub async fn member_promote(&mut self, id: u64) -> Result<MemberPromoteResponse> {
-        Ok(self
-            .inner
-            .member_promote(xlineapi::MemberPromoteRequest { id })
-            .await?
-            .into_inner())
-    }
+    async fn member_promote(&mut self, id: u64) -> Result<MemberPromoteResponse>;
 
     /// Update an existing member in the cluster.
     ///
@@ -189,21 +138,10 @@ impl ClusterClient {
     ///     Ok(())
     ///  }
     ///
-    #[inline]
-    pub async fn member_update<I: Into<String>>(
-        &mut self,
-        id: u64,
-        peer_urls: impl Into<Vec<I>>,
-    ) -> Result<MemberUpdateResponse> {
-        Ok(self
-            .inner
-            .member_update(xlineapi::MemberUpdateRequest {
-                id,
-                peer_ur_ls: peer_urls.into().into_iter().map(Into::into).collect(),
-            })
-            .await?
-            .into_inner())
-    }
+    async fn member_update<U, I>(&mut self, id: u64, peer_urls: I) -> Result<MemberUpdateResponse>
+    where
+        U: AsRef<str> + Send,
+        I: IntoIterator<Item = U> + Send;
 
     /// List all members in the cluster.
     ///
@@ -230,14 +168,55 @@ impl ClusterClient {
     ///
     ///     Ok(())
     /// }
-    #[inline]
-    pub async fn member_list(&mut self, linearizable: bool) -> Result<MemberListResponse> {
-        Ok(self
-            .inner
-            .member_list(xlineapi::MemberListRequest { linearizable })
-            .await?
-            .into_inner())
-    }
+    async fn member_list(&mut self, linearizable: bool) -> Result<MemberListResponse>;
+}
+
+/// Xline specific membership operation
+#[async_trait]
+pub trait XlineMembership {
+    /// Updates the membership
+    ///
+    /// # Note
+    /// The ids in `changes` should never overlap with each other.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use anyhow::Result;
+    /// use futures::StreamExt;
+    /// use xline_client::{
+    ///     clients::XlineMembership,
+    ///     types::cluster::{Change, LearnerStatus, Node},
+    ///     Client, ClientOptions,
+    /// };
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<()> {
+    ///     // the name and address of all curp members
+    ///     let curp_members = ["10.0.0.1:2379", "10.0.0.2:2379", "10.0.0.3:2379"];
+    ///
+    ///     let client = Client::connect(curp_members, ClientOptions::default())
+    ///         .await?
+    ///         .cluster_client();
+    ///
+    ///     let node1 = Node::new(1, "n1", vec!["10.0.0.4:2380"], vec!["10.0.0.4.2379"]);
+    ///     let node2 = Node::new(2, "n2", vec!["10.0.0.5:2380"], vec!["10.0.0.5.2379"]);
+    ///     client
+    ///         .change(vec![Change::Add(node1), Change::Add(node2)])
+    ///         .await?;
+    ///     client.change(vec![Change::Promote(1)]).await?;
+    ///     client.change(vec![Change::Demote(1)]).await?;
+    ///     // Remove the previously added learners
+    ///     client
+    ///         .change(vec![Change::Remove(1), Change::Remove(2)])
+    ///         .await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn change<I>(&self, changes: I) -> Result<()>
+    where
+        I: IntoIterator<Item = Change> + Send;
 
     /// Wait for learners to be added to the cluster.
     ///
@@ -281,45 +260,149 @@ impl ClusterClient {
     ///     Ok(())
     /// }
     /// ```
+    async fn wait_learner<Ids>(&self, node_ids: Ids) -> Result<WaitLearner>
+    where
+        Ids: IntoIterator<Item = u64> + Send;
+}
+
+/// Client for Cluster operations.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct ClusterClient {
+    /// Inner client
+    #[cfg(not(madsim))]
+    inner: xlineapi::ClusterClient<AuthService<Channel>>,
+    /// The client running the CURP protocol, communicate with all servers.
+    curp_client: Arc<CurpClient>,
+    /// Inner client
+    #[cfg(madsim)]
+    inner: xlineapi::ClusterClient<Channel>,
+}
+
+#[async_trait]
+impl EtcdMembership for ClusterClient {
     #[inline]
-    pub async fn wait_learner<Ids: IntoIterator<Item = u64>>(
+    async fn member_add<U, I>(
         &mut self,
-        node_ids: Ids,
-    ) -> Result<Box<dyn Stream<Item = Result<LearnerStatus>> + Send + Unpin>> {
+        peer_urls: I,
+        is_learner: bool,
+    ) -> Result<MemberAddResponse>
+    where
+        U: AsRef<str> + Send,
+        I: IntoIterator<Item = U> + Send,
+    {
+        let peer_urls: Vec<String> = peer_urls
+            .into_iter()
+            .map(|s| s.as_ref().to_owned())
+            .collect();
+
+        Ok(self
+            .inner
+            .member_add(xlineapi::MemberAddRequest {
+                peer_ur_ls: peer_urls,
+                is_learner,
+            })
+            .await?
+            .into_inner())
+    }
+
+    #[inline]
+    async fn member_remove(&mut self, id: u64) -> Result<MemberRemoveResponse> {
+        Ok(self
+            .inner
+            .member_remove(xlineapi::MemberRemoveRequest { id })
+            .await?
+            .into_inner())
+    }
+
+    #[inline]
+    async fn member_promote(&mut self, id: u64) -> Result<MemberPromoteResponse> {
+        Ok(self
+            .inner
+            .member_promote(xlineapi::MemberPromoteRequest { id })
+            .await?
+            .into_inner())
+    }
+
+    #[inline]
+    async fn member_update<U, I>(&mut self, id: u64, peer_urls: I) -> Result<MemberUpdateResponse>
+    where
+        U: AsRef<str> + Send,
+        I: IntoIterator<Item = U> + Send,
+    {
+        let peer_urls: Vec<String> = peer_urls
+            .into_iter()
+            .map(|s| s.as_ref().to_owned())
+            .collect();
+
+        Ok(self
+            .inner
+            .member_update(xlineapi::MemberUpdateRequest {
+                id,
+                peer_ur_ls: peer_urls,
+            })
+            .await?
+            .into_inner())
+    }
+
+    #[inline]
+    async fn member_list(&mut self, linearizable: bool) -> Result<MemberListResponse> {
+        Ok(self
+            .inner
+            .member_list(xlineapi::MemberListRequest { linearizable })
+            .await?
+            .into_inner())
+    }
+}
+
+#[async_trait]
+impl XlineMembership for ClusterClient {
+    #[inline]
+    async fn change<I>(&self, changes: I) -> Result<()>
+    where
+        I: IntoIterator<Item = Change> + Send,
+    {
+        self.curp_client
+            .change_membership(changes.into_iter().map(Into::into).collect())
+            .await
+            .map_err(Into::into)
+    }
+
+    #[inline]
+    async fn wait_learner<Ids>(&self, node_ids: Ids) -> Result<WaitLearner>
+    where
+        Ids: IntoIterator<Item = u64> + Send,
+    {
         let stream = self
             .curp_client
             .wait_learner(node_ids.into_iter().collect())
             .await?;
         let stream_mapped = Box::into_pin(stream).map(|r| r.map(Into::into).map_err(Into::into));
 
-        Ok(Box::new(stream_mapped))
+        Ok(WaitLearner::new(Box::pin(stream_mapped)))
     }
 }
 
-#[allow(clippy::exhaustive_enums)] // only two states
-#[derive(Debug, Clone, Copy)]
-/// Represents the state of a learner
-pub enum LearnerStatus {
-    /// The learner node is pending and not yet ready.
-    Pending {
-        /// The id of the node
-        node_id: u64,
-        /// The current replicated log index of the node
-        index: u64,
-    },
-    /// The learner node is up-to-date.
-    Ready,
+impl ClusterClient {
+    /// Create a new cluster client
+    #[inline]
+    #[must_use]
+    pub fn new(curp_client: Arc<CurpClient>, channel: Channel, token: Option<String>) -> Self {
+        Self {
+            inner: xlineapi::ClusterClient::new(AuthService::new(
+                channel,
+                token.and_then(|t| t.parse().ok().map(Arc::new)),
+            )),
+            curp_client,
+        }
+    }
 }
 
-impl From<WaitLearnerResponse> for LearnerStatus {
+impl std::fmt::Debug for ClusterClient {
     #[inline]
-    fn from(resp: WaitLearnerResponse) -> Self {
-        if resp.current_idx == resp.latest_idx {
-            return LearnerStatus::Ready;
-        }
-        LearnerStatus::Pending {
-            node_id: resp.node_id,
-            index: resp.current_idx,
-        }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClusterClient")
+            .field("inner", &self.inner)
+            .finish()
     }
 }

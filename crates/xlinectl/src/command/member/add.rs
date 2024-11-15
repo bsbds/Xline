@@ -1,5 +1,5 @@
 use clap::{arg, ArgMatches, Command};
-use xline_client::{error::Result, Client};
+use xline_client::{clients::EtcdMembership, error::Result, Client};
 
 use super::parse_peer_urls;
 use crate::utils::printer::Printer;
