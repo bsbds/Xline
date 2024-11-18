@@ -93,3 +93,6 @@ pub(super) mod db;
 
 /// CURP WAL storage implementation
 pub(super) mod wal;
+
+/// Speculative pool WAL
+pub(super) mod sp_wal;
