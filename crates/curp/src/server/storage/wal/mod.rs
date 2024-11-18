@@ -9,9 +9,6 @@ pub(super) mod config;
 /// WAL errors
 mod error;
 
-/// File pipeline
-mod pipeline;
-
 /// Remover of the segment file
 mod remover;
 
@@ -25,12 +22,6 @@ mod test_util;
 /// WAL storage tests
 #[cfg(test)]
 mod tests;
-
-/// File utils
-mod util;
-
-/// Framed
-mod framed;
 
 /// Mock WAL storage
 mod mock;

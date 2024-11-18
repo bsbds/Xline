@@ -7,15 +7,16 @@ use std::{
 
 use clippy_utilities::{NumericCast, OverflowArithmetic};
 use itertools::Itertools;
-use sha2::Sha256;
-use utils::wal::{
-    framed::{Decoder, Encoder},
-    get_checksum, parse_u64, validate_data, LockedFile,
-};
 
 use crate::rpc::ProposeId;
 
 use super::{
+    super::wal_utils::{
+        framed::{Decoder, Encoder},
+        get_checksum,
+        lock::LockedFile,
+        parse_u64, validate_data,
+    },
     codec::DataFrame,
     error::{CorruptType, WALError},
 };
@@ -29,6 +30,7 @@ const WAL_VERSION: u8 = 0x00;
 /// The size of wal file header in bytes
 const WAL_HEADER_SIZE: usize = 48;
 
+/// Attributes of a segment
 pub(super) trait SegmentAttr {
     /// Segment file extension
     fn ext() -> String;
@@ -72,9 +74,9 @@ where
         r#type: T,
     ) -> io::Result<Self> {
         let segment_name = Self::segment_name(segment_id);
-        let lfile = tmp_file.rename(segment_name)?;
-        let path = lfile.path();
-        let mut file = lfile.into_std();
+        let file_locked = tmp_file.rename(segment_name)?;
+        let path = file_locked.path();
+        let mut file = file_locked.into_std();
         file.write_all(&Self::gen_header(segment_id))?;
         file.flush()?;
         file.sync_data()?;
@@ -93,16 +95,16 @@ where
 
     /// Open an existing WAL segment file
     pub(super) fn open(
-        lfile: LockedFile,
+        file_locked: LockedFile,
         size_limit: u64,
         codec: Codec,
         r#type: T,
     ) -> Result<Self, WALError> {
-        let path = lfile.path();
-        let mut file = lfile.into_std();
+        let path = file_locked.path();
+        let mut file = file_locked.into_std();
         let size = file.metadata()?.len();
         let mut buf = vec![0; WAL_HEADER_SIZE];
-        let _ignore = file.read_exact(&mut buf)?;
+        file.read_exact(&mut buf)?;
         let segment_id = Self::parse_header(&buf)?;
 
         Ok(Self {
@@ -141,7 +143,7 @@ where
         buf.extend(vec![0; 3]);
         buf.push(WAL_VERSION);
         buf.extend(segment_id.to_le_bytes());
-        buf.extend(get_checksum::<Sha256>(&buf));
+        buf.extend(get_checksum(&buf));
         buf
     }
 
@@ -170,7 +172,7 @@ where
         let segment_id = parse_u64(next_field(8));
         let checksum = next_field(32);
 
-        if !validate_data::<Sha256>(&src[0..16], checksum) {
+        if !validate_data(&src[0..16], checksum) {
             return parse_error;
         }
 
@@ -193,6 +195,7 @@ impl<T, Codec> Segment<T, Codec> {
         Ok(())
     }
 
+    #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)] // checked
     /// Gets all items from the segment
     pub(super) fn get_all<Item>(&mut self) -> Result<Vec<Item>, WALError>
     where
@@ -297,11 +300,12 @@ impl<T, Codec> Ord for Segment<T, Codec> {
     }
 }
 
+/// Insert type
 pub(super) struct Insert;
 
 impl SegmentAttr for Insert {
     fn ext() -> String {
-        ".inswal".to_string()
+        ".inswal".to_owned()
     }
 
     fn r#type() -> Insert {
@@ -309,11 +313,12 @@ impl SegmentAttr for Insert {
     }
 }
 
+/// Remove type
 pub(super) struct Remove;
 
 impl SegmentAttr for Remove {
     fn ext() -> String {
-        ".rmwal".to_string()
+        ".rmwal".to_owned()
     }
 
     fn r#type() -> Remove {
@@ -321,8 +326,11 @@ impl SegmentAttr for Remove {
     }
 }
 
+/// Gets the segment path when dropping
 pub(super) enum ToDrop<Codec> {
+    /// Insert
     Insert(Segment<Insert, Codec>),
+    /// Remove
     Remove(Segment<Remove, Codec>),
 }
 
@@ -340,8 +348,11 @@ impl<Codec> ToDrop<Codec> {
 mod tests {
     use std::sync::Arc;
 
+    use sha2::Sha256;
+
+    use crate::server::storage::sp_wal::codec;
+
     use super::*;
-    use crate::server::sp_wal::codec;
 
     type TestSeg = Segment<Insert, codec::WAL<i32, Sha256>>;
 

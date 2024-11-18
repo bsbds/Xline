@@ -12,8 +12,10 @@ use tokio::{
 };
 
 use super::{
+    super::wal_utils::{
+        get_checksum, get_file_paths_with_ext, is_exist, lock::LockedFile, parse_u64, validate_data,
+    },
     segment::WALSegment,
-    util::{get_checksum, get_file_paths_with_ext, is_exist, parse_u64, validate_data, LockedFile},
 };
 
 /// Utilize thread-local variables because the tests are running concurrently,

@@ -7,11 +7,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
+    super::wal_utils::{get_checksum, validate_data},
     error::{CorruptType, WALError},
-    framed::{Decoder, Encoder},
-    util::{get_checksum, validate_data},
 };
-use crate::log_entry::LogEntry;
+use crate::{
+    log_entry::LogEntry,
+    server::storage::wal_utils::framed::{Decoder, Encoder},
+};
 
 /// Invalid frame type
 const INVALID: u8 = 0x00;

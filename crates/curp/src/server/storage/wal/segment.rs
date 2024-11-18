@@ -18,10 +18,10 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use super::{
+    super::wal_utils::framed::{Decoder, Encoder},
+    super::wal_utils::{get_checksum, lock::LockedFile, parse_u64, validate_data},
     codec::{DataFrame, DataFrameOwned, WAL},
     error::{CorruptType, WALError},
-    framed::{Decoder, Encoder},
-    util::{get_checksum, parse_u64, validate_data, LockedFile},
     WAL_FILE_EXT,
 };
 use crate::log_entry::LogEntry;

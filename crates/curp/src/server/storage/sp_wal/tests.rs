@@ -183,17 +183,3 @@ impl EntryGenerator {
         std::iter::repeat_with(|| self.next()).take(n).collect()
     }
 }
-
-impl Eq for PoolEntry<TestCommand> {}
-
-impl PartialOrd for PoolEntry<TestCommand> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.id.cmp(&other.id))
-    }
-}
-
-impl Ord for PoolEntry<TestCommand> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.id.cmp(&other.id)
-    }
-}

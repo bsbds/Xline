@@ -3,14 +3,16 @@ use std::{io, marker::PhantomData, sync::Arc};
 use clippy_utilities::NumericCast;
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{digest::Reset, Digest};
-use utils::wal::{
-    framed::{Decoder, Encoder},
-    get_checksum,
+
+use crate::{
+    rpc::ProposeId,
+    server::storage::wal_utils::framed::{Decoder, Encoder},
 };
 
-use crate::rpc::ProposeId;
-
-use super::error::{CorruptType, WALError};
+use super::{
+    super::wal_utils::get_checksum,
+    error::{CorruptType, WALError},
+};
 
 /// Invalid frame type
 const INVALID: u8 = 0x00;
@@ -59,7 +61,12 @@ enum WALFrame<C, H> {
 #[cfg_attr(test, derive(PartialEq))]
 pub(crate) enum DataFrame<C> {
     /// A Frame containing a Insert entry
-    Insert { propose_id: ProposeId, cmd: Arc<C> },
+    Insert {
+        /// The propose id
+        propose_id: ProposeId,
+        /// The command
+        cmd: Arc<C>,
+    },
     /// A Frame containing the Remove entry
     Remove(ProposeId),
 }
@@ -68,8 +75,7 @@ impl<C> DataFrame<C> {
     /// Gets the propose id encoded in this frame
     pub(crate) fn propose_id(&self) -> ProposeId {
         match *self {
-            DataFrame::Insert { propose_id, .. } => propose_id,
-            DataFrame::Remove(propose_id) => propose_id,
+            DataFrame::Remove(propose_id) | DataFrame::Insert { propose_id, .. } => propose_id,
         }
     }
 }
@@ -127,6 +133,7 @@ where
 
     type Error = WALError;
 
+    #[allow(clippy::arithmetic_side_effects)] // checked
     fn decode(&mut self, src: &[u8]) -> Result<(Self::Item, usize), Self::Error> {
         let mut cursor = 0;
         while cursor < src.len() {
@@ -192,9 +199,9 @@ where
         let frame_type = src[0];
         match frame_type {
             INVALID => Err(WALError::MaybeEnded),
-            INSERT => Self::decode_insert(&src),
-            REMOVE => Self::decode_remove(&src),
-            COMMIT => Self::decode_commit(&src),
+            INSERT => Self::decode_insert(src),
+            REMOVE => Self::decode_remove(src),
+            COMMIT => Self::decode_commit(src),
             _ => Err(WALError::Corrupted(CorruptType::Codec(
                 "Unexpected frame type".to_owned(),
             ))),
@@ -204,8 +211,9 @@ where
     /// Decodes an entry frame from source
     #[allow(clippy::unwrap_used)]
     fn decode_insert(mut src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
+        /// Size in bytes of the encoded length
         const LEN_SIZE: usize = 8;
-        let Some(propose_id) = Self::decode_propose_id(&src) else {
+        let Some(propose_id) = Self::decode_propose_id(src) else {
             return Ok(None);
         };
         src = &src[PROPOSE_ID_SIZE..];
@@ -232,11 +240,17 @@ where
 
     /// Decodes an seal index frame from source
     fn decode_remove(src: &[u8]) -> Result<Option<(Self, usize)>, WALError> {
-        Ok(Self::decode_propose_id(&src)
+        Ok(Self::decode_propose_id(src)
             .map(|id| WALFrame::Data(DataFrame::Remove(id)))
             .map(|frame| (frame, PROPOSE_ID_SIZE)))
     }
 
+    #[allow(
+        clippy::unwrap_used,
+        clippy::unwrap_in_result,
+        clippy::indexing_slicing,
+        clippy::missing_asserts_for_indexing
+    )] // checked
     /// Decodes data frame header
     fn decode_propose_id(src: &[u8]) -> Option<ProposeId> {
         if src.len() < PROPOSE_ID_SIZE {
@@ -314,7 +328,7 @@ impl<H: Digest> CommitFrame<H> {
     /// Creates a commit frame of data
     fn new_from_data(data: &[u8]) -> Self {
         Self {
-            checksum: get_checksum::<H>(data).to_vec(),
+            checksum: get_checksum(data).to_vec(),
             phantom: PhantomData,
         }
     }
@@ -332,6 +346,7 @@ impl<H> FrameType for CommitFrame<H> {
 }
 
 impl<H> FrameEncoder for CommitFrame<H> {
+    #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)] // checked
     fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(8 + self.checksum.len());
         bytes.extend_from_slice(&[0; 8]);

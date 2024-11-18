@@ -11,13 +11,13 @@ use tracing::{debug, error, info, warn};
 use crate::log_entry::LogEntry;
 
 use super::{
+    super::wal_utils::pipeline::FilePipeline,
+    super::wal_utils::{self, get_file_paths_with_ext, lock::LockedFile},
     codec::{DataFrame, DataFrameOwned, WAL},
     config::PersistentConfig,
     error::{CorruptType, WALError},
-    pipeline::FilePipeline,
     remover::SegmentRemover,
     segment::WALSegment,
-    util::{self, LockedFile},
     WALStorageOps, WAL_FILE_EXT,
 };
 
@@ -67,7 +67,7 @@ where
         // We try to recover the removal first
         SegmentRemover::recover(&self.config.dir)?;
 
-        let file_paths = util::get_file_paths_with_ext(&self.config.dir, WAL_FILE_EXT)?;
+        let file_paths = get_file_paths_with_ext(&self.config.dir, WAL_FILE_EXT)?;
         let lfiles: Vec<_> = file_paths
             .into_iter()
             .map(LockedFile::open_rw)

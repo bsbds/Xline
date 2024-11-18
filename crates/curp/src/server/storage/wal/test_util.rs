@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
+    super::wal_utils::framed::Encoder,
     codec::{DataFrameOwned, WAL},
-    framed::Encoder,
 };
 
 pub(super) struct EntryGenerator {

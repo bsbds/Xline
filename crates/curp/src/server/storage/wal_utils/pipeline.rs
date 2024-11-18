@@ -1,26 +1,22 @@
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    task::Poll,
     thread::JoinHandle,
 };
 
-use clippy_utilities::OverflowArithmetic;
-use event_listener::Event;
-use thiserror::Error;
 use tracing::error;
 
-use super::util::LockedFile;
+use super::lock::LockedFile;
 
 /// The temp file extension
 const TEMP_FILE_EXT: &str = ".tmp";
 
 /// The file pipeline, used for pipelining the creation of temp file
-pub(super) struct FilePipeline {
+pub(crate) struct FilePipeline {
     /// The directory where the temp files are created
     dir: PathBuf,
     /// The size of the temp file
@@ -42,7 +38,7 @@ pub(super) struct FilePipeline {
 
 impl FilePipeline {
     /// Creates a new `FilePipeline`
-    pub(super) fn new(dir: PathBuf, file_size: u64) -> Self {
+    pub(crate) fn new(dir: PathBuf, file_size: u64) -> Self {
         if let Err(e) = Self::clean_up(&dir) {
             error!("Failed to clean up tmp files: {e}");
         }
@@ -101,7 +97,7 @@ impl FilePipeline {
     }
 
     /// Stops the pipeline
-    pub(super) fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
     }
 
@@ -121,8 +117,7 @@ impl FilePipeline {
             if file
                 .file_name()
                 .to_str()
-                .map(|fname| fname.ends_with(TEMP_FILE_EXT))
-                .unwrap_or(false)
+                .map_or(false, |fname| fname.ends_with(TEMP_FILE_EXT))
             {
                 if let Err(err) = std::fs::remove_file(file.path()) {
                     // The file has already been deleted, continue
@@ -184,7 +179,6 @@ impl std::fmt::Debug for FilePipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::storage::wal::util::get_file_paths_with_ext;
 
     #[tokio::test]
     async fn file_pipeline_is_ok() {

@@ -96,3 +96,6 @@ pub(super) mod wal;
 
 /// Speculative pool WAL
 pub(super) mod sp_wal;
+
+/// Utils for implementing WALs
+pub(super) mod wal_utils;

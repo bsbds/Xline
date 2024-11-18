@@ -6,9 +6,10 @@ use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::Sha256;
 use tracing::{debug, error};
-use utils::wal::{get_file_paths_with_ext, pipeline::FilePipeline, LockedFile};
 
-use crate::rpc::{PoolEntry, PoolEntryInner, ProposeId};
+use super::wal_utils::{get_file_paths_with_ext, lock::LockedFile, pipeline::FilePipeline};
+
+use crate::rpc::{PoolEntry, ProposeId};
 
 use self::{
     codec::DataFrame,
@@ -89,14 +90,8 @@ where
         let handle = Self::spawn_dropping_task(drop_rx);
 
         Ok(Self {
-            insert: Mutex::new(WAL::new(
-                &config.insert_dir,
-                config.max_insert_segment_size,
-            )?),
-            remove: Mutex::new(WAL::new(
-                &config.remove_dir,
-                config.max_remove_segment_size,
-            )?),
+            insert: Mutex::new(WAL::new(&config.insert_dir, config.max_insert_segment_size)),
+            remove: Mutex::new(WAL::new(&config.remove_dir, config.max_remove_segment_size)),
             config,
             drop_tx: Some(drop_tx),
             drop_task_handle: Some(handle),
@@ -120,22 +115,24 @@ where
         })
     }
 
+    #[allow(clippy::indexing_slicing, clippy::pattern_type_mismatch)] // checked
     /// Keeps only commute commands
     fn keep_commute_cmds(mut entries: Vec<PoolEntry<C>>) -> Vec<PoolEntry<C>> {
         let commute = |entry: &PoolEntry<C>, others: &[PoolEntry<C>]| {
-            !others.iter().any(|e| e.is_conflict(&entry))
+            !others.iter().any(|e| e.is_conflict(entry))
         };
         // start from last element
         entries.reverse();
         let keep = entries
             .iter()
             .enumerate()
-            .take_while(|(i, ref e)| commute(*e, &entries[..*i]))
+            .take_while(|(i, e)| commute(e, &entries[..*i]))
             .count();
         entries.drain(..keep).collect()
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::unwrap_in_result)] // safe
 impl<C: Command> PoolWALOps<C> for SpeculativePoolWAL<C> {
     fn insert(&self, entries: Vec<PoolEntry<C>>) -> io::Result<()> {
         self.insert.lock().insert(entries)
@@ -143,7 +140,7 @@ impl<C: Command> PoolWALOps<C> for SpeculativePoolWAL<C> {
 
     fn remove(&self, propose_ids: Vec<ProposeId>) -> io::Result<()> {
         let removed = self.insert.lock().remove_propose_ids(&propose_ids)?;
-        let removed_ids: Vec<_> = removed.iter().map(Segment::propose_ids).flatten().collect();
+        let removed_ids: Vec<_> = removed.iter().flat_map(Segment::propose_ids).collect();
         for segment in removed {
             if let Err(e) = self.drop_tx.as_ref().unwrap().send(ToDrop::Insert(segment)) {
                 error!("Failed to send segment to dropping task: {e}");
@@ -151,8 +148,8 @@ impl<C: Command> PoolWALOps<C> for SpeculativePoolWAL<C> {
         }
 
         let mut remove_l = self.remove.lock();
-        let removed = remove_l.remove_propose_ids(&removed_ids)?;
-        for segment in removed {
+        let removed_ = remove_l.remove_propose_ids(&removed_ids)?;
+        for segment in removed_ {
             if let Err(e) = self.drop_tx.as_ref().unwrap().send(ToDrop::Remove(segment)) {
                 error!("Failed to send segment to dropping task: {e}");
             }
@@ -219,6 +216,8 @@ where
     }
 }
 
+#[allow(clippy::upper_case_acronyms)]
+/// The WAL type
 struct WAL<T, C> {
     /// WAL segments
     segments: Vec<Segment<T, WALCodec<C>>>,
@@ -237,13 +236,13 @@ where
     C: Serialize + DeserializeOwned,
 {
     /// Creates a new `WAL`
-    fn new(dir: impl AsRef<Path>, max_segment_size: u64) -> io::Result<Self> {
-        Ok(Self {
+    fn new(dir: impl AsRef<Path>, max_segment_size: u64) -> Self {
+        Self {
             segments: Vec::new(),
-            pipeline: FilePipeline::new(dir.as_ref().into(), max_segment_size)?,
+            pipeline: FilePipeline::new(dir.as_ref().into(), max_segment_size),
             next_segment_id: 0,
             max_segment_size,
-        })
+        }
     }
 
     /// Writes frames to the log
@@ -278,7 +277,7 @@ where
             .map(Segment::recover::<C>)
             .collect::<Result<_>>()?;
 
-        self.next_segment_id = segments.last().map(Segment::segment_id).unwrap_or(0);
+        self.next_segment_id = segments.last().map_or(0, Segment::segment_id);
         self.segments = segments;
         self.open_new_segment()?;
 
@@ -391,12 +390,9 @@ where
 
 impl<C> From<PoolEntry<C>> for DataFrame<C> {
     fn from(entry: PoolEntry<C>) -> Self {
-        match entry.inner {
-            PoolEntryInner::Command(cmd) => DataFrame::Insert {
-                propose_id: entry.id,
-                cmd,
-            },
-            PoolEntryInner::ConfChange(_) => unreachable!("should not insert conf change entry"),
+        DataFrame::Insert {
+            propose_id: entry.id,
+            cmd: entry.cmd,
         }
     }
 }
