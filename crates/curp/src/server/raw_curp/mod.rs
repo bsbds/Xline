@@ -550,20 +550,33 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     }
 
     /// Handles record
-    pub(super) fn follower_record(&self, propose_id: ProposeId, cmd: &Arc<C>) -> (bool, u64) {
-        let (conflict, version) = self.ctx.spec_pool.map_lock(|mut sp| {
-            (
-                sp.insert(PoolEntry::new(propose_id, Arc::clone(cmd)))
-                    .is_some(),
-                sp.version(),
-            )
-        });
-        if conflict {
-            metrics::get()
-                .proposals_failed
-                .add(1, &[KeyValue::new("reason", "follower key conflict")]);
+    pub(super) fn follower_record(&self, entries: Vec<PoolEntry<C>>) -> (Vec<bool>, u64) {
+        let mut sp_l = self.ctx.spec_pool.lock();
+        let version = sp_l.version();
+
+        let mut conflicts = Vec::with_capacity(entries.len());
+        for entry in entries.clone() {
+            let conflict = sp_l.insert(entry).is_some();
+            if conflict {
+                metrics::get()
+                    .proposals_failed
+                    .add(1, &[KeyValue::new("reason", "follower key conflict")]);
+            }
+            conflicts.push(conflict);
         }
-        (conflict, version)
+
+        if self
+            .ctx
+            .curp_storage
+            .insert_spec_pool_entries(entries)
+            .is_err()
+        {
+            error!("failed to write to spec pool wal.");
+            // fill with conflict if persistent failed
+            conflicts.fill(true);
+        }
+
+        (conflicts, version)
     }
 
     /// Handles record

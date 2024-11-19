@@ -119,7 +119,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> crate::rpc::Protocol fo
         request: tonic::Request<RecordRequest>,
     ) -> Result<tonic::Response<RecordResponse>, tonic::Status> {
         Ok(tonic::Response::new(
-            self.inner.record(&request.into_inner())?,
+            self.inner.record(&request.into_inner()).await?,
         ))
     }
 

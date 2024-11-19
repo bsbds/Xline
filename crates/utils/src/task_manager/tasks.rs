@@ -48,13 +48,17 @@ enum_with_iter! {
     AutoCompactor,
     AfterSync,
     HandlePropose,
+    HandleRecord,
 }
 
 impl TaskName {
     /// Returns `true` if the task is cancel safe
     pub(super) fn cancel_safe(self) -> bool {
         match self {
-            TaskName::HandlePropose | TaskName::AfterSync | TaskName::Election => true,
+            TaskName::HandlePropose
+            | TaskName::HandleRecord
+            | TaskName::AfterSync
+            | TaskName::Election => true,
             TaskName::CompactBg
             | TaskName::KvUpdates
             | TaskName::WatchTask

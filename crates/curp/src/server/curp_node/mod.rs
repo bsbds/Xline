@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
+    iter,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -118,6 +119,26 @@ where
     }
 }
 
+/// A struct representing a record to be processed.
+struct ToRecord<C> {
+    /// The entry to record
+    entry: PoolEntry<C>,
+    /// Sender to send back (conflict, sp_version)
+    tx: oneshot::Sender<(bool, u64)>,
+}
+
+impl<C> ToRecord<C> {
+    /// Creates a new `ToRecord`
+    fn new(entry: PoolEntry<C>, tx: oneshot::Sender<(bool, u64)>) -> Self {
+        Self { entry, tx }
+    }
+
+    /// Splits Self into its component parts
+    fn into_parts(self) -> (PoolEntry<C>, oneshot::Sender<(bool, u64)>) {
+        (self.entry, self.tx)
+    }
+}
+
 /// Entry to execute
 type ExecutorEntry<C> = ((Arc<LogEntry<C>>, Arc<ResponseSender>), u64);
 
@@ -138,6 +159,8 @@ pub(super) struct CurpNode<C: Command, CE: CommandExecutor<C>, RC: RoleChange> {
     as_tx: flume::Sender<TaskType<C>>,
     /// Tx to send to propose task
     propose_tx: flume::Sender<Propose<C>>,
+    /// Tx to send to record task
+    record_tx: flume::Sender<ToRecord<C>>,
 }
 
 /// Handlers for clients
@@ -168,13 +191,18 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     }
 
     /// Handle `Record` requests
-    pub(super) fn record(&self, req: &RecordRequest) -> Result<RecordResponse, CurpError> {
+    pub(super) async fn record(&self, req: &RecordRequest) -> Result<RecordResponse, CurpError> {
         if self.curp.is_cluster_shutdown() {
             return Err(CurpError::shutting_down());
         }
         let id = req.propose_id();
         let cmd: Arc<C> = Arc::new(req.cmd()?);
-        let (conflict, sp_version) = self.curp.follower_record(id, &cmd);
+
+        let entry = PoolEntry::new(id, cmd);
+        let (tx, rx) = oneshot::channel();
+        let to_record = ToRecord::new(entry, tx);
+        self.record_tx.send(to_record)?;
+        let (conflict, sp_version) = rx.await?;
 
         Ok(RecordResponse {
             conflict,
@@ -190,6 +218,35 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         Ok(ReadIndexResponse {
             term: self.curp.term(),
         })
+    }
+
+    /// Handle record task
+    async fn handle_record_task(curp: Arc<RawCurp<C, RC>>, rx: flume::Receiver<ToRecord<C>>) {
+        /// Max number of propose in a batch
+        const MAX_BATCH_SIZE: usize = 1024;
+
+        loop {
+            let Ok(first) = rx.recv_async().await else {
+                info!("handle propose task exit");
+                break;
+            };
+            let mut addition: Vec<_> = std::iter::repeat_with(|| rx.try_recv())
+                .take(MAX_BATCH_SIZE)
+                .flatten()
+                .collect();
+            addition.push(first);
+
+            let (entries, txs): (Vec<_>, Vec<_>) =
+                addition.into_iter().map(ToRecord::into_parts).unzip();
+            let (conflicts, version) = curp.follower_record(entries);
+            for (tx, x) in txs
+                .into_iter()
+                .zip(conflicts.into_iter().zip(iter::repeat(version)))
+            {
+                // The task could be canceled, so we ignore the result
+                let _ignore = tx.send(x);
+            }
+        }
     }
 
     /// Handle propose task
@@ -718,6 +775,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             .map_err(|e| CurpError::internal(format!("get applied index error, {e}")))?;
         let (as_tx, as_rx) = flume::unbounded();
         let (propose_tx, propose_rx) = flume::bounded(4096);
+        let (record_tx, record_rx) = flume::bounded(4096);
         // create curp state machine
         let (voted_for, entries, sp_version, sp_entries) = storage.recover()?;
         let mut sp = SpeculativePool::new(sps, sp_version);
@@ -756,6 +814,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             Arc::clone(&curp),
             Arc::clone(&cmd_executor),
             propose_rx,
+            record_rx,
             as_rx,
         );
 
@@ -771,6 +830,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             cmd_executor,
             as_tx,
             propose_tx,
+            record_tx,
         })
     }
 
@@ -779,6 +839,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         curp: Arc<RawCurp<C, RC>>,
         cmd_executor: Arc<CE>,
         propose_rx: flume::Receiver<Propose<C>>,
+        record_rx: flume::Receiver<ToRecord<C>>,
         as_rx: flume::Receiver<TaskType<C>>,
     ) {
         let task_manager = curp.task_manager();
@@ -791,6 +852,10 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         task_manager.spawn(TaskName::HandlePropose, |_n| {
             Self::handle_propose_task(Arc::clone(&cmd_executor), Arc::clone(&curp), propose_rx)
         });
+        task_manager.spawn(TaskName::HandleRecord, |_n| {
+            Self::handle_record_task(Arc::clone(&curp), record_rx)
+        });
+
         let (tx, rx) = flume::bounded(0x1000);
         task_manager.spawn(TaskName::AfterSync, |_n| {
             Self::after_sync_task(curp, cmd_executor, as_rx, tx)
