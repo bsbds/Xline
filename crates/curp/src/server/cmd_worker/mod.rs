@@ -147,6 +147,7 @@ fn after_sync_others<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     others: Vec<AfterSyncEntry<C>>,
     ce: &CE,
     curp: &RawCurp<C, RC>,
+    remove_tx: &flume::Sender<Vec<ProposeId>>,
 ) {
     let id = curp.id();
     let cb = curp.cmd_board();
@@ -167,8 +168,15 @@ fn after_sync_others<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
             (EntryData::Empty, _) => curp.set_no_op_applied(),
             (EntryData::Member(_), _) => {}
             (EntryData::SpecPoolReplication(r), _) => {
-                if let Err(err) = curp.gc_spec_pool(r.ids(), r.version()) {
-                    error!("failed to gc spec pool: {err:?}");
+                match curp.gc_spec_pool(r.ids(), r.version()) {
+                    Ok(removed) => {
+                        if let Err(err) = remove_tx.send(removed) {
+                            error!("failed to send to remove worker: {err}");
+                        }
+                    }
+                    Err(err) => {
+                        error!("failed to gc spec pool: {err:?}");
+                    }
                 }
             }
 
@@ -192,7 +200,7 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
         .into_iter()
         .partition(|(entry, _)| matches!(entry.entry_data, EntryData::Command(_)));
     after_sync_cmds(&cmd_entries, ce, curp, remove_tx);
-    after_sync_others(others, ce, curp);
+    after_sync_others(others, ce, curp, remove_tx);
 }
 
 /// Cmd worker reset handler

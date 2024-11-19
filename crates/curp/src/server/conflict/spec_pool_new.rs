@@ -87,11 +87,19 @@ impl<C> SpeculativePool<C> {
     /// Performs garbage collection on the spec pool with given entries from the leader
     ///
     /// Removes entries from the pool that are not present in the provided `leader_entries`
-    pub(crate) fn gc(&mut self, leader_entry_ids: &HashSet<ProposeId>, version: u64) {
+    ///
+    /// # Returns
+    ///
+    /// Returns the ids of removed entries
+    pub(crate) fn gc(
+        &mut self,
+        leader_entry_ids: &HashSet<ProposeId>,
+        version: u64,
+    ) -> Vec<ProposeId> {
         debug_assert!(version >= self.version, "invalid version: {version}");
         if version == self.version {
             warn!("gc receives current version, the cluster might gc too frequently, ignoring");
-            return;
+            return vec![];
         }
         self.version = version;
         let to_remove: Vec<_> = self
@@ -100,9 +108,11 @@ impl<C> SpeculativePool<C> {
             .filter(|id| !leader_entry_ids.contains(id))
             .copied()
             .collect();
-        for id in to_remove {
-            self.remove_by_id(&id);
+        for id in &to_remove {
+            self.remove_by_id(id);
         }
+
+        to_remove
     }
 
     /// Returns the current version

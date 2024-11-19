@@ -1711,16 +1711,18 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     }
 
     /// Garbage collect the spec pool
+    ///
+    /// # Returns
+    ///
+    /// Returns the ids of removed entries
     pub(crate) fn gc_spec_pool(
         &self,
         ids: &HashSet<ProposeId>,
         version: u64,
-    ) -> Result<(), CurpError> {
+    ) -> Result<Vec<ProposeId>, CurpError> {
         let mut sp_l = self.ctx.spec_pool.lock();
-        sp_l.gc(ids, version);
-        self.ctx
-            .curp_storage
-            .put_sp_version(version)
-            .map_err(Into::into)
+        let removed = sp_l.gc(ids, version);
+        self.ctx.curp_storage.put_sp_version(version)?;
+        Ok(removed)
     }
 }
