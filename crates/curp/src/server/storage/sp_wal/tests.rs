@@ -4,7 +4,7 @@ use curp_test_utils::test_cmd::TestCommand;
 
 use crate::rpc::{PoolEntry, ProposeId};
 
-use super::{config::WALConfig, PoolWALOps, SpeculativePoolWAL};
+use super::{config::WALConfig, Inner, PoolWALOps};
 
 #[test]
 fn wal_insert_should_work() {
@@ -142,14 +142,11 @@ fn wal_gc_is_ok() {
     let _wal = init_wal(&tmp_dir, &entries[num..]);
 }
 
-fn init_wal(
-    dir: impl AsRef<Path>,
-    expect: &[PoolEntry<TestCommand>],
-) -> SpeculativePoolWAL<TestCommand> {
+fn init_wal(dir: impl AsRef<Path>, expect: &[PoolEntry<TestCommand>]) -> Inner<TestCommand> {
     let config = WALConfig::new(dir)
         .with_max_insert_segment_size(512)
         .with_max_remove_segment_size(32);
-    let wal = SpeculativePoolWAL::<TestCommand>::new(config).unwrap();
+    let wal = Inner::<TestCommand>::new(config).unwrap();
     let mut recovered = wal.recover().unwrap();
     recovered.sort_unstable();
     let mut expect_sorted = expect.to_vec();

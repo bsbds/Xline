@@ -5,10 +5,20 @@ use parking_lot::Mutex;
 use utils::config::EngineConfig;
 
 use super::{
+    sp_wal::{
+        config::{WALConfig as SpWALConfig, WALConfigType as SpWALConfigType},
+        PoolWALOps, SpeculativePoolWAL,
+    },
     wal::{codec::DataFrame, config::WALConfig, WALStorage, WALStorageOps},
     RecoverData, StorageApi, StorageError,
 };
-use crate::{cmd::Command, log_entry::LogEntry, member::MembershipState, members::ServerId};
+use crate::{
+    cmd::Command,
+    log_entry::LogEntry,
+    member::MembershipState,
+    members::ServerId,
+    rpc::{PoolEntry, ProposeId},
+};
 
 /// Key for persisted state
 const VOTE_FOR: &[u8] = b"VoteFor";
@@ -25,6 +35,9 @@ const ROCKSDB_SUB_DIR: &str = "rocksdb";
 /// The sub dir for WAL files
 const WAL_SUB_DIR: &str = "wal";
 
+/// The sub dir for Speculative Pool WAL files
+const SP_WAL_SUB_DIR: &str = "sp_wal";
+
 /// Keys for membership persistent
 const MEMBERSHIP: &[u8] = b"membership";
 
@@ -33,6 +46,8 @@ const MEMBERSHIP: &[u8] = b"membership";
 pub struct DB<C> {
     /// The WAL storage
     wal: Mutex<WALStorage<C>>,
+    /// The WAL of speculative pool
+    sp_wal: SpeculativePoolWAL<C>,
     /// DB handle
     db: Engine,
 }
@@ -82,7 +97,9 @@ impl<C: Command> StorageApi for DB<C> {
             })
             // default to 0
             .map_or(0, u64::from_le_bytes);
-        Ok((voted_for, entries, sp_version))
+        let sp_entries = self.sp_wal.recover()?;
+
+        Ok((voted_for, entries, sp_version, sp_entries))
     }
 
     #[inline]
@@ -111,9 +128,24 @@ impl<C: Command> StorageApi for DB<C> {
         let op = WriteOperation::new_put(CF, SP_VER.to_vec(), data.to_vec());
         self.db.write_multi(vec![op], true).map_err(Into::into)
     }
+
+    #[inline]
+    fn insert_spec_pool_entries(&self, entries: Vec<PoolEntry<C>>) -> Result<(), StorageError> {
+        self.sp_wal.insert(entries).map_err(Into::into)
+    }
+
+    #[inline]
+    fn remove_spec_pool_entries(&self, propose_ids: Vec<ProposeId>) -> Result<(), StorageError> {
+        self.sp_wal.remove(propose_ids).map_err(Into::into)
+    }
+
+    #[inline]
+    fn gc_spec_pool(&self, check_fn: Box<dyn Fn(&ProposeId) -> bool>) -> Result<(), StorageError> {
+        self.sp_wal.gc(check_fn).map_err(Into::into)
+    }
 }
 
-impl<C> DB<C> {
+impl<C: Command> DB<C> {
     /// Create a new CURP `DB`
     ///
     /// WARN: The `recover` method must be called before any call to `put_log_entries`.
@@ -122,16 +154,23 @@ impl<C> DB<C> {
     /// Will return `StorageError` if failed to open the storage
     #[inline]
     pub fn open(config: &EngineConfig) -> Result<Self, StorageError> {
-        let (engine_type, wal_config) = match *config {
-            EngineConfig::Memory => (EngineType::Memory, WALConfig::Memory),
+        let (engine_type, wal_config, sp_wal_config) = match *config {
+            EngineConfig::Memory => (
+                EngineType::Memory,
+                WALConfig::Memory,
+                SpWALConfigType::Disabled,
+            ),
             EngineConfig::RocksDB(ref path) => {
                 let mut rocksdb_dir = path.clone();
                 rocksdb_dir.push(ROCKSDB_SUB_DIR);
                 let mut wal_dir = path.clone();
                 wal_dir.push(WAL_SUB_DIR);
+                let mut sp_wal_dir = path.clone();
+                sp_wal_dir.push(SP_WAL_SUB_DIR);
                 (
                     EngineType::Rocks(rocksdb_dir.clone()),
                     WALConfig::new(wal_dir),
+                    SpWALConfigType::Enabled(SpWALConfig::new(sp_wal_dir)),
                 )
             }
             _ => unreachable!("Not supported storage type"),
@@ -139,9 +178,11 @@ impl<C> DB<C> {
 
         let db = Engine::new(engine_type, &[CF, MEMBERS_CF])?;
         let wal = WALStorage::new(wal_config)?;
+        let sp_wal = SpeculativePoolWAL::new(sp_wal_config)?;
 
         Ok(Self {
             wal: Mutex::new(wal),
+            sp_wal,
             db,
         })
     }
@@ -172,7 +213,7 @@ mod tests {
         let storage_cfg = EngineConfig::RocksDB(db_dir.clone());
         {
             let s = DB::<TestCommand>::open(&storage_cfg)?;
-            let (voted_for, entries, _) = s.recover()?;
+            let (voted_for, entries, _, _) = s.recover()?;
             assert!(voted_for.is_none());
             assert!(entries.is_empty());
             s.flush_voted_for(1, 222)?;
@@ -188,7 +229,7 @@ mod tests {
 
         {
             let s = DB::<TestCommand>::open(&storage_cfg)?;
-            let (voted_for, entries, _) = s.recover()?;
+            let (voted_for, entries, _, _) = s.recover()?;
             assert_eq!(voted_for, Some((3, 111)));
             assert_eq!(entries[0].index, 1);
             assert_eq!(entries[1].index, 2);

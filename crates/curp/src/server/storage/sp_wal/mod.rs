@@ -13,7 +13,7 @@ use crate::rpc::{PoolEntry, ProposeId};
 
 use self::{
     codec::DataFrame,
-    config::WALConfig,
+    config::{WALConfig, WALConfigType},
     error::WALError,
     segment::{Segment, SegmentAttr, ToDrop},
 };
@@ -25,7 +25,7 @@ mod codec;
 mod error;
 
 /// WAL config
-mod config;
+pub(super) mod config;
 
 /// WAL segment
 mod segment;
@@ -59,8 +59,62 @@ pub(crate) trait PoolWALOps<C: Command> {
         F: Fn(&ProposeId) -> bool;
 }
 
+#[allow(clippy::large_enum_variant)] // only single instance
+/// The WAL for Speculative Pool
+#[derive(Debug)]
+pub(crate) enum SpeculativePoolWAL<C> {
+    /// WAL Enabled
+    Enabled(Inner<C>),
+    /// WAL Disabled
+    Disabled,
+}
+
+impl<C: Command> SpeculativePoolWAL<C> {
+    /// Creates a new `SpeculativePoolWAL`
+    pub(crate) fn new(config: WALConfigType) -> io::Result<Self> {
+        match config {
+            WALConfigType::Disabled => Ok(Self::Disabled),
+            WALConfigType::Enabled(config) => Ok(Self::Enabled(Inner::new(config)?)),
+        }
+    }
+}
+
+impl<C: Command> PoolWALOps<C> for SpeculativePoolWAL<C> {
+    fn insert(&self, entries: Vec<PoolEntry<C>>) -> io::Result<()> {
+        match *self {
+            Self::Enabled(ref inner) => inner.insert(entries),
+            Self::Disabled => Ok(()),
+        }
+    }
+
+    fn remove(&self, propose_ids: Vec<ProposeId>) -> io::Result<()> {
+        match *self {
+            Self::Enabled(ref inner) => inner.remove(propose_ids),
+            Self::Disabled => Ok(()),
+        }
+    }
+
+    fn recover(&self) -> io::Result<Vec<PoolEntry<C>>> {
+        match *self {
+            Self::Enabled(ref inner) => inner.recover(),
+            Self::Disabled => Ok(vec![]),
+        }
+    }
+
+    fn gc<F>(&self, check_fn: F) -> io::Result<()>
+    where
+        F: Fn(&ProposeId) -> bool,
+    {
+        match *self {
+            Self::Enabled(ref inner) => inner.gc(check_fn),
+            Self::Disabled => Ok(()),
+        }
+    }
+}
+
 /// WAL of speculative pool
-struct SpeculativePoolWAL<C> {
+#[derive(Debug)]
+pub(crate) struct Inner<C> {
     /// WAL config
     config: WALConfig,
     /// Insert WAL
@@ -73,11 +127,10 @@ struct SpeculativePoolWAL<C> {
     drop_task_handle: Option<std::thread::JoinHandle<()>>,
 }
 
-impl<C> SpeculativePoolWAL<C>
+impl<C> Inner<C>
 where
     C: Command,
 {
-    #[allow(unused)]
     /// Creates a new `SpeculativePoolWAL`
     fn new(config: WALConfig) -> io::Result<Self> {
         if !config.insert_dir.try_exists()? {
@@ -133,7 +186,7 @@ where
 }
 
 #[allow(clippy::unwrap_used, clippy::unwrap_in_result)] // safe
-impl<C: Command> PoolWALOps<C> for SpeculativePoolWAL<C> {
+impl<C: Command> PoolWALOps<C> for Inner<C> {
     fn insert(&self, entries: Vec<PoolEntry<C>>) -> io::Result<()> {
         self.insert.lock().insert(entries)
     }
@@ -189,7 +242,7 @@ impl<C: Command> PoolWALOps<C> for SpeculativePoolWAL<C> {
     }
 }
 
-impl<C> Drop for SpeculativePoolWAL<C> {
+impl<C> Drop for Inner<C> {
     #[allow(clippy::unwrap_used)]
     fn drop(&mut self) {
         // The task will exit after `drop_tx` is dropped
@@ -201,7 +254,7 @@ impl<C> Drop for SpeculativePoolWAL<C> {
 }
 
 #[cfg(test)]
-impl<C> SpeculativePoolWAL<C>
+impl<C> Inner<C>
 where
     C: Command,
 {
@@ -218,6 +271,7 @@ where
 
 #[allow(clippy::upper_case_acronyms)]
 /// The WAL type
+#[derive(Debug)]
 struct WAL<T, C> {
     /// WAL segments
     segments: Vec<Segment<T, WALCodec<C>>>,

@@ -6,6 +6,15 @@ const DEFAULT_INSERT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
 /// Size in bytes per segment, default is 1MiB
 const DEFAULT_REMOVE_SEGMENT_SIZE: u64 = 1024 * 1024;
 
+/// WAL config type
+#[derive(Debug, Clone)]
+pub(crate) enum WALConfigType {
+    /// Disabled
+    Disabled,
+    /// Enabled
+    Enabled(WALConfig),
+}
+
 /// The config for WAL
 #[derive(Debug, Clone)]
 pub(crate) struct WALConfig {
@@ -23,8 +32,8 @@ pub(crate) struct WALConfig {
     pub(super) max_remove_segment_size: u64,
 }
 
+#[allow(unused)] // TODO: provide customize ability
 impl WALConfig {
-    #[allow(unused)]
     /// Creates a new `WALConfig`
     pub(crate) fn new(dir: impl AsRef<Path>) -> Self {
         let mut insert_dir: PathBuf = dir.as_ref().into();

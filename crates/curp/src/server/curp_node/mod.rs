@@ -65,6 +65,9 @@ mod member_impl;
 /// Log replication implementation
 mod replication;
 
+/// Speculative Pool WAL background task implementation
+mod wal;
+
 /// After sync entry, composed of a log entry and response sender
 pub(crate) type AfterSyncEntry<C> = (Arc<LogEntry<C>>, Option<Arc<ResponseSender>>);
 
@@ -649,19 +652,25 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         curp: Arc<RawCurp<C, RC>>,
         cmd_executor: Arc<CE>,
         as_rx: flume::Receiver<TaskType<C>>,
+        remove_tx: flume::Sender<Vec<ProposeId>>,
     ) {
         while let Ok(task) = as_rx.recv_async().await {
-            Self::handle_as_task(&curp, &cmd_executor, task).await;
+            Self::handle_as_task(&curp, &cmd_executor, task, &remove_tx).await;
         }
         debug!("after sync task exits");
     }
 
     /// Handles a after sync task
-    async fn handle_as_task(curp: &RawCurp<C, RC>, cmd_executor: &CE, task: TaskType<C>) {
+    async fn handle_as_task(
+        curp: &RawCurp<C, RC>,
+        cmd_executor: &CE,
+        task: TaskType<C>,
+        remove_tx: &flume::Sender<Vec<ProposeId>>,
+    ) {
         debug!("after sync: {task:?}");
         match task {
             TaskType::Entries(entries) => {
-                after_sync(entries, cmd_executor, curp).await;
+                after_sync(entries, cmd_executor, curp, remove_tx).await;
             }
             TaskType::Reset(snap, tx) => {
                 let _ignore = worker_reset(snap, tx, cmd_executor, curp).await;
@@ -710,8 +719,12 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let (as_tx, as_rx) = flume::unbounded();
         let (propose_tx, propose_rx) = flume::bounded(4096);
         // create curp state machine
-        let (voted_for, entries, sp_version) = storage.recover()?;
-        let sp = Arc::new(Mutex::new(SpeculativePool::new(sps, sp_version)));
+        let (voted_for, entries, sp_version, sp_entries) = storage.recover()?;
+        let mut sp = SpeculativePool::new(sps, sp_version);
+        for entry in sp_entries {
+            debug_assert!(sp.insert(entry).is_none(), "conflict in recovered entries");
+        }
+        let sp = Arc::new(Mutex::new(sp));
         let ucp = Arc::new(Mutex::new(UncommittedPool::new(ucps)));
 
         let curp = Arc::new(
@@ -769,6 +782,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         as_rx: flume::Receiver<TaskType<C>>,
     ) {
         let task_manager = curp.task_manager();
+        let storage = curp.storage();
 
         task_manager.spawn(TaskName::Election, |n| {
             Self::election_task(Arc::clone(&curp), n)
@@ -777,9 +791,12 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         task_manager.spawn(TaskName::HandlePropose, |_n| {
             Self::handle_propose_task(Arc::clone(&cmd_executor), Arc::clone(&curp), propose_rx)
         });
+        let (tx, rx) = flume::bounded(0x1000);
         task_manager.spawn(TaskName::AfterSync, |_n| {
-            Self::after_sync_task(curp, cmd_executor, as_rx)
+            Self::after_sync_task(curp, cmd_executor, as_rx, tx)
         });
+        // TODO: track the join handle
+        let _handle = std::thread::spawn(|| Self::sp_wal_entry_remove_worker(rx, storage));
     }
 
     /// Candidate or pre candidate broadcasts votes

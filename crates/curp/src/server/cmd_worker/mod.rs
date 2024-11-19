@@ -13,26 +13,34 @@ use crate::{
     log_entry::{EntryData, LogEntry},
     response::ResponseSender,
     role_change::RoleChange,
-    rpc::{PoolEntry, ProposeResponse, SyncedResponse},
+    rpc::{PoolEntry, ProposeId, ProposeResponse, SyncedResponse},
     snapshot::{Snapshot, SnapshotMeta},
 };
 
 /// Removes an entry from sp and ucp
-fn remove_from_sp_ucp<C, RC, E, I>(curp: &RawCurp<C, RC>, entries: I)
-where
+fn remove_from_sp_ucp<C, RC, E, I>(
+    curp: &RawCurp<C, RC>,
+    entries: I,
+    remove_tx: &flume::Sender<Vec<ProposeId>>,
+) where
     C: Command,
     RC: RoleChange,
     E: AsRef<LogEntry<C>>,
     I: IntoIterator<Item = E>,
 {
     let (mut sp, mut ucp) = (curp.spec_pool().lock(), curp.uncommitted_pool().lock());
+    let mut to_remove = Vec::new();
     for entry in entries {
         let entry = entry.as_ref();
+        to_remove.push(entry.propose_id);
         if let EntryData::Command(ref c) = entry.entry_data {
             let pool_entry = PoolEntry::new(entry.propose_id, Arc::clone(c));
             sp.remove(&pool_entry);
             ucp.remove(&pool_entry);
         };
+    }
+    if let Err(err) = remove_tx.send(to_remove) {
+        error!("failed to send to remove worker: {err}");
     }
 }
 
@@ -68,6 +76,7 @@ fn after_sync_cmds<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
     cmd_entries: &[AfterSyncEntry<C>],
     ce: &CE,
     curp: &RawCurp<C, RC>,
+    remove_tx: &flume::Sender<Vec<ProposeId>>,
 ) {
     if cmd_entries.is_empty() {
         return;
@@ -103,7 +112,7 @@ fn after_sync_cmds<C: Command, CE: CommandExecutor<C>, RC: RoleChange>(
         curp.trigger(&entry.propose_id);
         ce.trigger(entry.inflight_id());
     }
-    remove_from_sp_ucp(curp, cmd_entries.iter().map(|(e, _)| e));
+    remove_from_sp_ucp(curp, cmd_entries.iter().map(|(e, _)| e), remove_tx);
 }
 
 /// Send cmd results to clients
@@ -176,12 +185,13 @@ pub(super) async fn after_sync<C: Command, CE: CommandExecutor<C>, RC: RoleChang
     entries: Vec<AfterSyncEntry<C>>,
     ce: &CE,
     curp: &RawCurp<C, RC>,
+    remove_tx: &flume::Sender<Vec<ProposeId>>,
 ) {
     #[allow(clippy::pattern_type_mismatch)] // Can't be fixed
     let (cmd_entries, others): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|(entry, _)| matches!(entry.entry_data, EntryData::Command(_)));
-    after_sync_cmds(&cmd_entries, ce, curp);
+    after_sync_cmds(&cmd_entries, ce, curp, remove_tx);
     after_sync_others(others, ce, curp);
 }
 

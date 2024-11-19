@@ -838,6 +838,6 @@ fn gc_spec_pool_should_update_version_and_persistent() {
     assert_eq!(curp.ctx.spec_pool.lock().version(), 0);
     curp.gc_spec_pool(&HashSet::new(), 2).unwrap();
     assert_eq!(curp.ctx.spec_pool.lock().version(), 2);
-    let (_, _, version) = curp.ctx.curp_storage.recover().unwrap();
+    let (_, _, version, _) = curp.ctx.curp_storage.recover().unwrap();
     assert_eq!(version, 2);
 }

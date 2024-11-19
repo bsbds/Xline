@@ -571,18 +571,31 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         &self,
         entries: impl Iterator<Item = PoolEntry<C>>,
     ) -> (Vec<bool>, u64) {
+        let entries: Vec<_> = entries.collect();
         let mut sp_l = self.ctx.spec_pool.lock();
         let mut ucp_l = self.ctx.uncommitted_pool.lock();
         let mut conflicts = Vec::new();
-        for entry in entries {
+        for entry in entries.clone() {
             let mut conflict = sp_l.insert(entry.clone()).is_some();
             conflict |= ucp_l.insert(&entry);
             conflicts.push(conflict);
         }
+
         metrics::get().proposals_failed.add(
             conflicts.iter().filter(|c| **c).count().numeric_cast(),
             &[KeyValue::new("reason", "leader key conflict")],
         );
+        if self
+            .ctx
+            .curp_storage
+            .insert_spec_pool_entries(entries)
+            .is_err()
+        {
+            error!("failed to write to spec pool wal.");
+            // fill with conflict if persistent failed
+            conflicts.fill(true);
+        }
+
         (conflicts, sp_l.version())
     }
 
@@ -1296,6 +1309,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     /// Get a cloned task manager
     pub(super) fn task_manager(&self) -> Arc<TaskManager> {
         Arc::clone(&self.task_manager)
+    }
+
+    /// Get a cloned storage
+    pub(super) fn storage(&self) -> Arc<DB<C>> {
+        Arc::clone(&self.ctx.curp_storage)
     }
 
     /// Get rpc connect connects by ids

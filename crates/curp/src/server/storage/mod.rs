@@ -1,7 +1,13 @@
 use engine::EngineError;
 use thiserror::Error;
 
-use crate::{cmd::Command, log_entry::LogEntry, member::MembershipState, members::ServerId};
+use crate::{
+    cmd::Command,
+    log_entry::LogEntry,
+    member::MembershipState,
+    members::ServerId,
+    rpc::{PoolEntry, ProposeId},
+};
 
 /// Storage layer error
 #[derive(Error, Debug)]
@@ -38,7 +44,12 @@ pub(crate) type VoteInfo = (u64, ServerId);
 /// Speculative pool version
 pub(crate) type SpVersion = u64;
 /// Recovered data
-pub(crate) type RecoverData<C> = (Option<VoteInfo>, Vec<LogEntry<C>>, SpVersion);
+pub(crate) type RecoverData<C> = (
+    Option<VoteInfo>,
+    Vec<LogEntry<C>>,
+    SpVersion,
+    Vec<PoolEntry<C>>,
+);
 
 /// Curp storage api
 #[allow(clippy::module_name_repetitions)]
@@ -86,6 +97,27 @@ pub trait StorageApi: Send + Sync {
     /// # Errors
     /// Return `StorageError` when it failed to put to the underlying database
     fn put_sp_version(&self, version: u64) -> Result<(), StorageError>;
+
+    /// Inserts an entry to speculative pool WAL
+    ///
+    /// # Errors
+    /// Return `StorageError` when it failed to put to the underlying database
+    fn insert_spec_pool_entries(
+        &self,
+        entries: Vec<PoolEntry<Self::Command>>,
+    ) -> Result<(), StorageError>;
+
+    /// Removes an entry from speculative pool WAL
+    ///
+    /// # Errors
+    /// Return `StorageError` when it failed to put to the underlying database
+    fn remove_spec_pool_entries(&self, propose_ids: Vec<ProposeId>) -> Result<(), StorageError>;
+
+    /// Garbage collects the speculative pool WAL
+    ///
+    /// # Errors
+    /// Return `StorageError` when it failed to put to the underlying database
+    fn gc_spec_pool(&self, check_fn: Box<dyn Fn(&ProposeId) -> bool>) -> Result<(), StorageError>;
 }
 
 /// CURP `DB` storage implementation

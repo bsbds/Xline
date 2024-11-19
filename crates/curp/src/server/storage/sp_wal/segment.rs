@@ -42,6 +42,7 @@ pub(super) trait SegmentAttr {
 /// WAL segment
 ///
 /// The underlying file of this segment will be removed on drop.
+#[derive(Debug)]
 pub(super) struct Segment<T, Codec> {
     /// The opened file of this segment
     file: File,
@@ -301,6 +302,7 @@ impl<T, Codec> Ord for Segment<T, Codec> {
 }
 
 /// Insert type
+#[derive(Debug)]
 pub(super) struct Insert;
 
 impl SegmentAttr for Insert {
@@ -314,6 +316,7 @@ impl SegmentAttr for Insert {
 }
 
 /// Remove type
+#[derive(Debug)]
 pub(super) struct Remove;
 
 impl SegmentAttr for Remove {
