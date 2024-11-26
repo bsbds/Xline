@@ -3,7 +3,10 @@
 use std::{
     collections::BTreeSet,
     ops::SubAssign,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -226,12 +229,18 @@ pub(super) struct Retry<Api> {
     fetch: Fetch,
     /// The client id
     client_id: u64,
+    /// The sequence number of commands
+    seq_num: AtomicU64,
 }
 
 impl<Api> Retry<Api> {
     /// Gets the context required for unary requests
+    ///
+    /// Calling this method will increments `seq_num`.
     async fn get_context(&self) -> Result<Context, CurpError> {
-        let propose_id = ProposeId(self.client_id, rand::random());
+        // WARN: When generating a `ProposeId`, ensure seq_num does not exceed 2^56, as larger values
+        // cannot be properly encoded in the WAL.
+        let propose_id = ProposeId(self.client_id, self.seq_num.fetch_add(1, Ordering::Relaxed));
         let cluster_state = self.cluster_state.ready_or_fetch().await?;
         // TODO: gen propose id
         Ok(Context::new(propose_id, cluster_state))
@@ -288,6 +297,7 @@ where
             cluster_state,
             fetch,
             client_id,
+            seq_num: AtomicU64::new(0),
         }
     }
 
