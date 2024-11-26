@@ -21,7 +21,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         curp_storage: Arc<DB<C>>,
     ) {
         /// The threshold for removing entries from the WAL.
-        const REMOVE_THRESH: usize = 0x1000;
+        const REMOVE_THRESH: usize = 0x10000;
         let mut to_remove = Vec::new();
         while let Ok(ids) = rx.recv() {
             to_remove.extend(ids);

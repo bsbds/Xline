@@ -41,7 +41,7 @@ use super::{
     lease_server::LeaseServer,
     lock_server::LockServer,
     maintenance::MaintenanceServer,
-    watch_server::{WatchServer, CHANNEL_SIZE},
+    watch_server::WatchServer,
 };
 use crate::{
     conflict::{XlineSpeculativePools, XlineUncommittedPools},
@@ -172,7 +172,7 @@ impl XlineServer {
     )> {
         let (compact_task_tx, compact_task_rx) = flume::bounded(COMPACT_CHANNEL_SIZE);
         let index = Arc::new(Index::new());
-        let (kv_update_tx, kv_update_rx) = flume::bounded(CHANNEL_SIZE);
+        let (kv_update_tx, kv_update_rx) = flume::unbounded();
         let kv_store_inner = Arc::new(KvStoreInner::new(Arc::clone(&index), Arc::clone(&db)));
         let kv_storage = Arc::new(KvStore::new(
             Arc::clone(&kv_store_inner),

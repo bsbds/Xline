@@ -856,7 +856,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             Self::handle_record_task(Arc::clone(&curp), record_rx)
         });
 
-        let (tx, rx) = flume::bounded(0x1000);
+        let (tx, rx) = flume::unbounded();
         task_manager.spawn(TaskName::AfterSync, |_n| {
             Self::after_sync_task(curp, cmd_executor, as_rx, tx)
         });
