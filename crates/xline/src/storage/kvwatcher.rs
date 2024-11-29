@@ -490,43 +490,41 @@ impl KvWatcher {
 
     /// Handle KV store updates
     fn handle_kv_updates(&self, (revision, all_events): (i64, Vec<Event>)) {
-        self.watcher_map.map_write(|mut watcher_map_w| {
-            let mut watcher_events: HashMap<WatchId, Vec<Event>> = HashMap::new();
-            for event in all_events {
-                let watch_ids = watcher_map_w
-                    .index
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        k.contains_key(
-                            &event
-                                .kv
-                                .as_ref()
-                                .unwrap_or_else(|| panic!("Receive Event with empty kv"))
-                                .key,
-                        )
-                        .then_some(v)
-                    })
-                    .flatten()
-                    .copied()
-                    .collect_vec();
-                for watch_id in watch_ids {
-                    watcher_events
-                        .entry(watch_id)
-                        .or_default()
-                        .push(event.clone());
-                }
+        let mut watcher_map_w = self.watcher_map.write();
+        let mut watcher_events: HashMap<WatchId, Vec<Event>> = HashMap::new();
+        for event in all_events {
+            let watch_ids = watcher_map_w
+                .index
+                .iter()
+                .filter_map(|(k, v)| {
+                    k.contains_key(
+                        &event
+                            .kv
+                            .as_ref()
+                            .unwrap_or_else(|| panic!("Receive Event with empty kv"))
+                            .key,
+                    )
+                    .then_some(v)
+                })
+                .flatten()
+                .copied()
+                .collect_vec();
+            for watch_id in watch_ids {
+                watcher_events
+                    .entry(watch_id)
+                    .or_default()
+                    .push(event.clone());
             }
-            for (watch_id, events) in watcher_events {
-                let watcher = watcher_map_w
-                    .watchers
-                    .get_mut(&watch_id)
-                    .unwrap_or_else(|| panic!("watcher index and watchers doesn't match"));
-                if let Err(TrySendError::Full(watch_event)) = watcher.notify((revision, events)) {
-                    watcher_map_w
-                        .move_to_victim(watch_id, (watch_event.revision, watch_event.events));
-                }
+        }
+        for (watch_id, events) in watcher_events {
+            let watcher = watcher_map_w
+                .watchers
+                .get_mut(&watch_id)
+                .unwrap_or_else(|| panic!("watcher index and watchers doesn't match"));
+            if let Err(TrySendError::Full(watch_event)) = watcher.notify((revision, events)) {
+                watcher_map_w.move_to_victim(watch_id, (watch_event.revision, watch_event.events));
             }
-        });
+        }
     }
 }
 
