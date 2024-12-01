@@ -643,18 +643,18 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         Entry: Into<EntryData<C>>,
         Logs: IntoIterator<Item = (ProposeId, Entry)>,
     {
+        let term = self.st.read().term;
         let mut log_w = self.log.write();
-        let st_r = self.st.read();
         let entries: Vec<_> = entries
             .into_iter()
-            .map(|(id, entry)| log_w.push(st_r.term, id, entry))
+            .map(|(id, entry)| log_w.push(term, id, entry))
             .collect();
         let entries_ref: Vec<_> = entries.iter().map(Arc::as_ref).collect();
         self.persistent_log_entries(&entries_ref);
         self.notify_sync_events(&log_w);
 
         for e in &entries {
-            self.update_index_single_node(&mut log_w, e.index, st_r.term);
+            self.update_index_single_node(&mut log_w, e.index, term);
         }
 
         entries
