@@ -103,6 +103,10 @@ mod monitor;
 /// Log replication implementation
 pub(crate) mod replication;
 
+/// benchmark utils for rawcurp
+#[doc(hidden)]
+pub mod bench;
+
 #[cfg(ignore)]
 /// Dedup implementation
 mod dedup;

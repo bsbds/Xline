@@ -55,6 +55,7 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 anyhow = "1.0.83"
+criterion = "0.5.1"
 curp-test-utils = { path = "../curp-test-utils" }
 itertools = "0.13"
 mockall = "0.12.1"
@@ -70,3 +71,11 @@ tonic-build = { version = "0.5.0", package = "madsim-tonic-build" }
 
 [features]
 client-metrics = []
+
+[[bench]]
+name = "bench_handle_propose"
+harness = false
+
+[[bench]]
+name = "bench_file_fsync"
+harness = false

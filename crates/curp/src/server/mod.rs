@@ -78,6 +78,8 @@ pub use storage::db::DB;
 pub use storage::StorageApi;
 pub use storage::StorageError;
 
+pub use raw_curp::bench;
+
 /// The Rpc Server to handle rpc requests
 ///
 /// This Wrapper is introduced due to the `MadSim` rpc lib
