@@ -486,8 +486,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         #[allow(clippy::pattern_type_mismatch)] // can't fix
         let resp = match result {
             Ok((term, truncate_at, to_persist)) => {
-                self.storage
-                    .put_log_entries(&to_persist.iter().map(Arc::as_ref).collect::<Vec<_>>())?;
+                self.storage.put_log_entries(to_persist)?;
                 self.update_membership(truncate_at, membership_entries, Some(leader_commit))?;
                 AppendEntriesResponse::new_accept(term)
             }

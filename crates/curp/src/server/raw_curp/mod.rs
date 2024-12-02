@@ -598,18 +598,52 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             conflicts.iter().filter(|c| **c).count().numeric_cast(),
             &[KeyValue::new("reason", "leader key conflict")],
         );
-        if self
-            .ctx
-            .curp_storage
-            .insert_spec_pool_entries(entries)
-            .is_err()
-        {
-            error!("failed to write to spec pool wal.");
-            // fill with conflict if persistent failed
-            conflicts.fill(true);
-        }
 
         (conflicts, sp_l.version())
+    }
+
+    /// Persistent the entries during propose
+    pub(super) fn persistent_entries(storage: Arc<DB<C>>, entries: Vec<Arc<LogEntry<C>>>) {
+        let storage_c = Arc::clone(&storage);
+        let pool_entries: Vec<_> = entries
+            .iter()
+            .filter_map(|e| {
+                if let EntryData::Command(ref cmd) = e.entry_data {
+                    Some(PoolEntry::new(e.propose_id, Arc::clone(cmd)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let _ignore = rayon::join(
+            || Self::persistent_log_entries(storage, entries),
+            || Self::persistent_sp_entries(storage_c, pool_entries),
+        );
+    }
+
+    #[allow(clippy::needless_pass_by_value)] // need to move to another thread
+    #[allow(clippy::panic)]
+    /// Append entries to spec pool WAL
+    pub(super) fn persistent_sp_entries(storage: Arc<DB<C>>, entries: Vec<PoolEntry<C>>) {
+        let _ignore = storage.insert_spec_pool_entries(entries).map_err(|err| {
+            // We panic when the log persistence fails because it likely indicates an
+            // unrecoverable error. Our WAL implementation does not support rollback
+            // on failure, as a file write syscall is not guaranteed to be atomic.
+            panic!("spec pool persistent failed: {err}");
+        });
+    }
+
+    #[allow(clippy::needless_pass_by_value)] // need to move to another thread
+    #[allow(clippy::panic)]
+    /// Persistent log entries
+    pub(crate) fn persistent_log_entries(storage: Arc<DB<C>>, entries: Vec<Arc<LogEntry<C>>>) {
+        let _ignore = storage.put_log_entries(entries).map_err(|err| {
+            // We panic when the log persistence fails because it likely indicates an
+            // unrecoverable error. Our WAL implementation does not support rollback
+            // on failure, as a file write syscall is not guaranteed to be atomic.
+            panic!("log persistent failed: {err}");
+        });
     }
 
     /// Push one log, called by the leader
@@ -649,8 +683,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             .into_iter()
             .map(|(id, entry)| log_w.push(term, id, entry))
             .collect();
-        let entries_ref: Vec<_> = entries.iter().map(Arc::as_ref).collect();
-        self.persistent_log_entries(&entries_ref);
+        Self::persistent_entries(Arc::clone(&self.ctx.curp_storage), entries.clone());
         self.notify_sync_events(&log_w);
 
         for e in &entries {
@@ -671,18 +704,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 tx_map.insert(index, tx).is_none(),
                 "Should not insert resp_tx twice"
             );
-        }
-    }
-
-    /// Persistent log entries
-    #[allow(clippy::panic)]
-    #[allow(dropping_references)]
-    pub(crate) fn persistent_log_entries(&self, entries: &[&LogEntry<C>]) {
-        // We panic when the log persistence fails because it likely indicates an
-        // unrecoverable error. Our WAL implementation does not support rollback
-        // on failure, as a file write syscall is not guaranteed to be atomic.
-        if let Err(e) = self.ctx.curp_storage.put_log_entries(entries) {
-            panic!("log persistent failed: {e}");
         }
     }
 
@@ -1017,7 +1038,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         // TODO: Generate client id in the same way as client
         let propose_id = ProposeId(rand::random(), 0);
         let entry = log_w.push(st_w.term, propose_id, EntryData::Empty);
-        self.persistent_log_entries(&[&entry]);
+        Self::persistent_log_entries(Arc::clone(&self.ctx.curp_storage), vec![entry]);
         self.recover_from_spec_pools(&st_w, &mut log_w, spec_pools);
         self.recover_ucp_from_log(&log_w);
         let last_log_index = log_w.last_log_index();
@@ -1628,7 +1649,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             entries.push(entry);
         }
 
-        self.persistent_log_entries(&entries.iter().map(Arc::as_ref).collect::<Vec<_>>());
+        Self::persistent_log_entries(Arc::clone(&self.ctx.curp_storage), entries);
     }
 
     /// Recover the ucp from uncommitted log entries

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use engine::EngineError;
 use thiserror::Error;
 
@@ -67,7 +69,8 @@ pub trait StorageApi: Send + Sync {
     ///
     /// # Errors
     /// Return `StorageError` when it failed to store the log entries to underlying database.
-    fn put_log_entries(&self, entry: &[&LogEntry<Self::Command>]) -> Result<(), StorageError>;
+    fn put_log_entries(&self, entry: Vec<Arc<LogEntry<Self::Command>>>)
+        -> Result<(), StorageError>;
 
     /// Recover from persisted storage
     /// Return `voted_for` and all log entries

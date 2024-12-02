@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::sync::Arc;
 
 use engine::{Engine, EngineType, StorageOps, WriteOperation};
 use parking_lot::Mutex;
@@ -66,13 +66,16 @@ impl<C: Command> StorageApi for DB<C> {
     }
 
     #[inline]
-    fn put_log_entries(&self, entry: &[&LogEntry<Self::Command>]) -> Result<(), StorageError> {
+    fn put_log_entries(
+        &self,
+        entry: Vec<Arc<LogEntry<Self::Command>>>,
+    ) -> Result<(), StorageError> {
         self.wal
             .lock()
             .send_sync(
                 entry
                     .iter()
-                    .map(Deref::deref)
+                    .map(Arc::as_ref)
                     .map(DataFrame::Entry)
                     .collect(),
             )
@@ -221,9 +224,9 @@ mod tests {
             let entry0 = LogEntry::new(1, 3, ProposeId(1, 1), Arc::new(TestCommand::default()));
             let entry1 = LogEntry::new(2, 3, ProposeId(1, 2), Arc::new(TestCommand::default()));
             let entry2 = LogEntry::new(3, 3, ProposeId(1, 3), Arc::new(TestCommand::default()));
-            s.put_log_entries(&[&entry0])?;
-            s.put_log_entries(&[&entry1])?;
-            s.put_log_entries(&[&entry2])?;
+            s.put_log_entries(vec![Arc::new(entry0)])?;
+            s.put_log_entries(vec![Arc::new(entry1)])?;
+            s.put_log_entries(vec![Arc::new(entry2)])?;
             sleep_secs(2).await;
         }
 
