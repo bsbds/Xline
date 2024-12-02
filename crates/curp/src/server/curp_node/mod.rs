@@ -249,8 +249,9 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     /// Handle propose task
-    async fn handle_propose_task(
+    fn handle_propose_task(
         ce: Arc<CE>,
         curp: Arc<RawCurp<C, RC>>,
         rx: flume::Receiver<Propose<C>>,
@@ -260,7 +261,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
 
         let cmd_executor = Self::build_executor(ce, Arc::clone(&curp));
         loop {
-            let Ok(first) = rx.recv_async().await else {
+            let Ok(first) = rx.recv() else {
                 info!("handle propose task exit");
                 break;
             };
@@ -848,8 +849,11 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             Self::election_task(Arc::clone(&curp), n)
         });
 
-        task_manager.spawn(TaskName::HandlePropose, |_n| {
-            Self::handle_propose_task(Arc::clone(&cmd_executor), Arc::clone(&curp), propose_rx)
+        let cmd_executor_c = Arc::clone(&cmd_executor);
+        let curp_c = Arc::clone(&curp);
+        // TODO: track the join handle
+        let _ignore = std::thread::spawn(move || {
+            Self::handle_propose_task(cmd_executor_c, curp_c, propose_rx);
         });
         task_manager.spawn(TaskName::HandleRecord, |_n| {
             Self::handle_record_task(Arc::clone(&curp), record_rx)
