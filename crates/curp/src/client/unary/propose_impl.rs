@@ -1,4 +1,4 @@
-use std::{pin::Pin, sync::Arc};
+use std::{cmp, pin::Pin, sync::Arc};
 
 use curp_external_api::cmd::Command;
 use futures::{future, stream, FutureExt, Stream, StreamExt};
@@ -213,13 +213,16 @@ impl<C: Command> Unary<C> {
                 record,
                 |res| res.ok().filter(|r| !r.conflict).map(|r| r.sp_version),
                 0,
-                |(ids, latest), (id, sp_version)| {
-                    if sp_version > latest {
+                |(ids, latest), (id, sp_version)| match sp_version.cmp(&latest) {
+                    cmp::Ordering::Less => latest,
+                    cmp::Ordering::Equal => {
+                        ids.push(id);
+                        latest
+                    }
+                    cmp::Ordering::Greater => {
                         ids.clear();
                         ids.push(id);
                         sp_version
-                    } else {
-                        latest
                     }
                 },
                 |qs, ids| qs.is_super_quorum(ids),
