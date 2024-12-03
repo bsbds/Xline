@@ -8,7 +8,6 @@ use std::iter;
 use curp_external_api::LogIndex;
 use serde::Deserialize;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::quorum::Joint;
 use crate::quorum::QuorumSet;
@@ -158,7 +157,7 @@ pub struct MembershipState {
 impl MembershipState {
     /// Creates a new `MembershipState`
     pub(crate) fn new(initial_membership: Membership) -> Self {
-        let initial_entry = MembershipEntry::new(0, initial_membership);
+        let initial_entry = MembershipEntry::new(0, initial_membership, 0);
         Self {
             entries: vec![initial_entry],
         }
@@ -167,7 +166,9 @@ impl MembershipState {
     /// Append a membership change entry
     pub(crate) fn append(&mut self, index: LogIndex, membership: Membership) {
         if self.last().index < index {
-            self.entries.push(MembershipEntry::new(index, membership));
+            let cluster_version = self.last().cluster_version.wrapping_add(1);
+            self.entries
+                .push(MembershipEntry::new(index, membership, cluster_version));
         }
     }
 
@@ -215,11 +216,9 @@ impl MembershipState {
         &self.last().membership
     }
 
-    /// Calculates the cluster version
-    ///
-    /// The cluster version is a hash of the effective `Membership`
-    pub(crate) fn cluster_version(&self) -> Vec<u8> {
-        self.effective().version()
+    /// Returns the cluster version
+    pub(crate) fn cluster_version(&self) -> u64 {
+        self.last().cluster_version
     }
 
     /// Gets the last entry
@@ -235,12 +234,18 @@ struct MembershipEntry {
     index: LogIndex,
     /// Membership
     membership: Membership,
+    /// The version of current membership
+    cluster_version: u64,
 }
 
 impl MembershipEntry {
     /// Creates a new `MembershipEntry`
-    fn new(index: LogIndex, membership: Membership) -> Self {
-        Self { index, membership }
+    fn new(index: LogIndex, membership: Membership, cluster_version: u64) -> Self {
+        Self {
+            index,
+            membership,
+            cluster_version,
+        }
     }
 }
 
@@ -347,15 +352,6 @@ impl Membership {
     /// Returns `true` if the given node id is present in `members`.
     pub(crate) fn contains_member(&self, node_id: u64) -> bool {
         self.members.iter().any(|s| s.contains(&node_id))
-    }
-
-    /// Calculates the version of this membership
-    pub(crate) fn version(&self) -> Vec<u8> {
-        let mut hasher = Sha256::new();
-        let data = serde_json::to_vec(self)
-            .unwrap_or_else(|_| unreachable!("failed to serialize membership"));
-        hasher.update(data);
-        hasher.finalize().to_vec()
     }
 }
 

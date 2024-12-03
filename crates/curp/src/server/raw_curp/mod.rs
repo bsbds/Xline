@@ -1186,12 +1186,17 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
     /// Returns `CurpError::WrongClusterVersion` if the give cluster version does not match the
     /// effective membership version of the current node.
-    pub(super) fn check_cluster_version(&self, cluster_version: &[u8]) -> Result<(), CurpError> {
+    pub(super) fn check_cluster_version(&self, cluster_version: u64) -> Result<(), CurpError> {
         if self.ms.read().cluster().cluster_version() == cluster_version {
             return Ok(());
         }
 
         Err(CurpError::wrong_cluster_version())
+    }
+
+    /// Returns effective membership version of the current node.
+    pub(super) fn cluster_version(&self) -> u64 {
+        self.ms.read().cluster().cluster_version()
     }
 }
 

@@ -176,7 +176,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         }
         self.curp.check_leader_transfer()?;
         self.curp.check_term(req.term)?;
-        self.curp.check_cluster_version(&req.cluster_version)?;
+        self.curp.check_cluster_version(req.cluster_version)?;
 
         if req.slow_path {
             resp_tx.set_conflict(true);
@@ -417,7 +417,8 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let (leader_id, term, _) = self.curp.leader();
         let leader_id =
             leader_id.ok_or(CurpError::LeaderTransfer("no current leader".to_owned()))?;
-        Ok(self.build_membership_response(leader_id, term))
+        let cluster_version = self.curp.cluster_version();
+        Ok(self.build_membership_response(leader_id, term, cluster_version))
     }
 }
 

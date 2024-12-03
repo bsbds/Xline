@@ -40,7 +40,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         &self,
         request: ChangeMembershipRequest,
     ) -> Result<MembershipResponse, CurpError> {
-        self.curp.check_cluster_version(&request.cluster_version)?;
+        self.curp.check_cluster_version(request.cluster_version)?;
 
         let changes = request
             .changes
@@ -88,7 +88,11 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         changes: impl IntoIterator<Item = Change>,
     ) -> Result<MembershipResponse, CurpError> {
         self.ensure_leader()?;
-        let (self_id, term) = (self.curp.id(), self.curp.term());
+        let (self_id, term, cluster_version) = (
+            self.curp.id(),
+            self.curp.term(),
+            self.curp.cluster_version(),
+        );
         let changes = Self::ensure_non_overlapping(changes)?;
         let configs = self
             .curp
@@ -114,7 +118,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             Self::abort_replication();
         }
 
-        Ok(self.build_membership_response(self_id, term))
+        Ok(self.build_membership_response(self_id, term, cluster_version))
     }
 
     /// Builds a `ChangeMembershipResponse` from the given membership.
@@ -122,6 +126,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         &self,
         leader_id: u64,
         term: u64,
+        cluster_version: u64,
     ) -> MembershipResponse {
         let Membership { members, nodes } = self.curp.effective_membership();
         let members = members
@@ -143,6 +148,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             nodes,
             term,
             leader_id,
+            cluster_version,
         }
     }
 

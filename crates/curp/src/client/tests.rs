@@ -106,6 +106,7 @@ pub(super) fn build_default_membership() -> Membership {
 fn build_membership_resp(
     leader_id: Option<u64>,
     term: u64,
+    cluster_version: u64,
     members: impl IntoIterator<Item = u64>,
     learners: impl IntoIterator<Item = u64>,
 ) -> Result<tonic::Response<MembershipResponse>, CurpError> {
@@ -128,6 +129,7 @@ fn build_membership_resp(
         nodes,
         term,
         leader_id,
+        cluster_version,
     };
     Ok(tonic::Response::new(resp))
 }
@@ -163,7 +165,7 @@ async fn test_unary_propose_fast_path_works() {
         });
     });
     let unary = init_unary_client(None, None);
-    let cluster_state = ClusterStateFull::new(0, 1, connects, build_default_membership());
+    let cluster_state = ClusterStateFull::new(0, 1, 0, connects, build_default_membership());
     let ctx = Context::new(ProposeId::default(), cluster_state);
     let res = unary
         .propose(&TestCommand::new_put(vec![1], 1), None, true, ctx)
@@ -205,7 +207,7 @@ async fn test_unary_propose_slow_path_works() {
     });
 
     let unary = init_unary_client(None, None);
-    let cluster_state = ClusterStateFull::new(0, 1, connects, build_default_membership());
+    let cluster_state = ClusterStateFull::new(0, 1, 0, connects, build_default_membership());
     let ctx = Context::new(ProposeId::default(), cluster_state);
     let start_at = Instant::now();
     let res = unary
@@ -257,7 +259,7 @@ async fn test_unary_propose_fast_path_fallback_slow_path() {
     });
 
     let unary = init_unary_client(None, None);
-    let cluster_state = ClusterStateFull::new(0, 1, connects, build_default_membership());
+    let cluster_state = ClusterStateFull::new(0, 1, 0, connects, build_default_membership());
     let ctx = Context::new(ProposeId::default(), cluster_state);
     let start_at = Instant::now();
     let res = unary
@@ -305,7 +307,7 @@ async fn test_unary_propose_return_early_err() {
         });
 
         let unary = init_unary_client(None, None);
-        let cluster_state = ClusterStateFull::new(0, 1, connects, build_default_membership());
+        let cluster_state = ClusterStateFull::new(0, 1, 0, connects, build_default_membership());
         let ctx = Context::new(ProposeId::default(), cluster_state);
         let err = unary
             .propose(&TestCommand::new_put(vec![1], 1), None, true, ctx)
@@ -344,7 +346,7 @@ async fn test_retry_propose_return_no_retry_error() {
         });
 
         let unary = init_unary_client(None, None);
-        let cluster_state = ClusterStateFull::new(0, 1, connects, build_default_membership());
+        let cluster_state = ClusterStateFull::new(0, 1, 0, connects, build_default_membership());
         let retry = Retry::new(
             unary,
             RetryConfig::new_fixed(Duration::from_millis(100), 5),
@@ -370,7 +372,7 @@ async fn test_retry_propose_return_retry_error() {
         let connects = init_mocked_connects(5, |id, conn| {
             conn.expect_fetch_membership()
                 .returning(move |_req, _timeout| {
-                    build_membership_resp(Some(0), 2, vec![0, 1, 2, 3, 4], [])
+                    build_membership_resp(Some(0), 2, 1, vec![0, 1, 2, 3, 4], [])
                 });
             if id == 0 {
                 let err = early_err.clone();
@@ -385,7 +387,7 @@ async fn test_retry_propose_return_retry_error() {
         });
         let unary = init_unary_client(None, None);
         let cluster_state =
-            ClusterStateFull::new(0, 1, connects.clone(), build_default_membership());
+            ClusterStateFull::new(0, 1, 0, connects.clone(), build_default_membership());
         let retry = Retry::new(
             unary,
             RetryConfig::new_fixed(Duration::from_millis(10), 5),
@@ -426,11 +428,12 @@ async fn test_retry_will_update_state_on_error() {
 
         conn.expect_fetch_membership()
             .returning(move |_req, _timeout| {
-                build_membership_resp(Some(0), 1, vec![0, 1, 2, 3], [4])
+                build_membership_resp(Some(0), 1, 1, vec![0, 1, 2, 3], [4])
             });
     });
     let unary = init_unary_client(None, None);
-    let cluster_state = ClusterStateFull::new(0, 1, connects.clone(), build_default_membership());
+    let cluster_state =
+        ClusterStateFull::new(0, 1, 0, connects.clone(), build_default_membership());
     let retry = Retry::new(
         unary,
         RetryConfig::new_fixed(Duration::from_millis(10), 5),
@@ -461,15 +464,15 @@ async fn test_retry_will_update_state_on_change_membership() {
     let connects = init_mocked_connects(5, |_id, conn| {
         conn.expect_fetch_membership()
             .returning(move |_req, _timeout| {
-                build_membership_resp(Some(0), 2, vec![0, 1, 2, 3, 4], [])
+                build_membership_resp(Some(0), 2, 0, vec![0, 1, 2, 3, 4], [])
             });
         conn.expect_change_membership()
             .returning(move |_req, _timeout| {
-                build_membership_resp(Some(0), 2, vec![0, 1, 2, 3], [4])
+                build_membership_resp(Some(0), 2, 1, vec![0, 1, 2, 3], [4])
             });
     });
     let unary = init_unary_client(None, None);
-    let cluster_state = ClusterStateFull::new(0, 1, connects, build_default_membership());
+    let cluster_state = ClusterStateFull::new(0, 1, 0, connects, build_default_membership());
     let retry = Retry::new(
         unary,
         RetryConfig::new_fixed(Duration::from_millis(10), 5),
@@ -516,7 +519,7 @@ async fn test_read_index_success() {
     });
 
     let unary = init_unary_client(None, None);
-    let cluster_state = ClusterStateFull::new(0, 1, connects, build_default_membership());
+    let cluster_state = ClusterStateFull::new(0, 1, 0, connects, build_default_membership());
     let ctx = Context::new(ProposeId::default(), cluster_state);
     let res = unary
         .propose(&TestCommand::default(), None, true, ctx)
@@ -551,7 +554,7 @@ async fn test_read_index_fail() {
         });
     });
     let unary = init_unary_client(None, None);
-    let cluster_state = ClusterStateFull::new(0, 1, connects, build_default_membership());
+    let cluster_state = ClusterStateFull::new(0, 1, 0, connects, build_default_membership());
     let ctx = Context::new(ProposeId::default(), cluster_state);
     let res = unary
         .propose(&TestCommand::default(), None, true, ctx)
@@ -561,7 +564,7 @@ async fn test_read_index_fail() {
 
 async fn assert_slow_path(connects: HashMap<u64, Arc<dyn ConnectApi>>) {
     let unary = init_unary_client(None, None);
-    let cluster_state = ClusterStateFull::new(0, 1, connects, build_default_membership());
+    let cluster_state = ClusterStateFull::new(0, 1, 0, connects, build_default_membership());
     let ctx = Context::new(ProposeId::default(), cluster_state);
     let start_at = Instant::now();
     let res = unary

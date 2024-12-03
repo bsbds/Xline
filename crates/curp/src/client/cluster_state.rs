@@ -101,6 +101,8 @@ pub(crate) struct ClusterStateFull {
     leader: ServerId,
     /// Term, initialize to 0, calibrated by the server.
     term: u64,
+    /// The version of current membership
+    cluster_version: u64,
     /// Members' connect, calibrated by the server.
     connects: HashMap<ServerId, Arc<dyn ConnectApi>>,
 }
@@ -129,6 +131,7 @@ impl ClusterStateFull {
     pub(crate) fn new(
         leader: ServerId,
         term: u64,
+        cluster_version: u64,
         connects: HashMap<ServerId, Arc<dyn ConnectApi>>,
         membership: Membership,
     ) -> Self {
@@ -136,6 +139,7 @@ impl ClusterStateFull {
             membership,
             leader,
             term,
+            cluster_version,
             connects,
         }
     }
@@ -251,11 +255,9 @@ impl ClusterStateFull {
         self.leader
     }
 
-    /// Calculates the cluster version
-    ///
-    /// The cluster version is a hash of the current `Membership`
-    pub(crate) fn cluster_version(&self) -> Vec<u8> {
-        self.membership.version()
+    /// Returns the cluster version
+    pub(crate) fn cluster_version(&self) -> u64 {
+        self.cluster_version
     }
 
     /// Returns the membership of the state
@@ -305,7 +307,7 @@ mod test {
         });
         let req = RecordRequest::new(ProposeId::default(), &TestCommand::default());
         let membership = build_default_membership();
-        let state = ClusterStateFull::new(0, 1, connects, membership);
+        let state = ClusterStateFull::new(0, 1, 0, connects, membership);
         let conflict = state
             .map_leader(move |conn| async move { conn.record(req, Duration::from_secs(1)).await })
             .await
@@ -342,7 +344,7 @@ mod test {
         });
         let req = RecordRequest::new(ProposeId::default(), &TestCommand::default());
         let membership = build_default_membership();
-        let state = ClusterStateFull::new(0, 1, connects, membership);
+        let state = ClusterStateFull::new(0, 1, 0, connects, membership);
         let conflict = state
             .map_server(2, move |conn| async move {
                 conn.record(req, Duration::from_secs(1)).await
@@ -382,7 +384,7 @@ mod test {
         });
         let req = RecordRequest::new(ProposeId::default(), &TestCommand::default());
         let membership = build_default_membership();
-        let state = ClusterStateFull::new(0, 1, connects, membership);
+        let state = ClusterStateFull::new(0, 1, 0, connects, membership);
         let conflicts: Vec<_> = state
             .for_each_follower({
                 move |conn| {
@@ -426,7 +428,7 @@ mod test {
         });
         let req = RecordRequest::new(ProposeId::default(), &TestCommand::default());
         let membership = build_default_membership();
-        let state = ClusterStateFull::new(0, 1, connects, membership);
+        let state = ClusterStateFull::new(0, 1, 0, connects, membership);
         let record = move |conn: Arc<dyn ConnectApi>| {
             let req = req.clone();
             async move { conn.record(req, Duration::from_secs(1)).await }
@@ -464,7 +466,7 @@ mod test {
         });
         let req = RecordRequest::new(ProposeId::default(), &TestCommand::default());
         let membership = build_default_membership();
-        let state = ClusterStateFull::new(0, 1, connects, membership);
+        let state = ClusterStateFull::new(0, 1, 0, connects, membership);
         let record = move |conn: Arc<dyn ConnectApi>| {
             let req = req.clone();
             async move { conn.record(req, Duration::from_secs(1)).await }

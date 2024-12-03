@@ -111,7 +111,13 @@ impl Fetch {
         resp: MembershipResponse,
     ) -> ClusterStateFull {
         let connects = (connect_to)(&resp);
-        ClusterStateFull::new(resp.leader_id, resp.term, connects, resp.into_membership())
+        ClusterStateFull::new(
+            resp.leader_id,
+            resp.term,
+            resp.cluster_version,
+            connects,
+            resp.into_membership(),
+        )
     }
 
     /// Fetch the term of the cluster. This ensures that the current leader is the latest.
@@ -218,6 +224,7 @@ mod test {
     fn build_membership_resp(
         leader_id: Option<u64>,
         term: u64,
+        cluster_version: u64,
         members: impl IntoIterator<Item = u64>,
     ) -> Result<tonic::Response<MembershipResponse>, CurpError> {
         let leader_id = leader_id.ok_or(CurpError::leader_transfer("no current leader"))?;
@@ -238,6 +245,7 @@ mod test {
             nodes,
             term,
             leader_id,
+            cluster_version,
         };
         Ok(tonic::Response::new(resp))
     }
@@ -247,7 +255,7 @@ mod test {
     async fn test_unary_fetch_clusters_serializable() {
         let connects = init_mocked_connects(3, |_id, conn| {
             conn.expect_fetch_membership()
-                .returning(|_req, _timeout| build_membership_resp(Some(0), 1, vec![0, 1, 2]));
+                .returning(|_req, _timeout| build_membership_resp(Some(0), 1, 0, vec![0, 1, 2]));
         });
         let fetch = init_fetch(connects.clone());
         let (_, res) = fetch.fetch_cluster(connects).await.unwrap();
@@ -260,16 +268,16 @@ mod test {
         let connects = init_mocked_connects(5, |id, conn| {
             match id {
                 0 => conn.expect_fetch_membership().returning(|_req, _timeout| {
-                    build_membership_resp(Some(0), 2, vec![0, 1, 2, 3, 4])
+                    build_membership_resp(Some(0), 2, 0, vec![0, 1, 2, 3, 4])
                 }),
                 1 | 4 => conn
                     .expect_fetch_membership()
-                    .returning(|_req, _timeout| build_membership_resp(Some(0), 2, vec![])),
+                    .returning(|_req, _timeout| build_membership_resp(Some(0), 2, 0, vec![])),
                 2 => conn
                     .expect_fetch_membership()
-                    .returning(|_req, _timeout| build_membership_resp(None, 23, vec![])),
+                    .returning(|_req, _timeout| build_membership_resp(None, 23, 0, vec![])),
                 3 => conn.expect_fetch_membership().returning(|_req, _timeout| {
-                    build_membership_resp(Some(3), 1, vec![1, 2, 3, 4])
+                    build_membership_resp(Some(3), 1, 0, vec![1, 2, 3, 4])
                 }),
                 _ => unreachable!("there are only 5 nodes"),
             };
@@ -287,25 +295,25 @@ mod test {
             match id {
                 0 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(0), 2, vec![0, 1, 2, 3, 4])
+                        build_membership_resp(Some(0), 2, 0, vec![0, 1, 2, 3, 4])
                     });
                 }
                 1 => {
                     conn.expect_fetch_membership()
-                        .returning(|_req, _timeout| build_membership_resp(Some(0), 2, vec![]));
+                        .returning(|_req, _timeout| build_membership_resp(Some(0), 2, 0, vec![]));
                 }
                 2 => {
                     conn.expect_fetch_membership()
-                        .returning(|_req, _timeout| build_membership_resp(None, 23, vec![]));
+                        .returning(|_req, _timeout| build_membership_resp(None, 23, 0, vec![]));
                 }
                 3 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(3), 1, vec![0, 1, 2, 3, 4])
+                        build_membership_resp(Some(3), 1, 0, vec![0, 1, 2, 3, 4])
                     });
                 }
                 4 => {
                     conn.expect_fetch_membership()
-                        .returning(|_req, _timeout| build_membership_resp(Some(3), 1, vec![]));
+                        .returning(|_req, _timeout| build_membership_resp(Some(3), 1, 0, vec![]));
                 }
                 _ => unreachable!("there are only 5 nodes"),
             };
@@ -322,12 +330,12 @@ mod test {
             match id {
                 0 | 1 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(0), 1, vec![0, 1, 2, 3, 4])
+                        build_membership_resp(Some(0), 1, 0, vec![0, 1, 2, 3, 4])
                     });
                 }
                 2 | 3 | 4 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(0), 1, vec![0, 1, 2, 3])
+                        build_membership_resp(Some(0), 1, 0, vec![0, 1, 2, 3])
                     });
                 }
                 _ => unreachable!("there are only 5 nodes"),
@@ -346,7 +354,7 @@ mod test {
             match id {
                 0 | 1 | 2 | 3 | 4 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(0), 1, vec![0, 1, 2, 3, 4])
+                        build_membership_resp(Some(0), 1, 0, vec![0, 1, 2, 3, 4])
                     });
                 }
                 _ => unreachable!("there are only 5 nodes"),
@@ -359,7 +367,7 @@ mod test {
             vec![(0..4).collect()],
             (0..4).map(|i| (i, NodeMetadata::default())).collect(),
         );
-        let cluster_state = ClusterStateFull::new(0, 1, connects, membership);
+        let cluster_state = ClusterStateFull::new(0, 1, 0, connects, membership);
         let (_, res) = fetch.fetch_cluster(cluster_state).await.unwrap();
         assert_eq!(res.members[0].set, vec![0, 1, 2, 3, 4]);
         assert_eq!(res.leader_id, 0);
@@ -374,12 +382,12 @@ mod test {
             match id {
                 2 | 3 | 4 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(2), 2, vec![0, 1, 2, 3, 4])
+                        build_membership_resp(Some(2), 2, 0, vec![0, 1, 2, 3, 4])
                     });
                 }
                 0 | 1 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(0), 1, vec![0, 1, 2, 3, 4])
+                        build_membership_resp(Some(0), 1, 0, vec![0, 1, 2, 3, 4])
                     });
                 }
 
@@ -393,7 +401,7 @@ mod test {
             vec![(0..4).collect()],
             (0..4).map(|i| (i, NodeMetadata::default())).collect(),
         );
-        let cluster_state = ClusterStateFull::new(0, 1, connects, membership);
+        let cluster_state = ClusterStateFull::new(0, 1, 0, connects, membership);
         let (_, res) = fetch.fetch_cluster(cluster_state).await.unwrap();
         assert_eq!(res.members[0].set, vec![0, 1, 2, 3, 4]);
         assert_eq!(res.leader_id, 2);
@@ -408,12 +416,12 @@ mod test {
             match id {
                 2 | 3 | 4 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(2), 2, vec![0, 1, 2, 3, 4])
+                        build_membership_resp(Some(2), 2, 0, vec![0, 1, 2, 3, 4])
                     });
                 }
                 0 | 1 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(0), 1, vec![0, 1, 2, 3])
+                        build_membership_resp(Some(0), 1, 0, vec![0, 1, 2, 3])
                     });
                 }
 
@@ -426,7 +434,7 @@ mod test {
             vec![(0..4).collect()],
             (0..4).map(|i| (i, NodeMetadata::default())).collect(),
         );
-        let cluster_state = ClusterStateFull::new(0, 1, connects, membership);
+        let cluster_state = ClusterStateFull::new(0, 1, 0, connects, membership);
         let (_, res) = fetch.fetch_cluster(cluster_state).await.unwrap();
         assert_eq!(res.members[0].set, vec![0, 1, 2, 3, 4]);
         assert_eq!(res.leader_id, 2);
@@ -441,12 +449,12 @@ mod test {
             match id {
                 0 | 1 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(Some(0), 1, vec![0, 1, 2, 3, 4])
+                        build_membership_resp(Some(0), 1, 0, vec![0, 1, 2, 3, 4])
                     });
                 }
                 2 | 3 | 4 => {
                     conn.expect_fetch_membership().returning(|_req, _timeout| {
-                        build_membership_resp(None, 1, vec![0, 1, 2, 3, 4])
+                        build_membership_resp(None, 1, 0, vec![0, 1, 2, 3, 4])
                     });
                 }
                 _ => unreachable!("there are only 5 nodes"),
@@ -459,7 +467,7 @@ mod test {
             vec![(0..5).collect()],
             (0..5).map(|i| (i, NodeMetadata::default())).collect(),
         );
-        let cluster_state = ClusterStateFull::new(0, 1, connects, membership);
+        let cluster_state = ClusterStateFull::new(0, 1, 0, connects, membership);
         fetch.fetch_cluster(cluster_state).await.unwrap_err();
     }
 }

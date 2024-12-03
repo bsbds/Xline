@@ -79,6 +79,8 @@ enum SetCluster {
         leader_id: u64,
         /// The term of current cluster
         term: u64,
+        /// The version of current membership
+        cluster_version: u64,
         /// The cluster members
         members: HashMap<u64, Vec<String>>,
     },
@@ -144,11 +146,13 @@ impl ClientBuilder {
         mut self,
         leader_id: u64,
         term: u64,
+        cluster_version: u64,
         members: impl IntoIterator<Item = (u64, Vec<String>)>,
     ) -> Self {
         self.init_cluster = Some(SetCluster::Full {
             leader_id,
             term,
+            cluster_version,
             members: members.into_iter().collect(),
         });
         self
@@ -247,6 +251,7 @@ impl ClientBuilder {
                 leader_id,
                 term,
                 members,
+                cluster_version,
             } => {
                 let connects = rpc::connects(members.clone(), tls_config).collect();
                 let member_ids = members.keys().copied().collect();
@@ -256,8 +261,13 @@ impl ClientBuilder {
                     .map(|(id, addrs)| (id, NodeMetadata::new("", addrs.clone(), addrs)))
                     .collect();
                 let membership = Membership::new(vec![member_ids], metas);
-                let cluster_state =
-                    cluster_state::ClusterStateFull::new(leader_id, term, connects, membership);
+                let cluster_state = cluster_state::ClusterStateFull::new(
+                    leader_id,
+                    term,
+                    cluster_version,
+                    connects,
+                    membership,
+                );
 
                 ClusterState::Full(cluster_state)
             }

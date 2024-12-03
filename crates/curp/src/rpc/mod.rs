@@ -135,7 +135,7 @@ impl ProposeRequest {
     pub fn new<C: Command>(
         propose_id: ProposeId,
         cmd: &C,
-        cluster_version: Vec<u8>,
+        cluster_version: u64,
         term: u64,
         slow_path: bool,
     ) -> Self {
@@ -377,7 +377,7 @@ impl InstallSnapshotResponse {
 
 impl ShutdownRequest {
     /// Create a new shutdown request
-    pub(crate) fn new(id: ProposeId, cluster_version: Vec<u8>) -> Self {
+    pub(crate) fn new(id: ProposeId, cluster_version: u64) -> Self {
         Self {
             propose_id: Some(id.into()),
             cluster_version,
@@ -396,7 +396,7 @@ impl ShutdownRequest {
 
 impl MoveLeaderRequest {
     /// Create a new `MoveLeaderRequest`
-    pub(crate) fn new(node_id: ServerId, cluster_version: Vec<u8>) -> Self {
+    pub(crate) fn new(node_id: ServerId, cluster_version: u64) -> Self {
         Self {
             node_id,
             cluster_version,
