@@ -358,7 +358,11 @@ impl CommandAttr for PutRequest {
     }
 
     fn leases(&self) -> Vec<i64> {
-        vec![self.lease]
+        if self.lease == 0 {
+            return vec![];
+        } else {
+            vec![self.lease]
+        }
     }
 }
 
