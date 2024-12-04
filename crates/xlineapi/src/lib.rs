@@ -208,7 +208,8 @@ mod errorpb {
 use std::fmt::Display;
 
 use command::KeyRange;
-use utils::write_vec;
+use interval::BytesAffine;
+use utils::{interval_map::Interval, write_vec};
 
 pub use self::{
     authpb::{permission::Type, Permission, Role, User, UserAddOptions},
@@ -339,6 +340,69 @@ pub trait CommandAttr {
     fn leases(&self) -> Vec<i64>;
 }
 
+/// Attributes for mutable commands
+pub trait CommandMutAttr {
+    /// Get's the intervals
+    fn intervals(&self) -> Vec<Interval<BytesAffine>>;
+}
+
+impl<A, B> CommandMutAttr for (A, B)
+where
+    A: AsRef<[u8]>,
+    B: AsRef<[u8]>,
+{
+    fn intervals(&self) -> Vec<Interval<BytesAffine>> {
+        let start = self.0.as_ref().to_vec();
+        let range_end = self.1.as_ref();
+        let end = match range_end {
+            &[] => {
+                let mut end = start.clone();
+                end.push(0);
+                BytesAffine::Bytes(end)
+            }
+            &[0] => BytesAffine::Unbounded,
+            bytes => BytesAffine::Bytes(bytes.to_vec()),
+        };
+        vec![Interval::new(BytesAffine::Bytes(start), end)]
+    }
+}
+
+impl CommandMutAttr for PutRequest {
+    fn intervals(&self) -> Vec<Interval<BytesAffine>> {
+        (&self.key, &[]).intervals()
+    }
+}
+
+impl CommandMutAttr for DeleteRangeRequest {
+    fn intervals(&self) -> Vec<Interval<BytesAffine>> {
+        (&self.key, &self.range_end).intervals()
+    }
+}
+
+impl CommandMutAttr for TxnRequest {
+    fn intervals(&self) -> Vec<Interval<BytesAffine>> {
+        let cmp_intervals = self
+            .compare
+            .iter()
+            .map(|cmp| (&cmp.key, &cmp.range_end).intervals())
+            .flatten();
+
+        let intervals = self
+            .success
+            .iter()
+            .chain(self.failure.iter())
+            .flat_map(|op| &op.request)
+            .flat_map(|req| match *req {
+                Request::RequestRange(_) => vec![],
+                Request::RequestPut(ref req) => req.intervals(),
+                Request::RequestDeleteRange(ref req) => req.intervals(),
+                Request::RequestTxn(ref req) => req.intervals(),
+            });
+
+        cmp_intervals.chain(intervals).collect()
+    }
+}
+
 impl CommandAttr for RangeRequest {
     fn keys(&self) -> Vec<KeyRange> {
         vec![KeyRange::new(
@@ -441,6 +505,18 @@ impl RequestWrapper {
             RequestWrapper::PutRequest(ref req) => req.keys(),
             RequestWrapper::DeleteRangeRequest(ref req) => req.keys(),
             RequestWrapper::TxnRequest(ref req) => req.keys(),
+            _ => vec![],
+        }
+    }
+
+    /// Returns the intervals of the command
+    /// NOTE: should only be used for mutable commands
+    pub fn intervals(&self) -> Vec<Interval<BytesAffine>> {
+        match *self {
+            RequestWrapper::RangeRequest(_) => vec![],
+            RequestWrapper::PutRequest(ref req) => req.intervals(),
+            RequestWrapper::DeleteRangeRequest(ref req) => req.intervals(),
+            RequestWrapper::TxnRequest(ref req) => req.intervals(),
             _ => vec![],
         }
     }

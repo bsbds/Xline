@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use curp::{
-    cmd::Command as CurpCommand,
     rpc::PoolEntry,
     server::{SpObject, UcpObject},
 };
@@ -33,18 +32,11 @@ fn intervals<C>(lease_collection: &LeaseCollection, entry: &C) -> Vec<Interval<B
 where
     C: AsRef<Command>,
 {
-    intervals_kv(entry)
-        .into_iter()
-        .chain(intervals_lease(lease_collection, entry))
-        .collect()
-}
-
-/// Gets KV intervals of a kv request
-fn intervals_kv<C>(entry: &C) -> impl IntoIterator<Item = Interval<BytesAffine>>
-where
-    C: AsRef<Command>,
-{
-    entry.as_ref().keys().into_iter().map(Into::into)
+    let mut intervals = entry.as_ref().intervals();
+    for interval in intervals_lease(lease_collection, entry) {
+        intervals.push(interval);
+    }
+    intervals
 }
 
 /// Gets KV intervals of a lease request

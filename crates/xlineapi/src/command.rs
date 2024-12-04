@@ -8,10 +8,11 @@ use curp_external_api::cmd::{ConflictCheck, PbCodec, PbSerializeError};
 use itertools::Itertools;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use utils::interval_map::Interval;
 
 use crate::{
-    execute_error::ExecuteError, AuthInfo, PbCommand, PbCommandResponse, PbKeyRange,
-    PbSyncResponse, RequestWrapper, ResponseWrapper,
+    execute_error::ExecuteError, interval::BytesAffine, AuthInfo, PbCommand, PbCommandResponse,
+    PbKeyRange, PbSyncResponse, RequestWrapper, ResponseWrapper,
 };
 
 /// The curp client trait object on the command of xline
@@ -485,6 +486,12 @@ impl Command {
     /// Get leases of the command
     pub fn leases(&self) -> Vec<i64> {
         self.request().leases()
+    }
+
+    /// Returns the intervals of the command
+    /// NOTE: should only be used for mutable commands
+    pub fn intervals(&self) -> Vec<Interval<BytesAffine>> {
+        self.request().intervals()
     }
 }
 
