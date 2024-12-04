@@ -589,21 +589,33 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         entries: impl Iterator<Item = PoolEntry<C>>,
     ) -> (Vec<bool>, u64) {
         let entries: Vec<_> = entries.collect();
-        let mut sp_l = self.ctx.spec_pool.lock();
-        let mut ucp_l = self.ctx.uncommitted_pool.lock();
-        let mut conflicts = Vec::new();
-        for entry in entries.clone() {
-            let mut conflict = sp_l.insert(entry.clone()).is_some();
-            conflict |= ucp_l.insert(&entry);
-            conflicts.push(conflict);
-        }
-
+        let sp = Arc::clone(&self.ctx.spec_pool);
+        let ucp = Arc::clone(&self.ctx.uncommitted_pool);
+        let entries_c = entries.clone();
+        let ((a, version), b) = rayon::join(
+            || {
+                let mut sp_l = sp.lock();
+                let cs = entries
+                    .into_iter()
+                    .map(|e| sp_l.insert(e).is_some())
+                    .collect::<Vec<_>>();
+                (cs, sp_l.version())
+            },
+            || {
+                let mut ucp_l = ucp.lock();
+                entries_c
+                    .into_iter()
+                    .map(|e| ucp_l.insert(&e))
+                    .collect::<Vec<_>>()
+            },
+        );
+        let conflicts: Vec<_> = a.into_iter().zip(b).map(|(aa, bb)| aa | bb).collect();
         metrics::get().proposals_failed.add(
             conflicts.iter().filter(|c| **c).count().numeric_cast(),
             &[KeyValue::new("reason", "leader key conflict")],
         );
 
-        (conflicts, sp_l.version())
+        (conflicts, version)
     }
 
     /// Persistent the entries during propose
