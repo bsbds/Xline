@@ -17,6 +17,7 @@ async-trait = "0.1.81"
 bincode = "1.3.3"
 bytes = "1.7.1"
 clippy-utilities = "0.2.0"
+crossbeam-channel = "0.5.13"
 curp-external-api = { path = "../curp-external-api" }
 curp-test-utils = { path = "../curp-test-utils" }
 dashmap = "6.1.0"

@@ -2,7 +2,7 @@ use curp_external_api::{cmd::Command, role_change::RoleChange, LogIndex};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info};
 
-use crate::{rpc::ProposeId, server::conflict::spec_pool_new::SpecPoolRepl};
+use crate::{rpc::ProposeId, server::curp_node::pool_worker::PoolOp};
 
 use super::{AppendEntries, RawCurp, SyncAction};
 
@@ -66,10 +66,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 self.step_down(node_term);
             }
             Action::ReplicateSpecPoolSync => {
-                let sp_l = self.ctx.spec_pool.lock();
-                let ids = sp_l.all_ids().copied().collect();
-                let next_version = sp_l.version().wrapping_add(1);
-                let entry = SpecPoolRepl::new(next_version, ids);
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                let __ignore = self.ctx.pool_tx.send(PoolOp::GetSpIds(tx));
+                let entry = rx
+                    .recv()
+                    .unwrap_or_else(|_| unreachable!("failed to receive from task"));
                 let propose_id = ProposeId(rand::random(), 0);
                 let _ignore = self.push_log_entry(propose_id, entry);
             }

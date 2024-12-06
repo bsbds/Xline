@@ -30,6 +30,8 @@ use utils::{
     task_manager::{tasks::TaskName, Listener, TaskManager},
 };
 
+use self::pool_worker::PoolOp;
+
 use super::{
     cmd_board::{CmdBoardRef, CommandBoard},
     cmd_worker::execute,
@@ -68,6 +70,9 @@ mod replication;
 
 /// Speculative Pool WAL background task implementation
 mod wal;
+
+/// Worker of conflict pools operations
+pub(super) mod pool_worker;
 
 /// After sync entry, composed of a log entry and response sender
 pub(crate) type AfterSyncEntry<C> = (Arc<LogEntry<C>>, Option<Arc<ResponseSender>>);
@@ -777,6 +782,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let (as_tx, as_rx) = flume::unbounded();
         let (propose_tx, propose_rx) = flume::bounded(4096);
         let (record_tx, record_rx) = flume::bounded(4096);
+        let (pool_tx, pool_rx) = flume::unbounded();
         // create curp state machine
         let (voted_for, entries, sp_version, sp_entries) = storage.recover()?;
         let mut sp = SpeculativePool::new(sps, sp_version);
@@ -801,6 +807,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 .spec_pool(Arc::clone(&sp))
                 .uncommitted_pool(ucp)
                 .as_tx(as_tx.clone())
+                .pool_tx(pool_tx)
                 .resp_txs(Arc::new(Mutex::default()))
                 .id_barrier(Arc::new(IdBarrier::new()))
                 .membership_config(membership_config)
@@ -817,6 +824,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             propose_rx,
             record_rx,
             as_rx,
+            pool_rx,
         );
 
         if is_leader {
@@ -842,6 +850,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         propose_rx: flume::Receiver<Propose<C>>,
         record_rx: flume::Receiver<ToRecord<C>>,
         as_rx: flume::Receiver<TaskType<C>>,
+        pool_rx: flume::Receiver<PoolOp<C>>,
     ) {
         let task_manager = curp.task_manager();
         let storage = curp.storage();
@@ -849,6 +858,9 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         task_manager.spawn(TaskName::Election, |n| {
             Self::election_task(Arc::clone(&curp), n)
         });
+
+        let curp_c_ = Arc::clone(&curp);
+        let __handle = std::thread::spawn(|| Self::pool_worker(pool_rx, curp_c_));
 
         let cmd_executor_c = Arc::clone(&cmd_executor);
         let curp_c = Arc::clone(&curp);
@@ -864,6 +876,7 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         task_manager.spawn(TaskName::AfterSync, |_n| {
             Self::after_sync_task(curp, cmd_executor, as_rx, tx)
         });
+
         // TODO: track the join handle
         let _handle = std::thread::spawn(|| Self::sp_wal_entry_remove_worker(rx, storage));
     }

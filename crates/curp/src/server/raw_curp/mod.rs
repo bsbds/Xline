@@ -22,13 +22,11 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use clippy_utilities::NumericCast;
 use clippy_utilities::OverflowArithmetic;
 use derive_builder::Builder;
 use event_listener::Event;
 use futures::Future;
 use itertools::Itertools;
-use opentelemetry::KeyValue;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use parking_lot::RwLockUpgradableReadGuard;
@@ -54,8 +52,10 @@ use self::node_state::NodeStates;
 use self::state::CandidateState;
 use self::state::LeaderState;
 use self::state::State;
+use super::conflict::spec_pool_new::SpecPoolRepl;
 use super::conflict::spec_pool_new::SpeculativePool;
 use super::conflict::uncommitted_pool::UncommittedPool;
+use super::curp_node::pool_worker::PoolOp;
 use super::curp_node::TaskType;
 use super::storage::StorageApi;
 use super::DB;
@@ -167,6 +167,8 @@ pub(super) struct RawCurpArgs<C: Command, RC: RoleChange> {
     uncommitted_pool: Arc<Mutex<UncommittedPool<C>>>,
     /// Tx to send entries to after_sync
     as_tx: flume::Sender<TaskType<C>>,
+    /// Tx to send pool operations
+    pool_tx: flume::Sender<PoolOp<C>>,
     /// Response Senders
     resp_txs: Arc<Mutex<HashMap<LogIndex, Arc<ResponseSender>>>>,
     /// Barrier for waiting unsynced commands
@@ -195,6 +197,7 @@ impl<C: Command, RC: RoleChange> RawCurpBuilder<C, RC> {
             .spec_pool(args.spec_pool)
             .uncommitted_pool(args.uncommitted_pool)
             .as_tx(args.as_tx)
+            .pool_tx(args.pool_tx)
             .resp_txs(args.resp_txs)
             .id_barrier(args.id_barrier)
             .node_states(Arc::new(NodeStates::new_from_connects(
@@ -407,6 +410,8 @@ struct Context<C: Command, RC: RoleChange> {
     uncommitted_pool: Arc<Mutex<UncommittedPool<C>>>,
     /// Tx to send entries to after_sync
     as_tx: flume::Sender<TaskType<C>>,
+    /// Tx to send pool operations
+    pool_tx: flume::Sender<PoolOp<C>>,
     /// Response Senders
     // TODO: this could be replaced by a queue
     resp_txs: Arc<Mutex<HashMap<LogIndex, Arc<ResponseSender>>>>,
@@ -460,6 +465,10 @@ impl<C: Command, RC: RoleChange> ContextBuilder<C, RC> {
                 None => return Err(ContextBuilderError::UninitializedField("uncommitted_pool")),
             },
             as_tx: match self.as_tx.take() {
+                Some(value) => value,
+                None => return Err(ContextBuilderError::UninitializedField("as_tx")),
+            },
+            pool_tx: match self.pool_tx.take() {
                 Some(value) => value,
                 None => return Err(ContextBuilderError::UninitializedField("as_tx")),
             },
@@ -555,32 +564,12 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
     /// Handles record
     pub(super) fn follower_record(&self, entries: Vec<PoolEntry<C>>) -> (Vec<bool>, u64) {
-        let mut sp_l = self.ctx.spec_pool.lock();
-        let version = sp_l.version();
-
-        let mut conflicts = Vec::with_capacity(entries.len());
-        for entry in entries.clone() {
-            let conflict = sp_l.insert(entry).is_some();
-            if conflict {
-                metrics::get()
-                    .proposals_failed
-                    .add(1, &[KeyValue::new("reason", "follower key conflict")]);
-            }
-            conflicts.push(conflict);
-        }
-
-        if self
-            .ctx
-            .curp_storage
-            .insert_spec_pool_entries(entries)
-            .is_err()
-        {
-            error!("failed to write to spec pool wal.");
-            // fill with conflict if persistent failed
-            conflicts.fill(true);
-        }
-
-        (conflicts, version)
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let _ignore = self.ctx.pool_tx.send(PoolOp::FollowerRecord(entries, tx));
+        let result = rx
+            .recv()
+            .unwrap_or_else(|_| unreachable!("failed to receive from task"));
+        (result.conflicts, result.version)
     }
 
     /// Handles record
@@ -589,33 +578,17 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         entries: impl Iterator<Item = PoolEntry<C>>,
     ) -> (Vec<bool>, u64) {
         let entries: Vec<_> = entries.collect();
-        let sp = Arc::clone(&self.ctx.spec_pool);
-        let ucp = Arc::clone(&self.ctx.uncommitted_pool);
-        let entries_c = entries.clone();
-        let ((a, version), b) = rayon::join(
-            || {
-                let mut sp_l = sp.lock();
-                let cs = entries
-                    .into_iter()
-                    .map(|e| sp_l.insert(e).is_some())
-                    .collect::<Vec<_>>();
-                (cs, sp_l.version())
-            },
-            || {
-                let mut ucp_l = ucp.lock();
-                entries_c
-                    .into_iter()
-                    .map(|e| ucp_l.insert(&e))
-                    .collect::<Vec<_>>()
-            },
-        );
-        let conflicts: Vec<_> = a.into_iter().zip(b).map(|(aa, bb)| aa | bb).collect();
-        metrics::get().proposals_failed.add(
-            conflicts.iter().filter(|c| **c).count().numeric_cast(),
-            &[KeyValue::new("reason", "leader key conflict")],
-        );
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let _ignore = self.ctx.pool_tx.send(PoolOp::LeaderRecord(entries, tx));
+        let result = rx
+            .recv()
+            .unwrap_or_else(|_| unreachable!("failed to receive from task"));
+        (result.conflicts, result.version)
+    }
 
-        (conflicts, version)
+    /// Removes record
+    pub(super) fn remove_records(&self, entries: Vec<PoolEntry<C>>) {
+        let _ignore = self.ctx.pool_tx.send(PoolOp::Remove(entries));
     }
 
     /// Persistent the entries during propose
@@ -1775,8 +1748,12 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         ids: &HashSet<ProposeId>,
         version: u64,
     ) -> Result<Vec<ProposeId>, CurpError> {
-        let mut sp_l = self.ctx.spec_pool.lock();
-        let removed = sp_l.gc(ids, version);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let entry = SpecPoolRepl::new(version, ids.clone());
+        let _ignore = self.ctx.pool_tx.send(PoolOp::GcSp(entry, tx));
+        let removed = rx
+            .recv()
+            .unwrap_or_else(|_| unreachable!("failed to receive from task"));
         self.ctx.curp_storage.put_sp_version(version)?;
         Ok(removed)
     }

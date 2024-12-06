@@ -28,17 +28,16 @@ fn remove_from_sp_ucp<C, RC, E, I>(
     E: AsRef<LogEntry<C>>,
     I: IntoIterator<Item = E>,
 {
-    let (mut sp, mut ucp) = (curp.spec_pool().lock(), curp.uncommitted_pool().lock());
     let mut to_remove = Vec::new();
+    let mut pool_entries = Vec::new();
     for entry in entries {
         let entry = entry.as_ref();
         to_remove.push(entry.propose_id);
         if let EntryData::Command(ref c) = entry.entry_data {
-            let pool_entry = PoolEntry::new(entry.propose_id, Arc::clone(c));
-            sp.remove(&pool_entry);
-            ucp.remove(&pool_entry);
+            pool_entries.push(PoolEntry::new(entry.propose_id, Arc::clone(c)));
         };
     }
+    curp.remove_records(pool_entries);
     if let Err(err) = remove_tx.send(to_remove) {
         error!("failed to send to remove worker: {err}");
     }
