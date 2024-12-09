@@ -183,11 +183,11 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         self.curp.check_term(req.term)?;
         self.curp.check_cluster_version(req.cluster_version)?;
 
-        if req.slow_path {
-            resp_tx.set_conflict(true);
-        } else {
-            info!("not using slow path for: {req:?}");
-        }
+        resp_tx.set_conflict(true);
+        //if req.slow_path {
+        //} else {
+        //    info!("not using slow path for: {req:?}");
+        //}
 
         let propose = Propose::try_new(req, resp_tx)?;
         let _ignore = self.propose_tx.send(propose);
@@ -197,21 +197,21 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
 
     /// Handle `Record` requests
     pub(super) async fn record(&self, req: &RecordRequest) -> Result<RecordResponse, CurpError> {
-        if self.curp.is_cluster_shutdown() {
-            return Err(CurpError::shutting_down());
-        }
-        let id = req.propose_id();
-        let cmd: Arc<C> = Arc::new(req.cmd()?);
-
-        let entry = PoolEntry::new(id, cmd);
-        let (tx, rx) = oneshot::channel();
-        let to_record = ToRecord::new(entry, tx);
-        self.record_tx.send(to_record)?;
-        let (conflict, sp_version) = rx.await?;
+        //if self.curp.is_cluster_shutdown() {
+        //    return Err(CurpError::shutting_down());
+        //}
+        //let id = req.propose_id();
+        //let cmd: Arc<C> = Arc::new(req.cmd()?);
+        //
+        //let entry = PoolEntry::new(id, cmd);
+        //let (tx, rx) = oneshot::channel();
+        //let to_record = ToRecord::new(entry, tx);
+        //self.record_tx.send(to_record)?;
+        //let (conflict, sp_version) = rx.await?;
 
         Ok(RecordResponse {
-            conflict,
-            sp_version,
+            conflict: true,
+            sp_version: 0,
         })
     }
 
@@ -322,7 +322,9 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         let pool_entries = proposes
             .iter()
             .map(|p| PoolEntry::new(p.id, Arc::clone(&p.cmd)));
-        let (conflicts, sp_version) = curp.leader_record(pool_entries);
+        let sp_version = 0;
+        let conflicts: Vec<_> = iter::repeat(true).take(pool_entries.len()).collect();
+        //let (conflicts, sp_version) = curp.leader_record(pool_entries);
         for (p, conflict) in proposes.iter().zip(conflicts) {
             info!("handle mutative cmd: {:?}, conflict: {conflict}", p.cmd);
             p.resp_tx.set_conflict(conflict);
