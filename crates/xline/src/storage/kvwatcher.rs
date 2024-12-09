@@ -392,12 +392,12 @@ impl KvWatcher {
             kv_store_inner,
             watcher_map,
         });
-        task_manager.spawn(TaskName::SyncVictims, |n| {
-            Self::sync_victims_task(Arc::clone(&kv_watcher), sync_victims_interval, n)
-        });
-        task_manager.spawn(TaskName::KvUpdates, |n| {
-            Self::kv_updates_task(Arc::clone(&kv_watcher), kv_update_rx, n)
-        });
+        //task_manager.spawn(TaskName::SyncVictims, |n| {
+        //    Self::sync_victims_task(Arc::clone(&kv_watcher), sync_victims_interval, n)
+        //});
+        //task_manager.spawn(TaskName::KvUpdates, |n| {
+        //    Self::kv_updates_task(Arc::clone(&kv_watcher), kv_update_rx, n)
+        //});
         kv_watcher
     }
 

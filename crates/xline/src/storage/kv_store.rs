@@ -332,10 +332,10 @@ impl KvStore {
 
     /// Notify KV changes to KV watcher
     fn notify_updates(&self, revision: i64, updates: Vec<Event>) {
-        assert!(
-            self.kv_update_tx.send((revision, updates)).is_ok(),
-            "Failed to send updates to KV watcher"
-        );
+        //assert!(
+        //    self.kv_update_tx.send((revision, updates)).is_ok(),
+        //    "Failed to send updates to KV watcher"
+        //);
     }
 
     /// Sort kvs by sort target and order

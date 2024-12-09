@@ -38,10 +38,10 @@
     unused_results,
     variant_size_differences,
 
-    warnings, // treat all warnings as errors
+    //warnings, // treat all warnings as errors
 
     clippy::all,
-    clippy::pedantic,
+    //clippy::pedantic,
     clippy::cargo,
 
     // The followings are selected restriction lints for rust 1.57

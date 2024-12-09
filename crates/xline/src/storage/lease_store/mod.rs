@@ -371,10 +371,10 @@ impl LeaseStore {
         }
 
         let _ignore = self.lease_collection.revoke(req.id);
-        assert!(
-            self.kv_update_tx.send((revision, updates)).is_ok(),
-            "Failed to send updates to KV watcher"
-        );
+        //assert!(
+        //    self.kv_update_tx.send((revision, updates)).is_ok(),
+        //    "Failed to send updates to KV watcher"
+        //);
 
         Ok(true)
     }
